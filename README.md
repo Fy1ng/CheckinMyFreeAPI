@@ -1,6 +1,6 @@
 # AnyRouter 多账号自动签到
 
-用于 AnyRouter 多账号每日签到得 $10。
+用于 Claude Code 镜像池 AnyRouter 多账号每日签到，一次 $10。
 
 ## 功能特性
 
@@ -75,9 +75,9 @@
 }
 ```
 
-#### 格式三：简化格式
+#### 格式三：简化格式（没测试）
 ```
-session=value1,token=value2,user_id=value3|api_user1;session=value4,token=value5,user_id=value6|api_user2
+session=value1|api_user1;session=value4|api_user2
 ```
 
 格式说明：
@@ -85,6 +85,10 @@ session=value1,token=value2,user_id=value3|api_user1;session=value4,token=value5
 - 使用 `|` 分隔 cookies 和 api_user  
 - 使用 `,` 分隔不同的 cookie 键值对
 - 使用 `=` 分隔 cookie 的 key 和 value
+
+通过 F12 工具可获取 cookies 与 api_user 的值。
+
+![获取签到](./assets/request-header.png)
 
 ### 5. 启用 GitHub Actions
 
@@ -100,6 +104,8 @@ session=value1,token=value2,user_id=value3|api_user1;session=value4,token=value5
 1. 在 "Actions" 选项卡中，点击 "AnyRouter 自动签到"
 2. 点击 "Run workflow" 按钮
 3. 确认运行
+
+![运行结果](./assets/check-in.png)
 
 ## 执行时间
 
