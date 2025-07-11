@@ -1,6 +1,6 @@
 # AnyRouter 多账号自动签到
 
-用于 Claude Code 镜像池 AnyRouter 多账号每日签到，一次 $10。
+用于 Claude Code 镜像池 AnyRouter 多账号每日签到，一次 $10，限时注册即送 100 美金，[点击这里注册](https://anyrouter.top/register?aff=gSsN)。
 
 ## 功能特性
 
