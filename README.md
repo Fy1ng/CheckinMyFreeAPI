@@ -45,9 +45,8 @@
 
 ### 4. 多账号配置格式
 
-支持以下几种格式：
+支持单个与多个
 
-#### 格式一：JSON 数组格式 (推荐)
 ```json
 [
   {
@@ -64,27 +63,6 @@
   }
 ]
 ```
-
-#### 格式二：JSON 对象格式 (单账号)
-```json
-{
-  "cookies": {
-    "session": "session_value"
-  },
-  "api_user": "api_user_id"
-}
-```
-
-#### 格式三：简化格式（没测试）
-```
-session=value1|api_user1;session=value4|api_user2
-```
-
-格式说明：
-- 使用 `;` 分隔不同账号
-- 使用 `|` 分隔 cookies 和 api_user  
-- 使用 `,` 分隔不同的 cookie 键值对
-- 使用 `=` 分隔 cookie 的 key 和 value
 
 通过 F12 工具可获取 cookies 与 api_user 的值。
 
@@ -140,6 +118,35 @@ session=value1|api_user1;session=value4|api_user2
 ]
 ```
 
+## 开启通知
+
+脚本支持多种通知方式，可以通过配置以下环境变量开启，如果 `webhook` 有要求安全设置，例如钉钉，可以在新建机器人时选择自定义关键词，填写 `AnyRouter`。
+
+### 邮箱通知
+- `EMAIL_USER`: 发件人邮箱地址
+- `EMAIL_PASS`: 发件人邮箱密码/授权码
+- `EMAIL_TO`: 收件人邮箱地址
+
+### 钉钉机器人
+- `DINGDING_WEBHOOK`: 钉钉机器人的 Webhook 地址
+
+### 飞书机器人
+- `FEISHU_WEBHOOK`: 飞书机器人的 Webhook 地址
+
+### 企业微信机器人
+- `WEIXIN_WEBHOOK`: 企业微信机器人的 Webhook 地址
+
+### PushPlus 推送
+- `PUSHPLUS_TOKEN`: PushPlus 的 Token
+
+### Server酱
+- `SERVERPUSHKEY`: Server酱的 SendKey
+
+配置步骤：
+1. 在仓库的 Settings -> Environments -> production -> Environment secrets 中添加上述环境变量
+2. 每个通知方式都是独立的，可以只配置你需要的推送方式
+3. 如果某个通知方式配置不正确或未配置，脚本会自动跳过该通知方式
+
 ## 故障排除
 
 如果签到失败，请检查：
@@ -150,6 +157,15 @@ session=value1|api_user1;session=value4|api_user2
 4. 网站是否更改了签到接口
 5. 查看 Actions 运行日志获取详细错误信息
 
+## 测试
+
+```python
+uv venv
+.venv\Scripts\activate
+pip install -r requirements-dev.txt
+pytest tests/
+```
+
 ## 免责声明
 
-本脚本仅用于学习和研究目的，使用前请确保遵守相关网站的使用条款。
+本脚本仅用于学习和研究目的，使用前请确保遵守相关网站的使用条款.
