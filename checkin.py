@@ -8,6 +8,7 @@ import sys
 import requests
 from datetime import datetime
 import json
+from notify import notify  # 引入通知模块
 
 
 def load_accounts():
@@ -55,6 +56,27 @@ def parse_cookies(cookies_data):
     return {}
 
 
+def get_user_info(session, headers):
+    """获取用户信息"""
+    try:
+        response = session.get(
+            "https://anyrouter.top/api/user/self",
+            headers=headers,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("success"):
+                user_data = data.get("data", {})
+                quota = round(user_data.get("quota", 0) / 50000, 2)
+                used_quota = round(user_data.get("used_quota", 0) / 50000, 2)
+                return f"💰 当前余额: ${quota}, 已消耗: ${used_quota}"
+    except Exception as e:
+        return f"❌ 获取用户信息失败: {str(e)[:50]}..."
+    return None
+
+
 def check_in_account(account_info, account_index):
     """为单个账号执行签到操作"""
     account_name = f"账号 {account_index + 1}"
@@ -66,13 +88,13 @@ def check_in_account(account_info, account_index):
 
     if not api_user:
         print(f"❌ {account_name}: 未找到 API 用户标识")
-        return False
+        return False, None
 
     # 解析 cookies
     cookies = parse_cookies(cookies_data)
     if not cookies:
         print(f"❌ {account_name}: 配置格式不正确")
-        return False
+        return False, None
 
     # 创建 session
     session = requests.Session()
@@ -93,7 +115,14 @@ def check_in_account(account_info, account_index):
         "new-api-user": api_user,
     }
 
+    user_info_text = None
     try:
+        # 获取用户信息
+        user_info = get_user_info(session, headers)
+        if user_info:
+            print(user_info)
+            user_info_text = user_info
+
         # 执行签到操作
         checkin_url = "https://anyrouter.top/api/user/sign_in"
 
@@ -110,29 +139,29 @@ def check_in_account(account_info, account_index):
                     or result.get("success")
                 ):
                     print(f"✅ {account_name}: 签到成功!")
-                    return True
+                    return True, user_info_text
                 else:
                     error_msg = result.get("msg", result.get("message", "未知错误"))
                     print(f"❌ {account_name}: 签到失败 - {error_msg}")
-                    return False
+                    return False, user_info_text
             except json.JSONDecodeError:
                 # 如果不是 JSON 响应，检查是否包含成功标识
                 if "成功" in response.text or "success" in response.text.lower():
                     print(f"✅ {account_name}: 签到成功!")
-                    return True
+                    return True, user_info_text
                 else:
                     print(f"❌ {account_name}: 签到失败 - 响应格式不正确")
-                    return False
+                    return False, user_info_text
         else:
             print(f"❌ {account_name}: 签到失败 - HTTP {response.status_code}")
-            return False
+            return False, user_info_text
 
     except requests.RequestException as e:
         print(f"❌ {account_name}: 请求失败 - {str(e)[:50]}...")
-        return False
+        return False, user_info_text
     except Exception as e:
         print(f"❌ {account_name}: 签到过程中发生错误 - {str(e)[:50]}...")
-        return False
+        return False, user_info_text
 
 
 def main():
@@ -151,28 +180,49 @@ def main():
     # 为每个账号执行签到
     success_count = 0
     total_count = len(accounts)
+    notification_content = []
 
     for i, account in enumerate(accounts):
         try:
-            if check_in_account(account, i):
+            success, user_info = check_in_account(account, i)
+            if success:
                 success_count += 1
+            # 收集通知内容
+            status = "✅" if success else "❌"
+            account_result = f"{status} 账号 {i+1}"
+            if user_info:
+                account_result += f"\n{user_info}"
+            notification_content.append(account_result)
         except Exception as e:
             print(f"❌ 账号 {i+1} 处理异常: {e}")
+            notification_content.append(f"❌ 账号 {i+1} 异常: {str(e)[:50]}...")
 
-    # 输出总结
-    print(f"\n📊 签到结果统计:")
-    print(f"✅ 成功: {success_count}/{total_count}")
-    print(f"❌ 失败: {total_count - success_count}/{total_count}")
+    # 构建通知内容
+    summary = [
+        "📊 签到结果统计:",
+        f"✅ 成功: {success_count}/{total_count}",
+        f"❌ 失败: {total_count - success_count}/{total_count}"
+    ]
 
     if success_count == total_count:
-        print("🎉 所有账号签到成功!")
-        sys.exit(0)
+        summary.append("🎉 所有账号签到成功!")
     elif success_count > 0:
-        print("⚠️ 部分账号签到成功")
-        sys.exit(0)
+        summary.append("⚠️ 部分账号签到成功")
     else:
-        print("💥 所有账号签到失败")
-        sys.exit(1)
+        summary.append("💥 所有账号签到失败")
+
+    # 发送通知
+    title = "AnyRouter 签到报告"
+    content = "\n\n".join([
+        f"⏰ 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "\n".join(notification_content),
+        "\n".join(summary)
+    ])
+    
+    notify.push_message(title, content)
+
+    # 设置退出码
+    sys.exit(0 if success_count > 0 else 1)
 
 
 if __name__ == "__main__":
