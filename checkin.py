@@ -8,7 +8,8 @@ import sys
 import requests
 from datetime import datetime
 import json
-from notify import notify  # 引入通知模块
+from typing import Union, List, Optional
+from notify import notify
 
 
 def load_accounts():
@@ -56,6 +57,31 @@ def parse_cookies(cookies_data):
     return {}
 
 
+def format_message(message: Union[str, List[str]], use_emoji: bool = True) -> str:
+    """格式化消息，支持 emoji 和纯文本"""
+    emoji_map = {
+        "success": "✅" if use_emoji else "[成功]",
+        "fail": "❌" if use_emoji else "[失败]",
+        "info": "ℹ️" if use_emoji else "[信息]",
+        "warn": "⚠️" if use_emoji else "[警告]",
+        "error": "💥" if use_emoji else "[错误]",
+        "money": "💰" if use_emoji else "[余额]",
+        "time": "⏰" if use_emoji else "[时间]",
+        "stats": "📊" if use_emoji else "[统计]",
+        "start": "🤖" if use_emoji else "[系统]",
+        "loading": "🔄" if use_emoji else "[处理]"
+    }
+    
+    if isinstance(message, str):
+        result = message
+        for key, value in emoji_map.items():
+            result = result.replace(f":{key}:", value)
+        return result
+    elif isinstance(message, list):
+        return "\n".join(format_message(m, use_emoji) for m in message if isinstance(m, str))
+    return ""
+
+
 def get_user_info(session, headers):
     """获取用户信息"""
     try:
@@ -71,9 +97,9 @@ def get_user_info(session, headers):
                 user_data = data.get("data", {})
                 quota = round(user_data.get("quota", 0) / 50000, 2)
                 used_quota = round(user_data.get("used_quota", 0) / 50000, 2)
-                return f"💰 当前余额: ${quota}, 已消耗: ${used_quota}"
+                return f":money: 当前余额: {quota}GB, 已消耗: {used_quota}GB"
     except Exception as e:
-        return f"❌ 获取用户信息失败: {str(e)[:50]}..."
+        return f":fail: 获取用户信息失败: {str(e)[:50]}..."
     return None
 
 
@@ -188,38 +214,51 @@ def main():
             if success:
                 success_count += 1
             # 收集通知内容
-            status = "✅" if success else "❌"
+            status = ":success:" if success else ":fail:"
             account_result = f"{status} 账号 {i+1}"
             if user_info:
                 account_result += f"\n{user_info}"
             notification_content.append(account_result)
         except Exception as e:
             print(f"❌ 账号 {i+1} 处理异常: {e}")
-            notification_content.append(f"❌ 账号 {i+1} 异常: {str(e)[:50]}...")
+            notification_content.append(f":fail: 账号 {i+1} 异常: {str(e)[:50]}...")
 
     # 构建通知内容
     summary = [
-        "📊 签到结果统计:",
-        f"✅ 成功: {success_count}/{total_count}",
-        f"❌ 失败: {total_count - success_count}/{total_count}"
+        ":stats: 签到结果统计:",
+        f":success: 成功: {success_count}/{total_count}",
+        f":fail: 失败: {total_count - success_count}/{total_count}"
     ]
 
     if success_count == total_count:
-        summary.append("🎉 所有账号签到成功!")
+        summary.append(":success: 所有账号签到成功!")
     elif success_count > 0:
-        summary.append("⚠️ 部分账号签到成功")
+        summary.append(":warn: 部分账号签到成功")
     else:
-        summary.append("💥 所有账号签到失败")
+        summary.append(":error: 所有账号签到失败")
 
-    # 发送通知
-    title = "AnyRouter 签到报告"
-    content = "\n\n".join([
-        f"⏰ 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "\n".join(notification_content),
-        "\n".join(summary)
+    # 生成通知内容
+    time_info = f":time: 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    
+    # 控制台输出
+    console_content = "\n".join([
+        format_message(time_info, use_emoji=False),
+        format_message(notification_content, use_emoji=False),
+        format_message(summary, use_emoji=False)
     ])
     
-    notify.push_message(title, content)
+    # 通知内容
+    notify_content = "\n\n".join([
+        format_message(time_info),
+        format_message(notification_content),
+        format_message(summary)
+    ])
+
+    # 输出到控制台
+    print("\n" + console_content)
+    
+    # 发送通知
+    notify.push_message("AnyRouter 签到结果", notify_content, msg_type='text')
 
     # 设置退出码
     sys.exit(0 if success_count > 0 else 1)
