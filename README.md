@@ -45,9 +45,8 @@
 
 ### 4. 多账号配置格式
 
-支持以下几种格式：
+支持单个与多个
 
-#### 格式一：JSON 数组格式 (推荐)
 ```json
 [
   {
@@ -64,27 +63,6 @@
   }
 ]
 ```
-
-#### 格式二：JSON 对象格式 (单账号)
-```json
-{
-  "cookies": {
-    "session": "session_value"
-  },
-  "api_user": "api_user_id"
-}
-```
-
-#### 格式三：简化格式（没测试）
-```
-session=value1|api_user1;session=value4|api_user2
-```
-
-格式说明：
-- 使用 `;` 分隔不同账号
-- 使用 `|` 分隔 cookies 和 api_user  
-- 使用 `,` 分隔不同的 cookie 键值对
-- 使用 `=` 分隔 cookie 的 key 和 value
 
 通过 F12 工具可获取 cookies 与 api_user 的值。
 
