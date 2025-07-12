@@ -128,6 +128,15 @@
 4. 网站是否更改了签到接口
 5. 查看 Actions 运行日志获取详细错误信息
 
+## 测试
+
+```python
+uv venv
+.venv\Scripts\activate
+pip install -r requirements-dev.txt
+pytest tests/
+```
+
 ## 免责声明
 
 本脚本仅用于学习和研究目的，使用前请确保遵守相关网站的使用条款。
