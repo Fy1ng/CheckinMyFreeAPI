@@ -95,9 +95,9 @@ def get_user_info(session, headers):
             data = response.json()
             if data.get("success"):
                 user_data = data.get("data", {})
-                quota = round(user_data.get("quota", 0) / 50000, 2)
-                used_quota = round(user_data.get("used_quota", 0) / 50000, 2)
-                return f":money: 当前余额: {quota}GB, 已消耗: {used_quota}GB"
+                quota = round(user_data.get("quota", 0) / 500000, 2)
+                used_quota = round(user_data.get("used_quota", 0) / 500000, 2)
+                return f":money: 当前余额: ${quota}, 已消耗: ${used_quota}"
     except Exception as e:
         return f":fail: 获取用户信息失败: {str(e)[:50]}..."
     return None

@@ -118,6 +118,35 @@
 ]
 ```
 
+## 开启通知
+
+脚本支持多种通知方式，可以通过配置以下环境变量开启，如果 `webhook` 有要求安全设置，例如钉钉，可以在新建机器人时选择自定义关键词，填写 `AnyRouter`。
+
+### 邮箱通知
+- `EMAIL_USER`: 发件人邮箱地址
+- `EMAIL_PASS`: 发件人邮箱密码/授权码
+- `EMAIL_TO`: 收件人邮箱地址
+
+### 钉钉机器人
+- `DINGDING_WEBHOOK`: 钉钉机器人的 Webhook 地址
+
+### 飞书机器人
+- `FEISHU_WEBHOOK`: 飞书机器人的 Webhook 地址
+
+### 企业微信机器人
+- `WEIXIN_WEBHOOK`: 企业微信机器人的 Webhook 地址
+
+### PushPlus 推送
+- `PUSHPLUS_TOKEN`: PushPlus 的 Token
+
+### Server酱
+- `SERVERPUSHKEY`: Server酱的 SendKey
+
+配置步骤：
+1. 在仓库的 Settings -> Environments -> production -> Environment secrets 中添加上述环境变量
+2. 每个通知方式都是独立的，可以只配置你需要的推送方式
+3. 如果某个通知方式配置不正确或未配置，脚本会自动跳过该通知方式
+
 ## 故障排除
 
 如果签到失败，请检查：
@@ -139,4 +168,4 @@ pytest tests/
 
 ## 免责声明
 
-本脚本仅用于学习和研究目的，使用前请确保遵守相关网站的使用条款。
+本脚本仅用于学习和研究目的，使用前请确保遵守相关网站的使用条款.
