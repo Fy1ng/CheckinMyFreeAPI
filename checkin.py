@@ -17,11 +17,40 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+def safe_print(*args, **kwargs):
+    """安全打印函数，处理编码问题"""
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        # 将 emoji 和特殊字符替换为 ASCII 兼容字符
+        safe_args = []
+        for arg in args:
+            if isinstance(arg, str):
+                # 替换常见的 emoji 字符
+                safe_arg = arg.replace("🤖", "[机器人]")
+                safe_arg = safe_arg.replace("📅", "[时间]")
+                safe_arg = safe_arg.replace("🔄", "[处理]")
+                safe_arg = safe_arg.replace("✅", "[成功]")
+                safe_arg = safe_arg.replace("❌", "[失败]")
+                safe_arg = safe_arg.replace("📋", "[信息]")
+                safe_arg = safe_arg.replace("🔗", "[网络]")
+                safe_arg = safe_arg.replace("📡", "[响应]")
+                safe_arg = safe_arg.replace("💰", "[余额]")
+                safe_arg = safe_arg.replace("⚠️", "[警告]")
+                safe_arg = safe_arg.replace("💥", "[错误]")
+                safe_arg = safe_arg.replace("📊", "[统计]")
+                safe_arg = safe_arg.replace("⏰", "[时间]")
+                safe_arg = safe_arg.replace("ℹ️", "[信息]")
+                safe_args.append(safe_arg)
+            else:
+                safe_args.append(arg)
+        print(*safe_args, **kwargs)
+
 def load_accounts():
     """从环境变量加载多账号配置"""
     accounts_str = os.getenv("ANYROUTER_ACCOUNTS")
     if not accounts_str:
-        print("错误: 未找到 ANYROUTER_ACCOUNTS 环境变量")
+        safe_print("错误: 未找到 ANYROUTER_ACCOUNTS 环境变量")
         return None
 
     try:
@@ -29,21 +58,21 @@ def load_accounts():
 
         # 检查是否为数组格式
         if not isinstance(accounts_data, list):
-            print("错误: 账号配置必须使用数组格式 [{}]")
+            safe_print("错误: 账号配置必须使用数组格式 [{}]")
             return None
 
         # 验证账号数据格式
         for i, account in enumerate(accounts_data):
             if not isinstance(account, dict):
-                print(f"错误: 账号 {i+1} 配置格式不正确")
+                safe_print(f"错误: 账号 {i+1} 配置格式不正确")
                 return None
             if "cookies" not in account or "api_user" not in account:
-                print(f"错误: 账号 {i+1} 缺少必要字段 (cookies, api_user)")
+                safe_print(f"错误: 账号 {i+1} 缺少必要字段 (cookies, api_user)")
                 return None
 
         return accounts_data
     except Exception as e:
-        print(f"错误: 账号配置格式不正确: {e}")
+        safe_print(f"错误: 账号配置格式不正确: {e}")
         return None
 
 
@@ -89,7 +118,7 @@ def format_message(message: Union[str, List[str]], use_emoji: bool = True) -> st
 
 async def get_waf_cookies_with_playwright(account_name: str):
     """使用 Playwright 获取 WAF cookies（隐私模式）"""
-    print(f"🔄 {account_name}: 启动浏览器获取 WAF cookies...")
+    safe_print(f"🔄 {account_name}: 启动浏览器获取 WAF cookies...")
     
     async with async_playwright() as p:
         # 创建浏览器上下文（隐私模式）
@@ -110,7 +139,7 @@ async def get_waf_cookies_with_playwright(account_name: str):
                 ]
             )
         except Exception as e:
-            print(f"❌ {account_name}: 启动有头模式失败，尝试无头模式: {e}")
+            safe_print(f"❌ {account_name}: 启动有头模式失败，尝试无头模式: {e}")
             # 如果有头模式失败，回退到无头模式
             context = await p.chromium.launch_persistent_context(
                 user_data_dir=None,
@@ -130,7 +159,7 @@ async def get_waf_cookies_with_playwright(account_name: str):
         page = await context.new_page()
         
         try:
-            print(f"🔄 {account_name}: 第一步：访问登录页面获取初始 cookies...")
+            safe_print(f"🔄 {account_name}: 第一步：访问登录页面获取初始 cookies...")
             
             # 访问登录页面
             await page.goto("https://anyrouter.top/login", wait_until="networkidle")
@@ -147,11 +176,11 @@ async def get_waf_cookies_with_playwright(account_name: str):
                 if cookie['name'] in ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']:
                     waf_cookies[cookie['name']] = cookie['value']
             
-            print(f"📋 {account_name}: 第一步后获取到 {len(waf_cookies)} 个 WAF cookies")
+            safe_print(f"📋 {account_name}: 第一步后获取到 {len(waf_cookies)} 个 WAF cookies")
             
             # 检查是否需要第二步
             if 'acw_sc__v2' not in waf_cookies:
-                print(f"🔄 {account_name}: 第二步：重新访问页面获取 acw_sc__v2...")
+                safe_print(f"🔄 {account_name}: 第二步：重新访问页面获取 acw_sc__v2...")
                 
                 # 等待一段时间
                 await page.wait_for_timeout(2000)
@@ -170,18 +199,18 @@ async def get_waf_cookies_with_playwright(account_name: str):
                     if cookie['name'] in ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']:
                         waf_cookies[cookie['name']] = cookie['value']
                 
-                print(f"📋 {account_name}: 第二步后获取到 {len(waf_cookies)} 个 WAF cookies")
+                safe_print(f"📋 {account_name}: 第二步后获取到 {len(waf_cookies)} 个 WAF cookies")
             
             # 验证是否获取到所有必要的 cookies
             required_cookies = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
             missing_cookies = [c for c in required_cookies if c not in waf_cookies]
             
             if missing_cookies:
-                print(f"❌ {account_name}: 缺少 WAF cookies: {missing_cookies}")
+                safe_print(f"❌ {account_name}: 缺少 WAF cookies: {missing_cookies}")
                 await context.close()
                 return None
             
-            print(f"✅ {account_name}: 成功获取所有 WAF cookies")
+            safe_print(f"✅ {account_name}: 成功获取所有 WAF cookies")
             
             # 关闭浏览器上下文
             await context.close()
@@ -189,7 +218,7 @@ async def get_waf_cookies_with_playwright(account_name: str):
             return waf_cookies
             
         except Exception as e:
-            print(f"❌ {account_name}: 获取 WAF cookies 过程中发生错误: {e}")
+            safe_print(f"❌ {account_name}: 获取 WAF cookies 过程中发生错误: {e}")
             await context.close()
             return None
 
@@ -218,26 +247,26 @@ def get_user_info(client, headers):
 async def check_in_account(account_info, account_index):
     """为单个账号执行签到操作"""
     account_name = f"账号 {account_index + 1}"
-    print(f"\n🔄 开始处理 {account_name}")
+    safe_print(f"\n🔄 开始处理 {account_name}")
 
     # 解析账号配置
     cookies_data = account_info.get("cookies", {})
     api_user = account_info.get("api_user", "")
 
     if not api_user:
-        print(f"❌ {account_name}: 未找到 API 用户标识")
+        safe_print(f"❌ {account_name}: 未找到 API 用户标识")
         return False, None
 
     # 解析用户 cookies
     user_cookies = parse_cookies(cookies_data)
     if not user_cookies:
-        print(f"❌ {account_name}: 配置格式不正确")
+        safe_print(f"❌ {account_name}: 配置格式不正确")
         return False, None
 
     # 步骤1：获取 WAF cookies
     waf_cookies = await get_waf_cookies_with_playwright(account_name)
     if not waf_cookies:
-        print(f"❌ {account_name}: 无法获取 WAF cookies")
+        safe_print(f"❌ {account_name}: 无法获取 WAF cookies")
         return False, None
 
     # 步骤2：使用 httpx 进行 API 请求
@@ -268,11 +297,11 @@ async def check_in_account(account_info, account_index):
         # 获取用户信息
         user_info = get_user_info(client, headers)
         if user_info:
-            print(user_info)
+            safe_print(user_info)
             user_info_text = user_info
 
         # 执行签到操作
-        print(f"🔗 {account_name}: 正在执行签到")
+        safe_print(f"🔗 {account_name}: 正在执行签到")
         
         # 更新签到请求头
         checkin_headers = headers.copy()
@@ -287,7 +316,7 @@ async def check_in_account(account_info, account_index):
             timeout=30
         )
         
-        print(f"📡 {account_name}: 响应状态码 {response.status_code}")
+        safe_print(f"📡 {account_name}: 响应状态码 {response.status_code}")
 
         if response.status_code == 200:
             try:
@@ -297,26 +326,26 @@ async def check_in_account(account_info, account_index):
                     or result.get("code") == 0
                     or result.get("success")
                 ):
-                    print(f"✅ {account_name}: 签到成功!")
+                    safe_print(f"✅ {account_name}: 签到成功!")
                     return True, user_info_text
                 else:
                     error_msg = result.get("msg", result.get("message", "未知错误"))
-                    print(f"❌ {account_name}: 签到失败 - {error_msg}")
+                    safe_print(f"❌ {account_name}: 签到失败 - {error_msg}")
                     return False, user_info_text
             except json.JSONDecodeError:
                 # 如果不是 JSON 响应，检查是否包含成功标识
                 if "成功" in response.text or "success" in response.text.lower():
-                    print(f"✅ {account_name}: 签到成功!")
+                    safe_print(f"✅ {account_name}: 签到成功!")
                     return True, user_info_text
                 else:
-                    print(f"❌ {account_name}: 签到失败 - 响应格式不正确")
+                    safe_print(f"❌ {account_name}: 签到失败 - 响应格式不正确")
                     return False, user_info_text
         else:
-            print(f"❌ {account_name}: 签到失败 - HTTP {response.status_code}")
+            safe_print(f"❌ {account_name}: 签到失败 - HTTP {response.status_code}")
             return False, user_info_text
 
     except Exception as e:
-        print(f"❌ {account_name}: 签到过程中发生错误 - {str(e)[:50]}...")
+        safe_print(f"❌ {account_name}: 签到过程中发生错误 - {str(e)[:50]}...")
         return False, user_info_text
     finally:
         # 关闭 HTTP 客户端
@@ -325,16 +354,16 @@ async def check_in_account(account_info, account_index):
 
 async def main():
     """主函数"""
-    print(f"🤖 AnyRouter.top 多账号自动签到脚本启动 (使用 Playwright)")
-    print(f"📅 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    safe_print(f"🤖 AnyRouter.top 多账号自动签到脚本启动 (使用 Playwright)")
+    safe_print(f"📅 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     # 加载账号配置
     accounts = load_accounts()
     if not accounts:
-        print("❌ 无法加载账号配置，程序退出")
+        safe_print("❌ 无法加载账号配置，程序退出")
         sys.exit(1)
 
-    print(f"📋 找到 {len(accounts)} 个账号配置")
+    safe_print(f"📋 找到 {len(accounts)} 个账号配置")
 
     # 为每个账号执行签到
     success_count = 0
@@ -353,7 +382,7 @@ async def main():
                 account_result += f"\n{user_info}"
             notification_content.append(account_result)
         except Exception as e:
-            print(f"❌ 账号 {i+1} 处理异常: {e}")
+            safe_print(f"❌ 账号 {i+1} 处理异常: {e}")
             notification_content.append(f":fail: 账号 {i+1} 异常: {str(e)[:50]}...")
 
     # 构建通知内容
@@ -388,7 +417,7 @@ async def main():
     ])
 
     # 输出到控制台
-    print("\n" + console_content)
+    safe_print("\n" + console_content)
     
     # 发送通知
     notify.push_message("AnyRouter 签到结果", notify_content, msg_type='text')
@@ -402,10 +431,10 @@ def run_main():
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n⚠️ 程序被用户中断")
+        safe_print("\n⚠️ 程序被用户中断")
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ 程序执行过程中发生错误: {e}")
+        safe_print(f"\n❌ 程序执行过程中发生错误: {e}")
         sys.exit(1)
 
 
