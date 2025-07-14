@@ -117,14 +117,8 @@ class NotificationKit:
         for name, func in notifications:
             try:
                 func()
-                try:
-                    print(f"[{name}]: 消息推送成功!")
-                except UnicodeEncodeError:
-                    print(f"[{name}]: 消息推送成功!")
+                print(f"[{name}]: 消息推送成功!")
             except Exception as e:
-                try:
-                    print(f"[{name}]: 消息推送失败! 原因: {str(e)}")
-                except UnicodeEncodeError:
-                    print(f"[{name}]: 消息推送失败! 原因: {str(e)}")
+                print(f"[{name}]: 消息推送失败! 原因: {str(e)}")
 
 notify = NotificationKit()
