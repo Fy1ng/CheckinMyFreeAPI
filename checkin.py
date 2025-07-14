@@ -5,12 +5,17 @@ AnyRouter.top 自动签到脚本
 
 import os
 import sys
-import requests
-from datetime import datetime
+import asyncio
 import json
+import time
+import httpx
+from datetime import datetime
 from typing import Union, List, Optional
+from playwright.async_api import async_playwright
 from notify import notify
+from dotenv import load_dotenv
 
+load_dotenv()
 
 def load_accounts():
     """从环境变量加载多账号配置"""
@@ -82,10 +87,99 @@ def format_message(message: Union[str, List[str]], use_emoji: bool = True) -> st
     return ""
 
 
-def get_user_info(session, headers):
+async def get_waf_cookies_with_playwright(account_name: str):
+    """使用 Playwright 获取 WAF cookies（隐私模式）"""
+    print(f"🔄 {account_name}: 启动浏览器获取 WAF cookies...")
+    
+    async with async_playwright() as p:
+        # 创建浏览器上下文（隐私模式）
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=None,  # 使用临时目录，相当于隐私模式
+            headless=True,  # 无头模式运行
+            # 如果需要指定 Chrome 路径，可以取消注释下面这行
+            # executable_path="C:/Program Files/Google/Chrome/Application/chrome.exe",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor'
+            ]
+        )
+        
+        # 创建页面
+        page = await context.new_page()
+        
+        try:
+            print(f"🔄 {account_name}: 第一步：访问登录页面获取初始 cookies...")
+            
+            # 访问登录页面
+            await page.goto("https://anyrouter.top/login", wait_until="networkidle")
+            
+            # 等待页面加载
+            await page.wait_for_timeout(3000)
+            
+            # 获取当前 cookies
+            cookies = await page.context.cookies()
+            
+            # 查找 WAF cookies
+            waf_cookies = {}
+            for cookie in cookies:
+                if cookie['name'] in ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']:
+                    waf_cookies[cookie['name']] = cookie['value']
+            
+            print(f"📋 {account_name}: 第一步后获取到 {len(waf_cookies)} 个 WAF cookies")
+            
+            # 检查是否需要第二步
+            if 'acw_sc__v2' not in waf_cookies:
+                print(f"🔄 {account_name}: 第二步：重新访问页面获取 acw_sc__v2...")
+                
+                # 等待一段时间
+                await page.wait_for_timeout(2000)
+                
+                # 刷新页面或重新访问
+                await page.reload(wait_until="networkidle")
+                
+                # 等待页面加载
+                await page.wait_for_timeout(3000)
+                
+                # 再次获取 cookies
+                cookies = await page.context.cookies()
+                
+                # 更新 WAF cookies
+                for cookie in cookies:
+                    if cookie['name'] in ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']:
+                        waf_cookies[cookie['name']] = cookie['value']
+                
+                print(f"📋 {account_name}: 第二步后获取到 {len(waf_cookies)} 个 WAF cookies")
+            
+            # 验证是否获取到所有必要的 cookies
+            required_cookies = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
+            missing_cookies = [c for c in required_cookies if c not in waf_cookies]
+            
+            if missing_cookies:
+                print(f"❌ {account_name}: 缺少 WAF cookies: {missing_cookies}")
+                await context.close()
+                return None
+            
+            print(f"✅ {account_name}: 成功获取所有 WAF cookies")
+            
+            # 关闭浏览器上下文
+            await context.close()
+            
+            return waf_cookies
+            
+        except Exception as e:
+            print(f"❌ {account_name}: 获取 WAF cookies 过程中发生错误: {e}")
+            await context.close()
+            return None
+
+
+def get_user_info(client, headers):
     """获取用户信息"""
     try:
-        response = session.get(
+        response = client.get(
             "https://anyrouter.top/api/user/self",
             headers=headers,
             timeout=30
@@ -103,7 +197,7 @@ def get_user_info(session, headers):
     return None
 
 
-def check_in_account(account_info, account_index):
+async def check_in_account(account_info, account_index):
     """为单个账号执行签到操作"""
     account_name = f"账号 {account_index + 1}"
     print(f"\n🔄 开始处理 {account_name}")
@@ -116,44 +210,65 @@ def check_in_account(account_info, account_index):
         print(f"❌ {account_name}: 未找到 API 用户标识")
         return False, None
 
-    # 解析 cookies
-    cookies = parse_cookies(cookies_data)
-    if not cookies:
+    # 解析用户 cookies
+    user_cookies = parse_cookies(cookies_data)
+    if not user_cookies:
         print(f"❌ {account_name}: 配置格式不正确")
         return False, None
 
-    # 创建 session
-    session = requests.Session()
-    session.cookies.update(cookies)
+    # 步骤1：获取 WAF cookies
+    waf_cookies = await get_waf_cookies_with_playwright(account_name)
+    if not waf_cookies:
+        print(f"❌ {account_name}: 无法获取 WAF cookies")
+        return False, None
 
-    # 设置请求头
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": "https://anyrouter.top/console",
-        "Origin": "https://anyrouter.top",
-        "Connection": "keep-alive",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "new-api-user": api_user,
-    }
-
-    user_info_text = None
+    # 步骤2：使用 httpx 进行 API 请求
+    client = httpx.Client(http2=True, timeout=30.0)
+    
     try:
+        # 合并 WAF cookies 和用户 cookies
+        all_cookies = {**waf_cookies, **user_cookies}
+        client.cookies.update(all_cookies)
+
+        # 设置请求头
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Referer": "https://anyrouter.top/console",
+            "Origin": "https://anyrouter.top",
+            "Connection": "keep-alive",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "new-api-user": api_user,
+        }
+
+        user_info_text = None
+        
         # 获取用户信息
-        user_info = get_user_info(session, headers)
+        user_info = get_user_info(client, headers)
         if user_info:
             print(user_info)
             user_info_text = user_info
 
         # 执行签到操作
-        checkin_url = "https://anyrouter.top/api/user/sign_in"
-
         print(f"🔗 {account_name}: 正在执行签到")
-        response = session.post(checkin_url, headers=headers, timeout=30)
+        
+        # 更新签到请求头
+        checkin_headers = headers.copy()
+        checkin_headers.update({
+            "Content-Type": "application/json",
+            "X-Requested-With": "XMLHttpRequest"
+        })
+        
+        response = client.post(
+            "https://anyrouter.top/api/user/sign_in",
+            headers=checkin_headers,
+            timeout=30
+        )
+        
         print(f"📡 {account_name}: 响应状态码 {response.status_code}")
 
         if response.status_code == 200:
@@ -182,17 +297,17 @@ def check_in_account(account_info, account_index):
             print(f"❌ {account_name}: 签到失败 - HTTP {response.status_code}")
             return False, user_info_text
 
-    except requests.RequestException as e:
-        print(f"❌ {account_name}: 请求失败 - {str(e)[:50]}...")
-        return False, user_info_text
     except Exception as e:
         print(f"❌ {account_name}: 签到过程中发生错误 - {str(e)[:50]}...")
         return False, user_info_text
+    finally:
+        # 关闭 HTTP 客户端
+        client.close()
 
 
-def main():
+async def main():
     """主函数"""
-    print(f"🤖 AnyRouter.top 多账号自动签到脚本启动")
+    print(f"🤖 AnyRouter.top 多账号自动签到脚本启动 (使用 Playwright)")
     print(f"📅 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     # 加载账号配置
@@ -210,7 +325,7 @@ def main():
 
     for i, account in enumerate(accounts):
         try:
-            success, user_info = check_in_account(account, i)
+            success, user_info = await check_in_account(account, i)
             if success:
                 success_count += 1
             # 收集通知内容
@@ -264,5 +379,17 @@ def main():
     sys.exit(0 if success_count > 0 else 1)
 
 
+def run_main():
+    """运行主函数的包装函数"""
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n⚠️ 程序被用户中断")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ 程序执行过程中发生错误: {e}")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    main()
+    run_main()

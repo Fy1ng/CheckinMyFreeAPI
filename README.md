@@ -8,6 +8,7 @@
 
 - ✅ 单个/多账号自动签到
 - ✅ 多种机器人通知（可选）
+- ✅ 绕过 WAF 限制
 
 ## 使用方法
 
@@ -15,7 +16,35 @@
 
 点击右上角的 "Fork" 按钮，将本仓库 fork 到你的账户。
 
-### 2. 获取账号信息
+### 2. 本地开发环境设置（可选）
+
+如果你需要在本地测试或开发，请按照以下步骤设置：
+
+#### 安装依赖
+```bash
+# 使用 uv 管理 Python 项目
+uv venv
+.venv\Scripts\activate  # Windows
+# 或
+source .venv/bin/activate  # Linux/Mac
+
+# 安装 Python 依赖
+uv pip install -r requirements.txt
+
+# 安装 Playwright 浏览器
+playwright install chromium
+```
+
+#### 配置浏览器路径（可选）
+如果你希望使用本地的 Chrome 浏览器而不是下载 Chromium，可以在 `checkin.py` 中取消注释并配置：
+
+```python
+# executable_path="C:/Program Files/Google/Chrome/Application/chrome.exe"
+```
+
+**注意**: GitHub Actions 环境中会自动处理浏览器安装，无需手动配置。
+
+### 3. 获取账号信息
 
 对于每个需要签到的账号，你需要获取：
 1. **Cookies**: 用于身份验证
@@ -32,7 +61,7 @@
 #### 获取 API User：
 通常在网站的用户设置或 API 设置中可以找到，每个账号都有唯一的标识。
 
-### 3. 设置 GitHub Environment Secret
+### 4. 设置 GitHub Environment Secret
 
 1. 在你 fork 的仓库中，点击 "Settings" 选项卡
 2. 在左侧菜单中找到 "Environments" -> "New environment"
@@ -42,7 +71,7 @@
    - Name: `ANYROUTER_ACCOUNTS`
    - Value: 你的多账号配置数据
 
-### 4. 多账号配置格式
+### 5. 多账号配置格式
 
 支持单个与多个
 
@@ -67,14 +96,14 @@
 
 ![获取签到](./assets/request-header.png)
 
-### 5. 启用 GitHub Actions
+### 6. 启用 GitHub Actions
 
 1. 在你的仓库中，点击 "Actions" 选项卡
 2. 如果提示启用 Actions，请点击启用
 3. 找到 "AnyRouter 自动签到" workflow
 4. 点击 "Enable workflow"
 
-### 6. 测试运行
+### 7. 测试运行
 
 你可以手动触发一次签到来测试：
 
@@ -158,10 +187,22 @@
 
 ## 测试
 
-```python
+```bash
+# 创建虚拟环境
 uv venv
-.venv\Scripts\activate
-pip install -r requirements-dev.txt
+
+# 激活虚拟环境
+.venv\Scripts\activate  # Windows
+# 或
+source .venv/bin/activate  # Linux/Mac
+
+# 安装开发依赖
+uv pip install -r requirements-dev.txt
+
+# 安装 Playwright 浏览器
+playwright install chromium
+
+# 运行测试
 pytest tests/
 ```
 
