@@ -7,7 +7,7 @@ on:
   
 jobs:
   checkin:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     environment: production
 
     steps:
@@ -27,6 +27,7 @@ jobs:
     - name: 安装 Playwright 浏览器
       run: |
         playwright install chromium
+        playwright install-deps
         
     - name: 执行签到
       env:
@@ -46,4 +47,4 @@ jobs:
       if: always()
       run: |
         echo "签到任务执行完成"
-        echo "时间: $(date)"
+        echo "时间: $(Get-Date)"

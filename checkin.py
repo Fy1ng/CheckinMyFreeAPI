@@ -93,20 +93,38 @@ async def get_waf_cookies_with_playwright(account_name: str):
     
     async with async_playwright() as p:
         # 创建浏览器上下文（隐私模式）
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=None,  # 使用临时目录，相当于隐私模式
-            headless=True,  # 无头模式运行
-            # 如果需要指定 Chrome 路径，可以取消注释下面这行
-            # executable_path="C:/Program Files/Google/Chrome/Application/chrome.exe",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor'
-            ]
-        )
+        try:
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir=None,  # 使用临时目录，相当于隐私模式
+                headless=False,  # 有头模式运行
+                # 如果需要指定 Chrome 路径，可以取消注释下面这行
+                # executable_path="C:/Program Files/Google/Chrome/Application/chrome.exe",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+                viewport={"width": 1920, "height": 1080},
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage',
+                    '--disable-web-security',
+                    '--disable-features=VizDisplayCompositor',
+                    '--no-sandbox'  # 在 CI 环境中可能需要
+                ]
+            )
+        except Exception as e:
+            print(f"❌ {account_name}: 启动有头模式失败，尝试无头模式: {e}")
+            # 如果有头模式失败，回退到无头模式
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir=None,
+                headless=True,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+                viewport={"width": 1920, "height": 1080},
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage',
+                    '--disable-web-security',
+                    '--disable-features=VizDisplayCompositor',
+                    '--no-sandbox'
+                ]
+            )
         
         # 创建页面
         page = await context.new_page()
