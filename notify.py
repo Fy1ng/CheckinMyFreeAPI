@@ -19,10 +19,10 @@ class NotificationKit:
 
     def send_email(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text'):
         if not self.email_user or not self.email_pass or not self.email_to:
-            raise ValueError("未配置邮箱信息")
+            raise ValueError("Email configuration not set")
 
         msg = MIMEMultipart()
-        msg['From'] = f'AnyRouter助手 <{self.email_user}>'
+        msg['From'] = f'AnyRouter Assistant <{self.email_user}>'
         msg['To'] = self.email_to
         msg['Subject'] = title
 
@@ -36,7 +36,7 @@ class NotificationKit:
 
     def send_pushplus(self, title: str, content: str):
         if not self.pushplus_token:
-            raise ValueError("未配置 PushPlus Token")
+            raise ValueError("PushPlus Token not configured")
 
         data = {
             "token": self.pushplus_token,
@@ -49,7 +49,7 @@ class NotificationKit:
 
     def send_serverPush(self, title: str, content: str):
         if not self.server_push_key:
-            raise ValueError("未配置 Server 酱 key")
+            raise ValueError("Server Push key not configured")
 
         data = {
             "title": title,
@@ -60,7 +60,7 @@ class NotificationKit:
 
     def send_dingtalk(self, title: str, content: str):
         if not self.dingding_webhook:
-            raise ValueError("未配置钉钉Webhook")
+            raise ValueError("DingTalk Webhook not configured")
 
         data = {
             "msgtype": "text",
@@ -71,7 +71,7 @@ class NotificationKit:
 
     def send_feishu(self, title: str, content: str):
         if not self.feishu_webhook:
-            raise ValueError("未配置飞书Webhook")
+            raise ValueError("Feishu Webhook not configured")
 
         data = {
             "msg_type": "interactive",
@@ -95,7 +95,7 @@ class NotificationKit:
 
     def send_wecom(self, title: str, content: str):
         if not self.weixin_webhook:
-            raise ValueError("未配置企业微信Webhook")
+            raise ValueError("WeChat Work Webhook not configured")
 
         data = {
             "msgtype": "text",
@@ -106,19 +106,19 @@ class NotificationKit:
 
     def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text'):
         notifications = [
-            ('邮件', lambda: self.send_email(title, content, msg_type)),
+            ('Email', lambda: self.send_email(title, content, msg_type)),
             ('PushPlus', lambda: self.send_pushplus(title, content)),
-            ('Server 酱', lambda: self.send_serverPush(title, content)),
-            ('钉钉', lambda: self.send_dingtalk(title, content)),
-            ('飞书', lambda: self.send_feishu(title, content)),
-            ('企业微信', lambda: self.send_wecom(title, content)),
+            ('Server Push', lambda: self.send_serverPush(title, content)),
+            ('DingTalk', lambda: self.send_dingtalk(title, content)),
+            ('Feishu', lambda: self.send_feishu(title, content)),
+            ('WeChat Work', lambda: self.send_wecom(title, content)),
         ]
 
         for name, func in notifications:
             try:
                 func()
-                print(f"[{name}]: 消息推送成功!")
+                print(f"[{name}]: Message push successful!")
             except Exception as e:
-                print(f"[{name}]: 消息推送失败! 原因: {str(e)}")
+                print(f"[{name}]: Message push failed! Reason: {str(e)}")
 
 notify = NotificationKit()
