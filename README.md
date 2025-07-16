@@ -2,7 +2,7 @@
 
 **维护开源不易，如果本项目帮助到了你，请帮忙点个 Star，谢谢!**
 
-用于 Claude Code 中转站 Any Router 多账号每日签到，一次 $10，限时注册即送 100 美金，[点击这里注册](https://anyrouter.top/register?aff=gSsN)。
+用于 Claude Code 中转站 Any Router 多账号每日签到，一次 $25，限时注册即送 100 美金，[点击这里注册](https://anyrouter.top/register?aff=gSsN)。
 
 ## 功能特性
 
@@ -93,9 +93,10 @@
 ## 注意事项
 
 - 请确保每个账号的 cookies 和 API User 都是正确的
-- 如果部分账号签到失败，请检查对应账号的配置
 - 可以在 Actions 页面查看详细的运行日志
 - 支持部分账号失败，只要有账号成功签到，整个任务就不会失败
+- 报 401 错误，请重新获取 cookies，理论 1 个月失效，但有 Bug，详见 #6
+- 请求 200，但出现 Error 1040（08004）：Too many connections，官方数据库问题，目前已修复，但遇到几次了，详见 #7
 
 ## 配置示例
 
