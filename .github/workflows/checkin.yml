@@ -1,5 +1,4 @@
 name: AnyRouter 自动签到
-
 on:
   schedule:
     - cron: '0 */6 * * *'
@@ -9,7 +8,6 @@ jobs:
   checkin:
     runs-on: windows-latest
     environment: production
-
     steps:
     - name: 检出代码
       uses: actions/checkout@v4
@@ -19,12 +17,32 @@ jobs:
       with:
         python-version: '3.11'
         
+    # 缓存 pip 依赖
+    - name: 缓存 pip 依赖
+      uses: actions/cache@v4
+      with:
+        path: ~\AppData\Local\pip\Cache
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
     - name: 安装依赖
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         
+    # 缓存 Playwright 浏览器
+    - name: 缓存 Playwright 浏览器
+      uses: actions/cache@v4
+      id: playwright-cache
+      with:
+        path: ~\AppData\Local\ms-playwright
+        key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-playwright-
+          
     - name: 安装 Playwright 浏览器
+      if: steps.playwright-cache.outputs.cache-hit != 'true'
       run: |
         playwright install chromium
         playwright install-deps
