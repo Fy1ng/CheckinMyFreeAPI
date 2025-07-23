@@ -35,7 +35,9 @@ jobs:
     - name: 获取 Playwright 版本
       id: playwright-version
       run: |
-        $version = python -c "import playwright; print(playwright.__version__)"
+        $version = python -c "import playwright; print(playwright.__version__ if hasattr(playwright, '__version__') else '1.0.0')"
+        if (!$version) { $version = pip show playwright | Select-String "Version:" | ForEach-Object { $_.ToString().Split(":")[1].Trim() } }
+        if (!$version) { $version = "unknown" }
         echo "version=$version" >> $env:GITHUB_OUTPUT
         
     - name: 缓存 Playwright 浏览器
