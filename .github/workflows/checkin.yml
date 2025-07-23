@@ -42,10 +42,9 @@ jobs:
           ${{ runner.os }}-playwright-
           
     - name: 安装 Playwright 浏览器
-      if: steps.playwright-cache.outputs.cache-hit != 'true'
       run: |
-        playwright install chromium
-        playwright install-deps
+        python -m playwright install chromium
+        python -m playwright install-deps
         
     - name: 执行签到
       env:
