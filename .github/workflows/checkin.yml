@@ -32,19 +32,29 @@ jobs:
         pip install -r requirements.txt
         
     # 缓存 Playwright 浏览器
+    - name: 获取 Playwright 版本
+      id: playwright-version
+      run: |
+        $version = python -c "import playwright; print(playwright.__version__)"
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        
     - name: 缓存 Playwright 浏览器
       uses: actions/cache@v4
       id: playwright-cache
       with:
         path: ~\AppData\Local\ms-playwright
-        key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
+        key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
         restore-keys: |
           ${{ runner.os }}-playwright-
           
     - name: 安装 Playwright 浏览器
+      if: steps.playwright-cache.outputs.cache-hit != 'true'
       run: |
         python -m playwright install chromium
-        python -m playwright install-deps
+        
+    - name: 验证 Playwright 浏览器
+      run: |
+        python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); browser = p.chromium.launch(); browser.close(); p.stop(); print('Playwright验证成功')"
         
     - name: 执行签到
       env:
