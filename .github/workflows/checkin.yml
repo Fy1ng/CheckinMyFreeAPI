@@ -55,6 +55,8 @@ jobs:
         python -m playwright install chromium
         
     - name: 验证 Playwright 浏览器
+      env:
+        PYTHONIOENCODING: utf-8
       run: |
         python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); browser = p.chromium.launch(); browser.close(); p.stop(); print('Playwright验证成功')"
         
