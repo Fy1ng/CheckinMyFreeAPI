@@ -8,6 +8,8 @@ jobs:
   checkin:
     runs-on: windows-latest
     environment: production
+    env:
+      PYTHONIOENCODING: utf-8
     steps:
     - name: 检出代码
       uses: actions/checkout@v4
@@ -50,11 +52,10 @@ jobs:
 
     - name: 验证 Playwright 安装
       run: |
-        uv run python -c "from playwright.sync_api import sync_playwright; print('✅ Playwright 可用')"
+        uv run python -c "from playwright.sync_api import sync_playwright; print('Playwright 可用')"
 
     - name: 执行签到
       env:
-        PYTHONIOENCODING: utf-8
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
         EMAIL_USER: ${{ secrets.EMAIL_USER }}
