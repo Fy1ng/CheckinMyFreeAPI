@@ -1,5 +1,7 @@
 # Any Router 多账号自动签到
 
+推荐搭配使用[Auo](https://github.com/millylee/auo)，支持任意 Claude Code Token 切换的工具。
+
 **维护开源不易，如果本项目帮助到了你，请帮忙点个 Star，谢谢!**
 
 用于 Claude Code 中转站 Any Router 多账号每日签到，一次 $25，限时注册即送 100 美金，[点击这里注册](https://anyrouter.top/register?aff=gSsN)。
@@ -163,43 +165,26 @@
 如果你需要在本地测试或开发，请按照以下步骤设置：
 
 ```bash
-# 使用 uv 管理 Python 项目
-uv venv
-
-.venv\Scripts\activate  # Windows
-# 或
-source .venv/bin/activate  # Linux/Mac
-
-# 安装 Python 依赖
-uv pip install -r requirements.txt
+# 安装所有依赖
+uv sync --dev
 
 # 安装 Playwright 浏览器
 playwright install chromium
 
 # 按 .env.example 创建 .env
-python checkin.py
+uv run checkin.py
 ```
-
 
 ## 测试
 
 ```bash
-# 创建虚拟环境
-uv venv
-
-# 激活虚拟环境
-.venv\Scripts\activate  # Windows
-# 或
-source .venv/bin/activate  # Linux/Mac
-
-# 安装开发依赖
-uv pip install -r requirements-dev.txt
+uv sync --dev
 
 # 安装 Playwright 浏览器
 playwright install chromium
 
 # 运行测试
-pytest tests/
+uv run pytest tests/
 ```
 
 ## 免责声明

@@ -1,0 +1,24 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-toml
+      - id: check-yaml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-illegal-windows-names
+      - id: check-case-conflict
+      - id: check-added-large-files
+      - id: check-shebang-scripts-are-executable
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      - id: detect-private-key
+      - id: mixed-line-ending
+      - id: fix-byte-order-marker
+      
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+      - id: ruff-format
