@@ -68,7 +68,7 @@
 
 接下来获取 cookies 与 api_user 的值。
 
-通过 F12 工具，切到 Application 面板，拿到 session 的值，这好点退出重新登录下，该值 1 个月有效期，但有可能提前失效，失效后报 401 错误，到时请再重新获取。
+通过 F12 工具，切到 Application 面板，拿到 session 的值，最好重新登录下，该值 1 个月有效期，但有可能提前失效，失效后报 401 错误，到时请再重新获取。
 
 ![获取 cookies](./assets/request-session.png)
 
