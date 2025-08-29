@@ -66,9 +66,15 @@
 ]
 ```
 
-通过 F12 工具可获取 cookies 与 api_user 的值。
+接下来获取 cookies 与 api_user 的值。
 
-![获取签到](./assets/request-header.png)
+通过 F12 工具，切到 Application 面板，拿到 session 的值，这好点退出重新登录下，该值 1 个月有效期，但有可能提前失效，失效后报 401 错误，到时请再重新获取。
+
+![获取 cookies](./assets/request-session.png)
+
+通过 F12 工具，切到 Network 面板，可以过滤下，只要 Fetch/XHR，找到带 `New-Api-User`，这个值正常是 5 位数，如果是负数或者个位数，正常是未登录。
+
+![获取 api_user](./assets/request-api-user.png)
 
 ### 5. 启用 GitHub Actions
 
