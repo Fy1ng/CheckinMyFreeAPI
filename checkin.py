@@ -8,7 +8,6 @@ import json
 import os
 import sys
 from datetime import datetime
-from typing import List, Union
 
 import httpx
 from dotenv import load_dotenv
@@ -62,31 +61,6 @@ def parse_cookies(cookies_data):
 				cookies_dict[key] = value
 		return cookies_dict
 	return {}
-
-
-def format_message(message: Union[str, List[str]], use_emoji: bool = False) -> str:
-	"""格式化消息，支持 emoji 和纯文本"""
-	emoji_map = {
-		'success': '✅' if use_emoji else '[SUCCESS]',
-		'fail': '❌' if use_emoji else '[FAILED]',
-		'info': 'ℹ️' if use_emoji else '[INFO]',
-		'warn': '⚠️' if use_emoji else '[WARNING]',
-		'error': '💥' if use_emoji else '[ERROR]',
-		'money': '💰' if use_emoji else '[BALANCE]',
-		'time': '⏰' if use_emoji else '[TIME]',
-		'stats': '📊' if use_emoji else '[STATS]',
-		'start': '🤖' if use_emoji else '[SYSTEM]',
-		'loading': '🔄' if use_emoji else '[PROCESSING]',
-	}
-
-	if isinstance(message, str):
-		result = message
-		for key, value in emoji_map.items():
-			result = result.replace(f':{key}:', value)
-		return result
-	elif isinstance(message, list):
-		return '\n'.join(format_message(m, use_emoji) for m in message if isinstance(m, str))
-	return ''
 
 
 async def get_waf_cookies_with_playwright(account_name: str):
@@ -162,7 +136,7 @@ def get_user_info(client, headers):
 				used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
 				return f':money: Current balance: ${quota}, Used: ${used_quota}'
 	except Exception as e:
-		return f':fail: Failed to get user info: {str(e)[:50]}...'
+		return f'[FAIL] Failed to get user info: {str(e)[:50]}...'
 	return None
 
 
@@ -199,7 +173,6 @@ async def check_in_account(account_info, account_index):
 		all_cookies = {**waf_cookies, **user_cookies}
 		client.cookies.update(all_cookies)
 
-		# 设置请求头
 		headers = {
 			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
 			'Accept': 'application/json, text/plain, */*',
@@ -216,13 +189,11 @@ async def check_in_account(account_info, account_index):
 
 		user_info_text = None
 
-		# 获取用户信息
 		user_info = get_user_info(client, headers)
 		if user_info:
 			print(user_info)
 			user_info_text = user_info
 
-		# 执行签到操作
 		print(f'[NETWORK] {account_name}: Executing check-in')
 
 		# 更新签到请求头
@@ -286,50 +257,35 @@ async def main():
 			if success:
 				success_count += 1
 			# 收集通知内容
-			status = ':success:' if success else ':fail:'
+			status = '[SUCCESS]' if success else '[FAIL]'
 			account_result = f'{status} Account {i + 1}'
 			if user_info:
 				account_result += f'\n{user_info}'
 			notification_content.append(account_result)
 		except Exception as e:
 			print(f'[FAILED] Account {i + 1} processing exception: {e}')
-			notification_content.append(f':fail: Account {i + 1} exception: {str(e)[:50]}...')
+			notification_content.append(f'[FAIL] Account {i + 1} exception: {str(e)[:50]}...')
 
 	# 构建通知内容
 	summary = [
-		':stats: Check-in result statistics:',
-		f':success: Success: {success_count}/{total_count}',
-		f':fail: Failed: {total_count - success_count}/{total_count}',
+		'[STATS] Check-in result statistics:',
+		f'[SUCCESS] Success: {success_count}/{total_count}',
+		f'[FAIL] Failed: {total_count - success_count}/{total_count}',
 	]
 
 	if success_count == total_count:
-		summary.append(':success: All accounts check-in successful!')
+		summary.append('[SUCCESS] All accounts check-in successful!')
 	elif success_count > 0:
-		summary.append(':warn: Some accounts check-in successful')
+		summary.append('[WARN] Some accounts check-in successful')
 	else:
-		summary.append(':error: All accounts check-in failed')
+		summary.append('[ERROR] All accounts check-in failed')
 
-	# 生成通知内容
-	time_info = f':time: Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+	time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
 
-	# 控制台输出
-	console_content = '\n'.join(
-		[
-			format_message(time_info, use_emoji=False),
-			format_message(notification_content, use_emoji=False),
-			format_message(summary, use_emoji=False),
-		]
-	)
+	notify_content = '\n\n'.join([time_info, notification_content, summary])
 
-	# 通知内容
-	notify_content = '\n\n'.join(
-		[format_message(time_info), format_message(notification_content), format_message(summary)]
-	)
+	print(notify_content)
 
-	# 输出到控制台
-	print('\n' + console_content)
-
-	# 发送通知
 	notify.push_message('AnyRouter Check-in Results', notify_content, msg_type='text')
 
 	# 设置退出码
