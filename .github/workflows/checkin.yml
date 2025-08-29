@@ -11,8 +11,7 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
     steps:
-    - name: 初始化
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
     - uses: astral-sh/setup-uv@v3
       with:
@@ -22,7 +21,11 @@ jobs:
       with:
         python-version: '3.11'
 
-    - run: uv sync
+    - name: 安装依赖
+      run: |
+        echo "正在安装项目依赖..."
+        uv sync
+        echo "✅ 环境初始化完成"
 
     - name: 获取 Playwright 版本
       id: playwright-version
