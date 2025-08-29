@@ -94,56 +94,34 @@ async def get_waf_cookies_with_playwright(account_name: str):
 	print(f'[PROCESSING] {account_name}: Starting browser to get WAF cookies...')
 
 	async with async_playwright() as p:
-		# 创建浏览器上下文（隐私模式）
-		try:
-			context = await p.chromium.launch_persistent_context(
-				user_data_dir=None,  # 使用临时目录，相当于隐私模式
-				headless=False,  # 有头模式运行
-				# 如果需要指定 Chrome 路径，可以取消注释下面这行
-				# executable_path="C:/Program Files/Google/Chrome/Application/chrome.exe",
-				user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-				viewport={'width': 1920, 'height': 1080},
-				args=[
-					'--disable-blink-features=AutomationControlled',
-					'--disable-dev-shm-usage',
-					'--disable-web-security',
-					'--disable-features=VizDisplayCompositor',
-					'--no-sandbox',  # 在 CI 环境中可能需要
-				],
-			)
-		except Exception as e:
-			print(f'[FAILED] {account_name}: Failed to start headed mode, trying headless mode: {e}')
-			# 如果有头模式失败，回退到无头模式
-			context = await p.chromium.launch_persistent_context(
-				user_data_dir=None,
-				headless=True,
-				user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-				viewport={'width': 1920, 'height': 1080},
-				args=[
-					'--disable-blink-features=AutomationControlled',
-					'--disable-dev-shm-usage',
-					'--disable-web-security',
-					'--disable-features=VizDisplayCompositor',
-					'--no-sandbox',
-				],
-			)
+		context = await p.chromium.launch_persistent_context(
+			user_data_dir=None,
+			headless=False,
+			user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+			viewport={'width': 1920, 'height': 1080},
+			args=[
+				'--disable-blink-features=AutomationControlled',
+				'--disable-dev-shm-usage',
+				'--disable-web-security',
+				'--disable-features=VizDisplayCompositor',
+				'--no-sandbox',
+			],
+		)
 
-		# 创建页面
 		page = await context.new_page()
 
 		try:
 			print(f'[PROCESSING] {account_name}: Step 1: Access login page to get initial cookies...')
 
-			# 访问登录页面
 			await page.goto('https://anyrouter.top/login', wait_until='networkidle')
 
-			# 等待页面加载
-			await page.wait_for_timeout(3000)
+			try:
+				await page.wait_for_function('document.readyState === "complete"', timeout=5000)
+			except Exception:
+				await page.wait_for_timeout(3000)
 
-			# 获取当前 cookies
 			cookies = await page.context.cookies()
 
-			# 查找 WAF cookies
 			waf_cookies = {}
 			for cookie in cookies:
 				if cookie['name'] in ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']:
@@ -151,30 +129,6 @@ async def get_waf_cookies_with_playwright(account_name: str):
 
 			print(f'[INFO] {account_name}: Got {len(waf_cookies)} WAF cookies after step 1')
 
-			# 检查是否需要第二步
-			if 'acw_sc__v2' not in waf_cookies:
-				print(f'[PROCESSING] {account_name}: Step 2: Re-access page to get acw_sc__v2...')
-
-				# 等待一段时间
-				await page.wait_for_timeout(2000)
-
-				# 刷新页面或重新访问
-				await page.reload(wait_until='networkidle')
-
-				# 等待页面加载
-				await page.wait_for_timeout(3000)
-
-				# 再次获取 cookies
-				cookies = await page.context.cookies()
-
-				# 更新 WAF cookies
-				for cookie in cookies:
-					if cookie['name'] in ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']:
-						waf_cookies[cookie['name']] = cookie['value']
-
-				print(f'[INFO] {account_name}: Got {len(waf_cookies)} WAF cookies after step 2')
-
-			# 验证是否获取到所有必要的 cookies
 			required_cookies = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
 			missing_cookies = [c for c in required_cookies if c not in waf_cookies]
 
@@ -185,7 +139,6 @@ async def get_waf_cookies_with_playwright(account_name: str):
 
 			print(f'[SUCCESS] {account_name}: Successfully got all WAF cookies')
 
-			# 关闭浏览器上下文
 			await context.close()
 
 			return waf_cookies
@@ -306,7 +259,6 @@ async def check_in_account(account_info, account_index):
 		print(f'[FAILED] {account_name}: Error occurred during check-in process - {str(e)[:50]}...')
 		return False, user_info_text
 	finally:
-		# 关闭 HTTP 客户端
 		client.close()
 
 
