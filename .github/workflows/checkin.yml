@@ -27,7 +27,7 @@ jobs:
     - name: 获取 Playwright 版本
       id: playwright-version
       run: |
-        $version = uv run python -c "import playwright; print(playwright.__version__)"
+        $version = uv run python -c "import importlib.metadata; print(importlib.metadata.version('playwright'))"
         echo "version=$version" >> $env:GITHUB_OUTPUT
         echo "Playwright version: $version"
 
