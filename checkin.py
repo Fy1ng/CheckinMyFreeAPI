@@ -8,7 +8,6 @@ import json
 import os
 import sys
 from datetime import datetime
-from typing import List, Union
 
 import httpx
 from dotenv import load_dotenv
@@ -64,86 +63,39 @@ def parse_cookies(cookies_data):
 	return {}
 
 
-def format_message(message: Union[str, List[str]], use_emoji: bool = False) -> str:
-	"""格式化消息，支持 emoji 和纯文本"""
-	emoji_map = {
-		'success': '✅' if use_emoji else '[SUCCESS]',
-		'fail': '❌' if use_emoji else '[FAILED]',
-		'info': 'ℹ️' if use_emoji else '[INFO]',
-		'warn': '⚠️' if use_emoji else '[WARNING]',
-		'error': '💥' if use_emoji else '[ERROR]',
-		'money': '💰' if use_emoji else '[BALANCE]',
-		'time': '⏰' if use_emoji else '[TIME]',
-		'stats': '📊' if use_emoji else '[STATS]',
-		'start': '🤖' if use_emoji else '[SYSTEM]',
-		'loading': '🔄' if use_emoji else '[PROCESSING]',
-	}
-
-	if isinstance(message, str):
-		result = message
-		for key, value in emoji_map.items():
-			result = result.replace(f':{key}:', value)
-		return result
-	elif isinstance(message, list):
-		return '\n'.join(format_message(m, use_emoji) for m in message if isinstance(m, str))
-	return ''
-
-
 async def get_waf_cookies_with_playwright(account_name: str):
 	"""使用 Playwright 获取 WAF cookies（隐私模式）"""
 	print(f'[PROCESSING] {account_name}: Starting browser to get WAF cookies...')
 
 	async with async_playwright() as p:
-		# 创建浏览器上下文（隐私模式）
-		try:
-			context = await p.chromium.launch_persistent_context(
-				user_data_dir=None,  # 使用临时目录，相当于隐私模式
-				headless=False,  # 有头模式运行
-				# 如果需要指定 Chrome 路径，可以取消注释下面这行
-				# executable_path="C:/Program Files/Google/Chrome/Application/chrome.exe",
-				user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-				viewport={'width': 1920, 'height': 1080},
-				args=[
-					'--disable-blink-features=AutomationControlled',
-					'--disable-dev-shm-usage',
-					'--disable-web-security',
-					'--disable-features=VizDisplayCompositor',
-					'--no-sandbox',  # 在 CI 环境中可能需要
-				],
-			)
-		except Exception as e:
-			print(f'[FAILED] {account_name}: Failed to start headed mode, trying headless mode: {e}')
-			# 如果有头模式失败，回退到无头模式
-			context = await p.chromium.launch_persistent_context(
-				user_data_dir=None,
-				headless=True,
-				user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-				viewport={'width': 1920, 'height': 1080},
-				args=[
-					'--disable-blink-features=AutomationControlled',
-					'--disable-dev-shm-usage',
-					'--disable-web-security',
-					'--disable-features=VizDisplayCompositor',
-					'--no-sandbox',
-				],
-			)
+		context = await p.chromium.launch_persistent_context(
+			user_data_dir=None,
+			headless=False,
+			user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+			viewport={'width': 1920, 'height': 1080},
+			args=[
+				'--disable-blink-features=AutomationControlled',
+				'--disable-dev-shm-usage',
+				'--disable-web-security',
+				'--disable-features=VizDisplayCompositor',
+				'--no-sandbox',
+			],
+		)
 
-		# 创建页面
 		page = await context.new_page()
 
 		try:
 			print(f'[PROCESSING] {account_name}: Step 1: Access login page to get initial cookies...')
 
-			# 访问登录页面
 			await page.goto('https://anyrouter.top/login', wait_until='networkidle')
 
-			# 等待页面加载
-			await page.wait_for_timeout(3000)
+			try:
+				await page.wait_for_function('document.readyState === "complete"', timeout=5000)
+			except Exception:
+				await page.wait_for_timeout(3000)
 
-			# 获取当前 cookies
 			cookies = await page.context.cookies()
 
-			# 查找 WAF cookies
 			waf_cookies = {}
 			for cookie in cookies:
 				if cookie['name'] in ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']:
@@ -151,30 +103,6 @@ async def get_waf_cookies_with_playwright(account_name: str):
 
 			print(f'[INFO] {account_name}: Got {len(waf_cookies)} WAF cookies after step 1')
 
-			# 检查是否需要第二步
-			if 'acw_sc__v2' not in waf_cookies:
-				print(f'[PROCESSING] {account_name}: Step 2: Re-access page to get acw_sc__v2...')
-
-				# 等待一段时间
-				await page.wait_for_timeout(2000)
-
-				# 刷新页面或重新访问
-				await page.reload(wait_until='networkidle')
-
-				# 等待页面加载
-				await page.wait_for_timeout(3000)
-
-				# 再次获取 cookies
-				cookies = await page.context.cookies()
-
-				# 更新 WAF cookies
-				for cookie in cookies:
-					if cookie['name'] in ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']:
-						waf_cookies[cookie['name']] = cookie['value']
-
-				print(f'[INFO] {account_name}: Got {len(waf_cookies)} WAF cookies after step 2')
-
-			# 验证是否获取到所有必要的 cookies
 			required_cookies = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
 			missing_cookies = [c for c in required_cookies if c not in waf_cookies]
 
@@ -185,7 +113,6 @@ async def get_waf_cookies_with_playwright(account_name: str):
 
 			print(f'[SUCCESS] {account_name}: Successfully got all WAF cookies')
 
-			# 关闭浏览器上下文
 			await context.close()
 
 			return waf_cookies
@@ -209,7 +136,7 @@ def get_user_info(client, headers):
 				used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
 				return f':money: Current balance: ${quota}, Used: ${used_quota}'
 	except Exception as e:
-		return f':fail: Failed to get user info: {str(e)[:50]}...'
+		return f'[FAIL] Failed to get user info: {str(e)[:50]}...'
 	return None
 
 
@@ -246,7 +173,6 @@ async def check_in_account(account_info, account_index):
 		all_cookies = {**waf_cookies, **user_cookies}
 		client.cookies.update(all_cookies)
 
-		# 设置请求头
 		headers = {
 			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
 			'Accept': 'application/json, text/plain, */*',
@@ -263,13 +189,11 @@ async def check_in_account(account_info, account_index):
 
 		user_info_text = None
 
-		# 获取用户信息
 		user_info = get_user_info(client, headers)
 		if user_info:
 			print(user_info)
 			user_info_text = user_info
 
-		# 执行签到操作
 		print(f'[NETWORK] {account_name}: Executing check-in')
 
 		# 更新签到请求头
@@ -306,7 +230,6 @@ async def check_in_account(account_info, account_index):
 		print(f'[FAILED] {account_name}: Error occurred during check-in process - {str(e)[:50]}...')
 		return False, user_info_text
 	finally:
-		# 关闭 HTTP 客户端
 		client.close()
 
 
@@ -334,50 +257,35 @@ async def main():
 			if success:
 				success_count += 1
 			# 收集通知内容
-			status = ':success:' if success else ':fail:'
+			status = '[SUCCESS]' if success else '[FAIL]'
 			account_result = f'{status} Account {i + 1}'
 			if user_info:
 				account_result += f'\n{user_info}'
 			notification_content.append(account_result)
 		except Exception as e:
 			print(f'[FAILED] Account {i + 1} processing exception: {e}')
-			notification_content.append(f':fail: Account {i + 1} exception: {str(e)[:50]}...')
+			notification_content.append(f'[FAIL] Account {i + 1} exception: {str(e)[:50]}...')
 
 	# 构建通知内容
 	summary = [
-		':stats: Check-in result statistics:',
-		f':success: Success: {success_count}/{total_count}',
-		f':fail: Failed: {total_count - success_count}/{total_count}',
+		'[STATS] Check-in result statistics:',
+		f'[SUCCESS] Success: {success_count}/{total_count}',
+		f'[FAIL] Failed: {total_count - success_count}/{total_count}',
 	]
 
 	if success_count == total_count:
-		summary.append(':success: All accounts check-in successful!')
+		summary.append('[SUCCESS] All accounts check-in successful!')
 	elif success_count > 0:
-		summary.append(':warn: Some accounts check-in successful')
+		summary.append('[WARN] Some accounts check-in successful')
 	else:
-		summary.append(':error: All accounts check-in failed')
+		summary.append('[ERROR] All accounts check-in failed')
 
-	# 生成通知内容
-	time_info = f':time: Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+	time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
 
-	# 控制台输出
-	console_content = '\n'.join(
-		[
-			format_message(time_info, use_emoji=False),
-			format_message(notification_content, use_emoji=False),
-			format_message(summary, use_emoji=False),
-		]
-	)
+	notify_content = '\n\n'.join([time_info, notification_content, summary])
 
-	# 通知内容
-	notify_content = '\n\n'.join(
-		[format_message(time_info), format_message(notification_content), format_message(summary)]
-	)
+	print(notify_content)
 
-	# 输出到控制台
-	print('\n' + console_content)
-
-	# 发送通知
 	notify.push_message('AnyRouter Check-in Results', notify_content, msg_type='text')
 
 	# 设置退出码

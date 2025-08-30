@@ -11,48 +11,43 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
     steps:
-    - name: 检出代码
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: 安装 uv
-      uses: astral-sh/setup-uv@v3
+    - uses: astral-sh/setup-uv@v3
       with:
         version: "latest"
 
-    - name: 设置 Python 环境
-      uses: actions/setup-python@v5
+    - uses: actions/setup-python@v5
       with:
         python-version: '3.11'
 
-    # 缓存 uv 依赖
-    - name: 缓存 uv 依赖
-      uses: actions/cache@v4
-      with:
-        path: ~\AppData\Local\uv\cache
-        key: ${{ runner.os }}-uv-${{ hashFiles('**/pyproject.toml') }}
-        restore-keys: |
-          ${{ runner.os }}-uv-
-
     - name: 安装依赖
       run: |
+        echo "正在安装项目依赖..."
         uv sync
+        echo "✅ 环境初始化完成"
+
+    - name: 获取 Playwright 版本
+      id: playwright-version
+      run: |
+        $version = uv run python -c "import importlib.metadata; print(importlib.metadata.version('playwright'))"
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "Playwright version: $version"
 
     - name: 缓存 Playwright 浏览器
       uses: actions/cache@v4
       id: playwright-cache
       with:
         path: ~\AppData\Local\ms-playwright
-        key: playwright-chromium-${{ hashFiles('**/pyproject.toml') }}
+        key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
         restore-keys: |
-          playwright-chromium-
+          ${{ runner.os }}-playwright-
 
     - name: 安装 Playwright 浏览器
+      if: steps.playwright-cache.outputs.cache-hit != 'true'
       run: |
+        echo "缓存未命中，开始安装 Playwright 浏览器..."
         uv run playwright install chromium --with-deps
-
-    - name: 验证 Playwright 安装
-      run: |
-        uv run python -c "from playwright.sync_api import sync_playwright; print('Playwright 可用')"
 
     - name: 执行签到
       env:
@@ -68,7 +63,7 @@ jobs:
       run: |
         uv run checkin.py
 
-    - name: 显示执行结果
+    - name: 执行结果
       if: always()
       run: |
         echo "签到任务执行完成"
