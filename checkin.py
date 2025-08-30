@@ -282,7 +282,7 @@ async def main():
 
 	time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
 
-	notify_content = '\n\n'.join([time_info, notification_content, summary])
+	notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
 
 	print(notify_content)
 
