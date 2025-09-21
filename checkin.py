@@ -4,6 +4,7 @@ AnyRouter.top 自动签到脚本
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -17,7 +18,7 @@ from notify import notify
 
 load_dotenv()
 
-BALANCE_HISTORY_FILE = 'last_balances.json'
+BALANCE_HASH_FILE = 'balance_hash.txt'
 
 
 def load_accounts():
@@ -50,24 +51,30 @@ def load_accounts():
 		return None
 
 
-def load_balance_history():
-	"""加载余额历史数据"""
+def load_balance_hash():
+	"""加载余额hash"""
 	try:
-		if os.path.exists(BALANCE_HISTORY_FILE):
-			with open(BALANCE_HISTORY_FILE, 'r', encoding='utf-8') as f:
-				return json.load(f)
+		if os.path.exists(BALANCE_HASH_FILE):
+			with open(BALANCE_HASH_FILE, 'r', encoding='utf-8') as f:
+				return f.read().strip()
 	except Exception:
 		pass
-	return {}
+	return None
 
 
-def save_balance_history(balances):
-	"""保存余额历史数据"""
+def save_balance_hash(balance_hash):
+	"""保存余额hash"""
 	try:
-		with open(BALANCE_HISTORY_FILE, 'w', encoding='utf-8') as f:
-			json.dump(balances, f, ensure_ascii=False, indent=2)
+		with open(BALANCE_HASH_FILE, 'w', encoding='utf-8') as f:
+			f.write(balance_hash)
 	except Exception as e:
-		print(f'Warning: Failed to save balance history: {e}')
+		print(f'Warning: Failed to save balance hash: {e}')
+
+
+def generate_balance_hash(balances):
+	"""生成余额数据的hash"""
+	balance_json = json.dumps(balances, sort_keys=True, separators=(',', ':'))
+	return hashlib.sha256(balance_json.encode('utf-8')).hexdigest()[:16]
 
 
 def parse_cookies(cookies_data):
@@ -276,8 +283,8 @@ async def main():
 
 	print(f'[INFO] Found {len(accounts)} account configurations')
 
-	# 加载余额历史
-	balance_history = load_balance_history()
+	# 加载余额hash
+	last_balance_hash = load_balance_hash()
 
 	# 为每个账号执行签到
 	success_count = 0
@@ -285,6 +292,7 @@ async def main():
 	notification_content = []
 	current_balances = {}
 	need_notify = False  # 是否需要发送通知
+	balance_changed = False  # 余额是否有变化
 
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
@@ -302,21 +310,10 @@ async def main():
 				need_notify = True
 				print(f'[NOTIFY] Account {i + 1} failed, will send notification')
 
-			# 检查余额变化
+			# 收集余额数据
 			if user_info and user_info.get('success'):
 				current_quota = user_info['quota']
 				current_balances[account_key] = current_quota
-
-				# 比较余额变化
-				if account_key in balance_history:
-					last_quota = balance_history[account_key]
-					if abs(current_quota - last_quota) > 0.01:  # 余额有变化（避免浮点精度问题）
-						should_notify_this_account = True
-						need_notify = True
-						print(f'[NOTIFY] Account {i + 1} balance changed: ${last_quota} -> ${current_quota}')
-				else:
-					# 首次运行，记录余额但不通知
-					print(f'[INFO] Account {i + 1} first time recording balance: ${current_quota}')
 
 			# 只有需要通知的账号才收集内容
 			if should_notify_this_account:
@@ -333,8 +330,37 @@ async def main():
 			need_notify = True  # 异常也需要通知
 			notification_content.append(f'[FAIL] Account {i + 1} exception: {str(e)[:50]}...')
 
-	# 保存当前余额历史
-	save_balance_history(current_balances)
+	# 检查余额变化
+	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
+	if current_balance_hash:
+		if last_balance_hash is None:
+			# 首次运行
+			balance_changed = True
+			need_notify = True
+			print('[NOTIFY] First run detected, will send notification with current balances')
+		elif current_balance_hash != last_balance_hash:
+			# 余额有变化
+			balance_changed = True
+			need_notify = True
+			print('[NOTIFY] Balance changes detected, will send notification')
+		else:
+			print('[INFO] No balance changes detected')
+
+	# 为有余额变化的情况添加所有成功账号到通知内容
+	if balance_changed:
+		for i, account in enumerate(accounts):
+			account_key = f'account_{i + 1}'
+			if account_key in current_balances:
+				# 只添加成功获取余额的账号，且避免重复添加
+				account_result = f'[BALANCE] Account {i + 1}'
+				account_result += f'\n:money: Current balance: ${current_balances[account_key]}'
+				# 检查是否已经在通知内容中（避免重复）
+				if not any(f'Account {i + 1}' in item for item in notification_content):
+					notification_content.append(account_result)
+
+	# 保存当前余额hash
+	if current_balance_hash:
+		save_balance_hash(current_balance_hash)
 
 	if need_notify and notification_content:
 		# 构建通知内容

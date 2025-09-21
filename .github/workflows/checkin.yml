@@ -52,10 +52,10 @@ jobs:
     - name: 恢复余额历史缓存
       uses: actions/cache@v4
       with:
-        path: last_balances.json
-        key: balance-history-${{ github.sha }}
+        path: balance_hash.txt
+        key: balance-hash-${{ github.sha }}
         restore-keys: |
-          balance-history-
+          balance-hash-
 
     - name: 执行签到
       env:
