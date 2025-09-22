@@ -73,7 +73,9 @@ def save_balance_hash(balance_hash):
 
 def generate_balance_hash(balances):
 	"""生成余额数据的hash"""
-	balance_json = json.dumps(balances, sort_keys=True, separators=(',', ':'))
+	# 将包含 quota 和 used 的结构转换为简单的 quota 值用于 hash 计算
+	simple_balances = {k: v['quota'] for k, v in balances.items()} if balances else {}
+	balance_json = json.dumps(simple_balances, sort_keys=True, separators=(',', ':'))
 	return hashlib.sha256(balance_json.encode('utf-8')).hexdigest()[:16]
 
 
@@ -313,7 +315,8 @@ async def main():
 			# 收集余额数据
 			if user_info and user_info.get('success'):
 				current_quota = user_info['quota']
-				current_balances[account_key] = current_quota
+				current_used = user_info['used_quota']
+				current_balances[account_key] = {'quota': current_quota, 'used': current_used}
 
 			# 只有需要通知的账号才收集内容
 			if should_notify_this_account:
@@ -353,7 +356,7 @@ async def main():
 			if account_key in current_balances:
 				# 只添加成功获取余额的账号，且避免重复添加
 				account_result = f'[BALANCE] Account {i + 1}'
-				account_result += f'\n:money: Current balance: ${current_balances[account_key]}'
+				account_result += f'\n:money: Current balance: ${current_balances[account_key]["quota"]}, Used: ${current_balances[account_key]["used"]}'
 				# 检查是否已经在通知内容中（避免重复）
 				if not any(f'Account {i + 1}' in item for item in notification_content):
 					notification_content.append(account_result)
