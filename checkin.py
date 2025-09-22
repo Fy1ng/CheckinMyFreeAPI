@@ -44,6 +44,10 @@ def load_accounts():
 			if 'cookies' not in account or 'api_user' not in account:
 				print(f'ERROR: Account {i + 1} missing required fields (cookies, api_user)')
 				return None
+			# 如果有 name 字段，确保它不是空字符串
+			if 'name' in account and not account['name']:
+				print(f'ERROR: Account {i + 1} name field cannot be empty')
+				return None
 
 		return accounts_data
 	except Exception as e:
@@ -73,8 +77,15 @@ def save_balance_hash(balance_hash):
 
 def generate_balance_hash(balances):
 	"""生成余额数据的hash"""
-	balance_json = json.dumps(balances, sort_keys=True, separators=(',', ':'))
+	# 将包含 quota 和 used 的结构转换为简单的 quota 值用于 hash 计算
+	simple_balances = {k: v['quota'] for k, v in balances.items()} if balances else {}
+	balance_json = json.dumps(simple_balances, sort_keys=True, separators=(',', ':'))
 	return hashlib.sha256(balance_json.encode('utf-8')).hexdigest()[:16]
+
+
+def get_account_display_name(account_info, account_index):
+	"""获取账号显示名称"""
+	return account_info.get('name', f'Account {account_index + 1}')
 
 
 def parse_cookies(cookies_data):
@@ -180,7 +191,7 @@ def get_user_info(client, headers):
 
 async def check_in_account(account_info, account_index):
 	"""为单个账号执行签到操作"""
-	account_name = f'Account {account_index + 1}'
+	account_name = get_account_display_name(account_info, account_index)
 	print(f'\n[PROCESSING] Starting to process {account_name}')
 
 	# 解析账号配置
@@ -308,17 +319,20 @@ async def main():
 			if not success:
 				should_notify_this_account = True
 				need_notify = True
-				print(f'[NOTIFY] Account {i + 1} failed, will send notification')
+				account_name = get_account_display_name(account, i)
+				print(f'[NOTIFY] {account_name} failed, will send notification')
 
 			# 收集余额数据
 			if user_info and user_info.get('success'):
 				current_quota = user_info['quota']
-				current_balances[account_key] = current_quota
+				current_used = user_info['used_quota']
+				current_balances[account_key] = {'quota': current_quota, 'used': current_used}
 
 			# 只有需要通知的账号才收集内容
 			if should_notify_this_account:
+				account_name = get_account_display_name(account, i)
 				status = '[SUCCESS]' if success else '[FAIL]'
-				account_result = f'{status} Account {i + 1}'
+				account_result = f'{status} {account_name}'
 				if user_info and user_info.get('success'):
 					account_result += f'\n{user_info["display"]}'
 				elif user_info:
@@ -326,9 +340,10 @@ async def main():
 				notification_content.append(account_result)
 
 		except Exception as e:
-			print(f'[FAILED] Account {i + 1} processing exception: {e}')
+			account_name = get_account_display_name(account, i)
+			print(f'[FAILED] {account_name} processing exception: {e}')
 			need_notify = True  # 异常也需要通知
-			notification_content.append(f'[FAIL] Account {i + 1} exception: {str(e)[:50]}...')
+			notification_content.append(f'[FAIL] {account_name} exception: {str(e)[:50]}...')
 
 	# 检查余额变化
 	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
@@ -351,11 +366,12 @@ async def main():
 		for i, account in enumerate(accounts):
 			account_key = f'account_{i + 1}'
 			if account_key in current_balances:
+				account_name = get_account_display_name(account, i)
 				# 只添加成功获取余额的账号，且避免重复添加
-				account_result = f'[BALANCE] Account {i + 1}'
-				account_result += f'\n:money: Current balance: ${current_balances[account_key]}'
+				account_result = f'[BALANCE] {account_name}'
+				account_result += f'\n:money: Current balance: ${current_balances[account_key]["quota"]}, Used: ${current_balances[account_key]["used"]}'
 				# 检查是否已经在通知内容中（避免重复）
-				if not any(f'Account {i + 1}' in item for item in notification_content):
+				if not any(account_name in item for item in notification_content):
 					notification_content.append(account_result)
 
 	# 保存当前余额hash

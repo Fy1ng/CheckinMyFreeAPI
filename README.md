@@ -47,17 +47,19 @@
 
 ### 4. 多账号配置格式
 
-支持单个与多个
+支持单个与多个账号配置，可选 `name` 字段用于自定义账号显示名称：
 
 ```json
 [
   {
+    "name": "我的主账号",
     "cookies": {
       "session": "account1_session_value"
     },
     "api_user": "account1_api_user_id"
   },
   {
+    "name": "备用账号",
     "cookies": {
       "session": "account2_session_value"
     },
@@ -65,6 +67,13 @@
   }
 ]
 ```
+
+**字段说明**：
+- `cookies` (必需)：用于身份验证的 cookies 数据
+- `api_user` (必需)：用于请求头的 new-api-user 参数
+- `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
+
+如果未提供 `name` 字段，会使用 `Account 1`、`Account 2` 等默认名称。
 
 接下来获取 cookies 与 api_user 的值。
 
