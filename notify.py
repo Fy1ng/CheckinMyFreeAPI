@@ -12,6 +12,7 @@ class NotificationKit:
 		self.email_user: str = os.getenv('EMAIL_USER', '')
 		self.email_pass: str = os.getenv('EMAIL_PASS', '')
 		self.email_to: str = os.getenv('EMAIL_TO', '')
+		self.smtp_server: str = os.getenv('CUSTOM_SMTP_SERVER', '')
 		self.pushplus_token = os.getenv('PUSHPLUS_TOKEN')
 		self.server_push_key = os.getenv('SERVERPUSHKEY')
 		self.dingding_webhook = os.getenv('DINGDING_WEBHOOK')
@@ -30,7 +31,7 @@ class NotificationKit:
 		body = MIMEText(content, msg_type, 'utf-8')
 		msg.attach(body)
 
-		smtp_server = f'smtp.{self.email_user.split("@")[1]}'
+		smtp_server = self.smtp_server if self.smtp_server else f'smtp.{self.email_user.split("@")[1]}'
 		with smtplib.SMTP_SSL(smtp_server, 465) as server:
 			server.login(self.email_user, self.email_pass)
 			server.send_message(msg)
