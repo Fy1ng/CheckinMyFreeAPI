@@ -22,7 +22,9 @@ class NotificationKit:
 		if not self.email_user or not self.email_pass or not self.email_to:
 			raise ValueError('Email configuration not set')
 
-		msg = MIMEText(content, msg_type, 'utf-8')
+		# MIMEText 需要 'plain' 或 'html'，而不是 'text'
+		mime_subtype = 'plain' if msg_type == 'text' else 'html'
+		msg = MIMEText(content, mime_subtype, 'utf-8')
 		msg['From'] = f'AnyRouter Assistant <{self.email_user}>'
 		msg['To'] = self.email_to
 		msg['Subject'] = title
