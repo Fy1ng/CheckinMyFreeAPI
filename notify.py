@@ -1,6 +1,5 @@
 import os
 import smtplib
-from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Literal
 
@@ -23,13 +22,12 @@ class NotificationKit:
 		if not self.email_user or not self.email_pass or not self.email_to:
 			raise ValueError('Email configuration not set')
 
-		msg = MIMEMultipart()
+		# MIMEText 需要 'plain' 或 'html'，而不是 'text'
+		mime_subtype = 'plain' if msg_type == 'text' else 'html'
+		msg = MIMEText(content, mime_subtype, 'utf-8')
 		msg['From'] = f'AnyRouter Assistant <{self.email_user}>'
 		msg['To'] = self.email_to
 		msg['Subject'] = title
-
-		body = MIMEText(content, msg_type, 'utf-8')
-		msg.attach(body)
 
 		smtp_server = self.smtp_server if self.smtp_server else f'smtp.{self.email_user.split("@")[1]}'
 		with smtplib.SMTP_SSL(smtp_server, 465) as server:
