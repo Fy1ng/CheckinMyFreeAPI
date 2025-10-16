@@ -1,6 +1,6 @@
 # Any Router 多账号自动签到
 
-多平台多账号自动签到，理论上支持所有 NewApi、OneApi 平台，目前内置支持 Any Router 与 Agent Router，其它可根据文档进行摸索配置。
+多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置支持 Any Router 与 Agent Router，其它可根据文档进行摸索配置。
 
 推荐搭配使用[Auo](https://github.com/millylee/auo)，支持任意 Claude Code Token 切换的工具。
 
@@ -10,6 +10,7 @@
 
 ## 功能特性
 
+- ✅ 多平台（兼容 NewAPI 与 OneAPI）
 - ✅ 单个/多账号自动签到
 - ✅ 多种机器人通知（可选）
 - ✅ 绕过 WAF 限制
@@ -24,7 +25,7 @@
 
 对于每个需要签到的账号，你需要获取：
 1. **Cookies**: 用于身份验证
-2. **API User**: 用于请求头的 new-api-user 参数
+2. **API User**: 用于请求头的 new-api-user 参数（自己配置其它平台时该值需要注意匹配）
 
 #### 获取 Cookies：
 1. 打开浏览器，访问 https://anyrouter.top/
@@ -172,7 +173,7 @@
 
 ## 自定义 Provider 配置（可选）
 
-默认情况下，`anyrouter` 已内置配置，无需额外设置。如果你需要使用其他服务商，可以通过环境变量 `PROVIDERS` 配置：
+默认情况下，`anyrouter`、`agentrouter` 已内置配置，无需额外设置。如果你需要使用其他服务商，可以通过环境变量 `PROVIDERS` 配置：
 
 ### 基础配置（仅域名）
 
@@ -180,9 +181,6 @@
 
 ```json
 {
-  "agentrouter": {
-    "domain": "https://agentrouter.org"
-  },
   "customrouter": {
     "domain": "https://custom.example.com"
   }
@@ -200,7 +198,7 @@
     "login_path": "/auth/login",
     "sign_in_path": "/api/checkin",
     "user_info_path": "/api/profile",
-    "api_user_key": "x-user-id",
+    "api_user_key": "New-Api-User",
     "bypass_method": "waf_cookies"
   }
 }
