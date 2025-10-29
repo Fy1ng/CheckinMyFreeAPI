@@ -277,6 +277,10 @@
 ### Server酱
 - `SERVERPUSHKEY`: Server酱的 SendKey
 
+### Telegram Bot
+- `TELEGRAM_BOT_TOKEN`: Telegram Bot 的 Token
+- `TELEGRAM_CHAT_ID`: Telegram Chat ID
+
 配置步骤：
 1. 在仓库的 Settings -> Environments -> production -> Environment secrets 中添加上述环境变量
 2. 每个通知方式都是独立的，可以只配置你需要的推送方式
