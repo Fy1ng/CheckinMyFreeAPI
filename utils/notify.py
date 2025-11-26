@@ -19,7 +19,8 @@ class NotificationKit:
 		self.weixin_webhook = os.getenv('WEIXIN_WEBHOOK')
 		self.gotify_url = os.getenv('GOTIFY_URL')
 		self.gotify_token = os.getenv('GOTIFY_TOKEN')
-		self.gotify_priority = int(os.getenv('GOTIFY_PRIORITY', '9'))
+		gotify_priority_env = os.getenv('GOTIFY_PRIORITY', '9')
+		self.gotify_priority = int(gotify_priority_env) if gotify_priority_env.strip() else 9
 		self.telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
 		self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
 
