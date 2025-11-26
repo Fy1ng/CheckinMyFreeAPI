@@ -17,9 +17,6 @@ class NotificationKit:
 		self.dingding_webhook = os.getenv('DINGDING_WEBHOOK')
 		self.feishu_webhook = os.getenv('FEISHU_WEBHOOK')
 		self.weixin_webhook = os.getenv('WEIXIN_WEBHOOK')
-		self.gotify_url = os.getenv('GOTIFY_URL')
-		self.gotify_token = os.getenv('GOTIFY_TOKEN')
-		self.gotify_priority = int(os.getenv('GOTIFY_PRIORITY', '9'))
 		self.telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
 		self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
 
@@ -85,26 +82,6 @@ class NotificationKit:
 		with httpx.Client(timeout=30.0) as client:
 			client.post(self.weixin_webhook, json=data)
 
-	def send_gotify(self, title: str, content: str):
-		if not self.gotify_url or not self.gotify_token:
-			raise ValueError('Gotify URL or Token not configured')
-
-		# 使用环境变量配置的优先级，默认为9
-		priority = self.gotify_priority
-
-		# 确保优先级在有效范围内 (1-10)
-		priority = max(1, min(10, priority))
-
-		data = {
-			'title': title,
-			'message': content,
-			'priority': priority
-		}
-
-		url = f'{self.gotify_url}?token={self.gotify_token}'
-		with httpx.Client(timeout=30.0) as client:
-			client.post(url, json=data)
-
 	def send_telegram(self, title: str, content: str):
 		if not self.telegram_bot_token or not self.telegram_chat_id:
 			raise ValueError('Telegram Bot Token or Chat ID not configured')
@@ -123,7 +100,6 @@ class NotificationKit:
 			('DingTalk', lambda: self.send_dingtalk(title, content)),
 			('Feishu', lambda: self.send_feishu(title, content)),
 			('WeChat Work', lambda: self.send_wecom(title, content)),
-			('Gotify', lambda: self.send_gotify(title, content)),
 			('Telegram', lambda: self.send_telegram(title, content)),
 		]
 
