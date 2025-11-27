@@ -199,7 +199,8 @@
     "sign_in_path": "/api/checkin",
     "user_info_path": "/api/profile",
     "api_user_key": "New-Api-User",
-    "bypass_method": "waf_cookies"
+    "bypass_method": "waf_cookies",
+    "waf_cookie_names": ["acw_tc", "cdn_sec_tc", "acw_sc__v2"]
   }
 }
 ```
@@ -226,6 +227,7 @@
 - `bypass_method` (可选)：WAF 绕过方法
   - `"waf_cookies"`：使用 Playwright 打开浏览器获取 WAF cookies 后再执行签到
   - 不设置或 `null`：直接使用用户 cookies 执行签到（适合无 WAF 保护的网站）
+- `waf_cookie_names` (可选)：绕过 WAF 所需 cookie 的名称列表，`bypass_method` 为 `waf_cookies` 时必须设置
 
 **配置示例**（完整）：
 ```json

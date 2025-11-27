@@ -65,7 +65,7 @@ def parse_cookies(cookies_data):
 	return {}
 
 
-async def get_waf_cookies_with_playwright(account_name: str, login_url: str):
+async def get_waf_cookies_with_playwright(account_name: str, login_url: str, required_cookies: list[str]):
 	"""使用 Playwright 获取 WAF cookies（隐私模式）"""
 	print(f'[PROCESSING] {account_name}: Starting browser to get WAF cookies...')
 
@@ -105,12 +105,11 @@ async def get_waf_cookies_with_playwright(account_name: str, login_url: str):
 				for cookie in cookies:
 					cookie_name = cookie.get('name')
 					cookie_value = cookie.get('value')
-					if cookie_name in ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2'] and cookie_value is not None:
+					if cookie_name in required_cookies and cookie_value is not None:
 						waf_cookies[cookie_name] = cookie_value
 
 				print(f'[INFO] {account_name}: Got {len(waf_cookies)} WAF cookies')
 
-				required_cookies = ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
 				missing_cookies = [c for c in required_cookies if c not in waf_cookies]
 
 				if missing_cookies:
@@ -158,7 +157,7 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 
 	if provider_config.needs_waf_cookies():
 		login_url = f'{provider_config.domain}{provider_config.login_path}'
-		waf_cookies = await get_waf_cookies_with_playwright(account_name, login_url)
+		waf_cookies = await get_waf_cookies_with_playwright(account_name, login_url, provider_config.waf_cookie_names)
 		if not waf_cookies:
 			print(f'[FAILED] {account_name}: Unable to get WAF cookies')
 			return None
