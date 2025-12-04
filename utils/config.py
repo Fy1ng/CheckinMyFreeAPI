@@ -6,7 +6,7 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import Dict, Literal
+from typing import Dict, List, Literal
 
 
 @dataclass
@@ -20,6 +20,23 @@ class ProviderConfig:
 	user_info_path: str = '/api/user/self'
 	api_user_key: str = 'new-api-user'
 	bypass_method: Literal['waf_cookies'] | None = None
+	waf_cookie_names: List[str] | None = None
+
+	def __post_init__(self):
+		required_waf_cookies = set()
+		if self.waf_cookie_names and isinstance(self.waf_cookie_names, List):
+			for item in self.waf_cookie_names:
+				name = "" if not item or not isinstance(item, str) else item.strip()
+				if not name:
+					print(f'[WARNING] Found invalid WAF cookie name: {item}')
+					continue
+
+				required_waf_cookies.add(name)
+		
+		if not required_waf_cookies:
+			self.bypass_method = None
+
+		self.waf_cookie_names = list(required_waf_cookies)
 
 	@classmethod
 	def from_dict(cls, name: str, data: dict) -> 'ProviderConfig':
@@ -37,6 +54,7 @@ class ProviderConfig:
 			user_info_path=data.get('user_info_path', '/api/user/self'),
 			api_user_key=data.get('api_user_key', 'new-api-user'),
 			bypass_method=data.get('bypass_method'),
+			waf_cookie_names = data.get('waf_cookie_names'),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -66,6 +84,7 @@ class AppConfig:
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
+				waf_cookie_names=['acw_tc', 'cdn_sec_tc', 'acw_sc__v2'],
 			),
 			'agentrouter': ProviderConfig(
 				name='agentrouter',
@@ -74,7 +93,8 @@ class AppConfig:
 				sign_in_path=None,  # 无需签到接口，查询用户信息时自动完成签到
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
-				bypass_method=None,
+				bypass_method='waf_cookies',
+				waf_cookie_names=['acw_tc'],
 			),
 		}
 
