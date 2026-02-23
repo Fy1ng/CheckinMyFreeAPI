@@ -169,12 +169,12 @@ from unittest.mock import patch
 
 def test_parse_cookies():
     from checkin import parse_cookies
-    
+
     # 测试字典格式
     cookies = {"session": "abc123"}
     result = parse_cookies(cookies)
     assert result == {"session": "abc123"}
-    
+
     # 测试字符串格式
     cookies_str = "session=abc123; user=test"
     result = parse_cookies(cookies_str)

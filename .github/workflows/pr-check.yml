@@ -131,28 +131,28 @@ jobs:
           echo "" >> $GITHUB_OUTPUT
           echo "## 检查结果总览" >> $GITHUB_OUTPUT
           echo "" >> $GITHUB_OUTPUT
-          
+
           # Ruff Lint
           if [ "${{ steps.ruff-lint.outputs.status }}" == "success" ]; then
             echo "✅ **代码风格检查 (Ruff Lint)**: 通过" >> $GITHUB_OUTPUT
           else
             echo "❌ **代码风格检查 (Ruff Lint)**: 失败" >> $GITHUB_OUTPUT
           fi
-          
+
           # Ruff Format
           if [ "${{ steps.ruff-format.outputs.status }}" == "success" ]; then
             echo "✅ **代码格式检查 (Ruff Format)**: 通过" >> $GITHUB_OUTPUT
           else
             echo "❌ **代码格式检查 (Ruff Format)**: 失败" >> $GITHUB_OUTPUT
           fi
-          
+
           # MyPy
           if [ "${{ steps.mypy.outputs.status }}" == "success" ]; then
             echo "✅ **类型检查 (MyPy)**: 通过" >> $GITHUB_OUTPUT
           else
             echo "⚠️ **类型检查 (MyPy)**: 失败" >> $GITHUB_OUTPUT
           fi
-          
+
           # Bandit
           if [ "${{ steps.bandit.outputs.status }}" == "success" ]; then
             echo "✅ **安全扫描 (Bandit)**: 通过" >> $GITHUB_OUTPUT
@@ -161,14 +161,14 @@ jobs:
           else
             echo "❌ **安全扫描 (Bandit)**: 失败" >> $GITHUB_OUTPUT
           fi
-          
+
           # Pytest
           if [ "${{ steps.pytest.outputs.status }}" == "success" ]; then
             echo "✅ **测试 (Pytest)**: 通过" >> $GITHUB_OUTPUT
           else
             echo "❌ **测试 (Pytest)**: 失败" >> $GITHUB_OUTPUT
           fi
-          
+
           echo "" >> $GITHUB_OUTPUT
           echo "## 📊 测试覆盖率" >> $GITHUB_OUTPUT
           echo "" >> $GITHUB_OUTPUT
@@ -176,7 +176,7 @@ jobs:
           echo "" >> $GITHUB_OUTPUT
           echo "## 🔧 修复建议" >> $GITHUB_OUTPUT
           echo "" >> $GITHUB_OUTPUT
-          
+
           if [ "${{ steps.ruff-lint.outputs.status }}" != "success" ] || [ "${{ steps.ruff-format.outputs.status }}" != "success" ]; then
             echo "### 代码风格问题" >> $GITHUB_OUTPUT
             echo "运行以下命令自动修复：" >> $GITHUB_OUTPUT
@@ -186,19 +186,19 @@ jobs:
             echo '```' >> $GITHUB_OUTPUT
             echo "" >> $GITHUB_OUTPUT
           fi
-          
+
           if [ "${{ steps.mypy.outputs.status }}" != "success" ]; then
             echo "### 类型检查问题" >> $GITHUB_OUTPUT
             echo "请根据 MyPy 输出添加或修正类型注解。" >> $GITHUB_OUTPUT
             echo "" >> $GITHUB_OUTPUT
           fi
-          
+
           if [ "${{ steps.pytest.outputs.status }}" != "success" ]; then
             echo "### 测试失败" >> $GITHUB_OUTPUT
             echo "请检查测试日志并修复失败的测试用例。" >> $GITHUB_OUTPUT
             echo "" >> $GITHUB_OUTPUT
           fi
-          
+
           echo "---" >> $GITHUB_OUTPUT
           echo "*本报告由 GitHub Actions 自动生成*" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -210,19 +210,19 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const report = `${{ steps.generate-report.outputs.REPORT }}`;
-            
+
             // 查找之前的评论
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
             });
-            
-            const botComment = comments.find(comment => 
-              comment.user.type === 'Bot' && 
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
               comment.body.includes('PR 代码质量检查报告')
             );
-            
+
             if (botComment) {
               // 更新已存在的评论
               await github.rest.issues.updateComment({
@@ -250,13 +250,13 @@ jobs:
             echo "❌ 质量检查未通过"
             exit 1
           fi
-          
+
           if [ "${{ steps.mypy.outputs.status }}" != "success" ]; then
             echo "⚠️ 类型检查有警告，但不阻止 PR 合并"
           fi
-          
+
           if [ "${{ steps.bandit.outputs.status }}" == "warning" ]; then
             echo "⚠️ 安全扫描有警告，但不阻止 PR 合并"
           fi
-          
+
           echo "✅ 关键质量检查通过"

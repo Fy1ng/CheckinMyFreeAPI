@@ -251,10 +251,7 @@ def format_check_in_notification(detail: dict) -> str:
 			lines.append(f'  {change_emoji} 余额变化: {change_symbol}${detail["balance_change"]:.2f}')
 	else:
 		# 无任何变化
-		lines.extend([
-			'  ━━━━━━━━━━━━━━━━━━━━',
-			'  ℹ️  今日已签到，无变化'
-		])
+		lines.extend(['  ━━━━━━━━━━━━━━━━━━━━', '  ℹ️  今日已签到，无变化'])
 
 	return '\n'.join(lines)
 
@@ -397,9 +394,9 @@ async def main():
 						'after_quota': after_quota,
 						'after_used': after_used,
 						'check_in_reward': check_in_reward,  # 签到获得
-						'usage_increase': usage_increase,    # 本次消耗
-						'balance_change': balance_change,    # 余额变化
-						'success': success
+						'usage_increase': usage_increase,  # 本次消耗
+						'balance_change': balance_change,  # 余额变化
+						'success': success,
 					}
 
 			if should_notify_this_account:
