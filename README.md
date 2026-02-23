@@ -1,5 +1,12 @@
 # Any Router 多账号自动签到
 
+[![GitHub Actions](https://github.com/millylee/anyrouter-check-in/workflows/PR%20Quality%20Checks/badge.svg)](https://github.com/millylee/anyrouter-check-in/actions)
+[![codecov](https://codecov.io/gh/millylee/anyrouter-check-in/branch/main/graph/badge.svg)](https://codecov.io/gh/millylee/anyrouter-check-in)
+[![pre-commit.ci status](https://results.pre-commit.ci/badge/github/millylee/anyrouter-check-in/main.svg)](https://results.pre-commit.ci/latest/github/millylee/anyrouter-check-in/main)
+[![Python Version](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+[![License](https://img.shields.io/github/license/millylee/anyrouter-check-in)](LICENSE)
+
 多平台多账号自动签到，理论上支持所有 NewAPI、OneAPI 平台，目前内置支持 Any Router 与 Agent Router，其它可根据文档进行摸索配置。
 
 推荐搭配使用[Auo](https://github.com/millylee/auo)，支持任意 Claude Code Token 切换的工具。
@@ -359,6 +366,50 @@ uv run playwright install chromium
 
 # 运行测试
 uv run pytest tests/
+
+# 查看测试覆盖率
+uv run pytest tests/ --cov=. --cov-report=html
+```
+
+## 贡献指南
+
+欢迎贡献代码！在提交 Pull Request 之前，请阅读[贡献指南](CONTRIBUTING.md)。
+
+### 代码质量
+
+本项目使用以下工具确保代码质量：
+
+- **Ruff**: 代码风格检查和格式化
+- **MyPy**: 静态类型检查
+- **Bandit**: 安全漏洞扫描
+- **Pytest**: 自动化测试
+- **pre-commit**: Git 提交前自动检查
+
+所有 Pull Request 会自动运行以下检查：
+
+- ✅ 代码风格检查（Ruff Lint & Format）
+- ✅ 类型检查（MyPy）
+- ✅ 安全扫描（Bandit）
+- ✅ 测试运行（Pytest）
+- ✅ 测试覆盖率报告（Codecov）
+
+### 本地开发
+
+```bash
+# 安装开发依赖
+uv sync --dev
+
+# 安装 pre-commit 钩子
+uv run pre-commit install
+
+# 运行代码检查
+uv run ruff check .
+uv run ruff format .
+uv run mypy .
+uv run bandit -r . -c pyproject.toml
+
+# 运行测试
+uv run pytest tests/ --cov=.
 ```
 
 ## 免责声明
