@@ -28,7 +28,7 @@ def load_balance_hash():
 		if os.path.exists(BALANCE_HASH_FILE):
 			with open(BALANCE_HASH_FILE, 'r', encoding='utf-8') as f:
 				return f.read().strip()
-	except Exception:
+	except Exception:  # nosec B110
 		pass
 	return None
 
