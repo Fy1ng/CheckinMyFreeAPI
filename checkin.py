@@ -81,6 +81,15 @@ async def get_waf_cookies_with_browser(account_name: str, login_url: str, requir
 		except Exception:
 			await page.wait_for_timeout(3000)
 
+		# 关闭可能出现的弹窗
+		try:
+			modal_close = await page.wait_for_selector('.semi-modal-close', timeout=3000)
+			if modal_close:
+				await modal_close.click()
+				await page.wait_for_timeout(500)
+		except Exception:
+			pass
+
 		cookies = await page.context.cookies()
 
 		waf_cookies = {}
@@ -205,6 +214,16 @@ async def login_with_credentials(account_name: str, provider_config, email: str,
 			await page.wait_for_timeout(5000)
 
 		await page.wait_for_timeout(2000)
+
+		# 关闭可能出现的弹窗（如系统公告）
+		try:
+			modal_close = await page.wait_for_selector('.semi-modal-close', timeout=3000)
+			if modal_close:
+				await modal_close.click()
+				await page.wait_for_timeout(500)
+				print(f'[INFO] {account_name}: Dismissed popup dialog')
+		except Exception:
+			pass
 
 		# 收集所有 cookies
 		cookies = await page.context.cookies()
