@@ -79,8 +79,8 @@ jobs:
     - name: 执行签到
       env:
         CHECKIN_HEADLESS: false
-        CHECKIN_HUMANIZE: false
-        CHECKIN_WAIT_TIMEOUT_MS: 60000
+        CHECKIN_HUMANIZE: true
+        CHECKIN_WAIT_TIMEOUT_MS: 120000
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}

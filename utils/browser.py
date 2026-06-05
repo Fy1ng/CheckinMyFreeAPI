@@ -153,9 +153,12 @@ def _env_bool(name: str, default: bool) -> bool:
 def load_browser_login_settings(account_name: str, provider: str) -> BrowserLoginSettings:
 	profile_base = Path(os.getenv('CHECKIN_BROWSER_PROFILE_DIR', '.browser_profiles'))
 	profile_dir = profile_base / provider / account_name
+	humanize = _env_bool('CHECKIN_HUMANIZE', True)
+	if provider == 'agentrouter':
+		humanize = _env_bool('CHECKIN_HUMANIZE_AGENTROUTER', humanize)
 	return BrowserLoginSettings(
 		headless=_env_bool('CHECKIN_HEADLESS', True),
-		humanize=_env_bool('CHECKIN_HUMANIZE', True),
+		humanize=humanize,
 		wait_timeout_ms=int(os.getenv('CHECKIN_WAIT_TIMEOUT_MS', str(DEFAULT_TIMEOUT_MS))),
 		profile_dir=profile_dir,
 		cloakbrowser_binary_path=os.getenv('CLOAKBROWSER_BINARY_PATH', '').strip() or None,
@@ -176,6 +179,7 @@ async def launch_login_context(settings: BrowserLoginSettings) -> BrowserContext
 	launch_kwargs: dict = {
 		'headless': settings.headless,
 		'humanize': settings.humanize,
+		'viewport': {'width': 1920, 'height': 1080},
 	}
 	if settings.humanize:
 		launch_kwargs['human_preset'] = 'careful'
@@ -240,18 +244,38 @@ async def wait_for_site_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS
 		print(f'[INFO] Dismissed {closed} popup dialog(s)')
 
 
-async def navigate_login_page(page: Page, login_url: str, timeout_ms: int) -> None:
+async def _wait_for_login_shell(page: Page, timeout_ms: int) -> bool:
+	shell_timeout = min(timeout_ms, 60_000)
+	try:
+		await page.wait_for_function(_LOGIN_SHELL_READY_JS, timeout=shell_timeout)
+		return True
+	except Exception:  # nosec B110
+		return False
+
+
+async def navigate_login_page(
+	page: Page,
+	login_url: str,
+	timeout_ms: int,
+	*,
+	provider: str = '',
+	account_name: str = '',
+) -> None:
 	"""预热站点、导航登录页并等待 SPA 渲染完成。"""
 	from urllib.parse import urlparse
 
 	parsed = urlparse(login_url)
 	base_url = f'{parsed.scheme}://{parsed.netloc}/'
-	attempt_timeout = min(timeout_ms, 45_000)
+	attempt_timeout = min(timeout_ms, 60_000)
 
 	try:
 		print(f'[INFO] Warming up {base_url} before login')
-		await page.goto(base_url, wait_until='domcontentloaded', timeout=attempt_timeout)
-		await asyncio.sleep(2)
+		await page.goto(base_url, wait_until='load', timeout=attempt_timeout)
+		await asyncio.sleep(3)
+		try:
+			await page.wait_for_load_state('networkidle', timeout=15_000)
+		except Exception:  # nosec B110
+			pass
 		closed = await dismiss_popups(page)
 		if closed:
 			print(f'[INFO] Dismissed {closed} popup dialog(s) during warmup')
@@ -261,18 +285,23 @@ async def navigate_login_page(page: Page, login_url: str, timeout_ms: int) -> No
 	for attempt in range(3):
 		print(f'[INFO] Navigating login page (attempt {attempt + 1}/3): {login_url}')
 		await page.goto(login_url, wait_until='load', timeout=attempt_timeout)
+		await asyncio.sleep(5)
 		try:
-			await page.wait_for_function(_LOGIN_SHELL_READY_JS, timeout=attempt_timeout)
-			await wait_for_site_ready(page, timeout_ms)
-			if await page.evaluate(_LOGIN_SHELL_READY_JS):
-				return
+			await page.wait_for_load_state('networkidle', timeout=20_000)
 		except Exception:  # nosec B110
 			pass
 
+		if await _wait_for_login_shell(page, attempt_timeout):
+			await wait_for_site_ready(page, timeout_ms)
+			if await page.evaluate(_LOGIN_SHELL_READY_JS):
+				return
+
 		print(f'[WARN] Login page shell not ready on attempt {attempt + 1}')
 		await _log_login_page_state(page)
+		if provider and account_name:
+			await save_login_screenshot(page, provider, account_name, f'login-shell-attempt-{attempt + 1}')
 		if attempt < 2:
-			await asyncio.sleep(3)
+			await asyncio.sleep(5)
 			try:
 				await page.reload(wait_until='load', timeout=attempt_timeout)
 			except Exception:  # nosec B110
@@ -411,6 +440,10 @@ async def _log_login_page_state(page: Page) -> None:
 				.filter(isVisible)
 				.map((b) => (b.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 60));
 			return {
+				title: document.title || '',
+				readyState: document.readyState,
+				bodySnippet: (document.body?.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 300),
+				scriptCount: document.querySelectorAll('script').length,
 				hasSemiCard: !!document.querySelector('.semi-card'),
 				mailEntryCount: document.querySelectorAll('.semi-card button:has(.semi-icon-mail)').length,
 				usernameVisible: isVisible(document.querySelector('#username')),

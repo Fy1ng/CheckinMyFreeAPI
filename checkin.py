@@ -151,7 +151,13 @@ async def login_with_credentials(
 	try:
 		page = await context.new_page()
 		await prepare_browser_page(page)
-		await navigate_login_page(page, login_url, timeout_ms)
+		await navigate_login_page(
+			page,
+			login_url,
+			timeout_ms,
+			provider=provider_name,
+			account_name=account_name,
+		)
 
 		if not await has_session_cookie(page):
 			await save_login_screenshot(page, provider_name, account_name, 'before-email-login')
