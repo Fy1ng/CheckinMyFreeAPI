@@ -10,6 +10,7 @@ jobs:
     environment: production
     env:
       PYTHONIOENCODING: utf-8
+      PYTHONUNBUFFERED: 1
     steps:
     - uses: actions/checkout@v6
 

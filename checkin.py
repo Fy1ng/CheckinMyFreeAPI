@@ -10,6 +10,11 @@ import os
 import sys
 from datetime import datetime
 
+if hasattr(sys.stdout, 'reconfigure'):
+	sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, 'reconfigure'):
+	sys.stderr.reconfigure(line_buffering=True)
+
 import httpx
 from cloakbrowser import launch_async
 from dotenv import load_dotenv
