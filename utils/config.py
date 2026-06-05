@@ -175,6 +175,12 @@ def load_accounts_config() -> list[AccountConfig] | None:
 
 	try:
 		accounts_data = json.loads(accounts_str)
+	except json.JSONDecodeError as e:
+		print(f'ERROR: ANYROUTER_ACCOUNTS JSON 解析失败: {e}')
+		print('HINT: 常见原因 - 末尾多余逗号、使用了单引号、包含注释、或换行格式问题')
+		return None
+
+	try:
 
 		if not isinstance(accounts_data, list):
 			print('ERROR: Account configuration must use array format [{}]')

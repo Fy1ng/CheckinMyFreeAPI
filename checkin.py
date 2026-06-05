@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AnyRouter.top 自动签到脚本（CloakBrowser 版本）
+AnyRouter.top 自动签到脚本
 """
 
 import asyncio
@@ -65,8 +65,8 @@ def parse_cookies(cookies_data):
 
 
 async def get_waf_cookies_with_browser(account_name: str, login_url: str, required_cookies: list[str]):
-	"""使用 CloakBrowser 获取 WAF cookies"""
-	print(f'[PROCESSING] {account_name}: Starting CloakBrowser to get WAF cookies...')
+	"""使用浏览器获取 WAF cookies"""
+	print(f'[PROCESSING] {account_name}: Starting browser to get WAF cookies...')
 
 	browser = await launch_async(headless=True)
 
@@ -111,7 +111,7 @@ async def get_waf_cookies_with_browser(account_name: str, login_url: str, requir
 
 async def login_with_credentials(account_name: str, provider_config, email: str, password: str) -> dict | None:
 	"""使用邮箱密码通过浏览器登录，返回 session cookies 和 WAF cookies"""
-	print(f'[PROCESSING] {account_name}: Logging in with email/password via CloakBrowser...')
+	print(f'[PROCESSING] {account_name}: Logging in with email/password...')
 
 	login_url = f'{provider_config.domain}{provider_config.login_path}'
 	browser = await launch_async(headless=True, humanize=True)
@@ -424,7 +424,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 async def main():
 	"""主函数"""
-	print('[SYSTEM] AnyRouter.top multi-account auto check-in script started (using CloakBrowser)')
+	print('[SYSTEM] AnyRouter.top multi-account auto check-in script started')
 	print(f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
 	app_config = AppConfig.load_from_env()
@@ -432,7 +432,9 @@ async def main():
 
 	accounts = load_accounts_config()
 	if not accounts:
-		print('[FAILED] Unable to load account configuration, program exits')
+		error_msg = '[FAILED] Unable to load account configuration, program exits'
+		print(error_msg)
+		notify.push_message('AnyRouter Check-in Alert', error_msg, msg_type='text')
 		sys.exit(1)
 
 	print(f'[INFO] Found {len(accounts)} account configurations')
