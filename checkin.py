@@ -14,7 +14,15 @@ import httpx
 from cloakbrowser import launch_async
 from dotenv import load_dotenv
 
-from utils.browser import has_session_cookie, login_with_email_form, prepare_browser_page, wait_for_waf_ready
+from utils.browser import (
+	has_session_cookie,
+	launch_login_context,
+	load_browser_login_settings,
+	login_with_email_form,
+	prepare_browser_page,
+	wait_for_site_ready,
+	wait_for_waf_ready,
+)
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.notify import notify
 
@@ -107,58 +115,67 @@ async def get_waf_cookies_with_browser(account_name: str, login_url: str, requir
 		return None
 
 
-async def login_with_credentials(account_name: str, provider_config, email: str, password: str) -> dict | None:
+async def login_with_credentials(
+	account_name: str,
+	provider_config,
+	provider_name: str,
+	email: str,
+	password: str,
+) -> dict | None:
 	"""使用邮箱密码通过浏览器登录，返回 session cookies 和 WAF cookies"""
 	print(f'[PROCESSING] {account_name}: Logging in with email/password...')
 
 	login_url = f'{provider_config.domain}{provider_config.login_path}'
+	settings = load_browser_login_settings(account_name, provider_name)
+	timeout_ms = settings.wait_timeout_ms
+
+	print(
+		f'[INFO] {account_name}: Browser profile={settings.profile_dir}, '
+		f'headless={settings.headless}, timeout={timeout_ms}ms'
+	)
 
 	try:
-		browser = await launch_async(headless=True, humanize=True, human_preset='careful')
+		context = await launch_login_context(settings)
 	except Exception as e:
 		print(f'[FAILED] {account_name}: Browser launch failed: {e}')
 		return None
 
 	try:
-		page = await browser.new_page()
+		page = await context.new_page()
 		await prepare_browser_page(page)
-		await page.goto(login_url, wait_until='domcontentloaded')
+		await page.goto(login_url, wait_until='domcontentloaded', timeout=timeout_ms)
+		await wait_for_site_ready(page, timeout_ms)
 
 		if not await has_session_cookie(page):
-			await login_with_email_form(page, email, password)
+			await login_with_email_form(page, email, password, timeout_ms)
 
 		if not await has_session_cookie(page):
 			console_url = f'{provider_config.domain}/console'
-			print(f'[INFO] {account_name}: Retrying login via {console_url}')
-			await page.goto(console_url, wait_until='domcontentloaded')
-			if not await has_session_cookie(page):
-				await login_with_email_form(page, email, password)
+			print(f'[INFO] {account_name}: Checking login state via {console_url}')
+			await page.goto(console_url, wait_until='domcontentloaded', timeout=timeout_ms)
+			await wait_for_site_ready(page, timeout_ms)
 
 		if not await has_session_cookie(page):
-			cookies = await page.context.cookies()
+			cookies = await context.cookies()
 			cookie_names = [c.get('name') for c in cookies if c.get('name')]
 			print(f'[FAILED] {account_name}: Login failed - no session cookie found')
+			print(f'[INFO] {account_name}: Current URL: {page.url}')
 			print(f'[INFO] {account_name}: Got cookies: {cookie_names}')
-			await browser.close()
+			await context.close()
 			return None
 
-		# 收集所有 cookies
-		cookies = await page.context.cookies()
-
-		all_cookies = {}
-		for cookie in cookies:
-			cookie_name = cookie.get('name')
-			cookie_value = cookie.get('value')
-			if cookie_name and cookie_value:
-				all_cookies[cookie_name] = cookie_value
+		cookies = await context.cookies()
+		all_cookies = {
+			cookie.get('name'): cookie.get('value') for cookie in cookies if cookie.get('name') and cookie.get('value')
+		}
 
 		print(f'[SUCCESS] {account_name}: Login successful, got {len(all_cookies)} cookies')
-		await browser.close()
+		await context.close()
 		return all_cookies
 
 	except Exception as e:
 		print(f'[FAILED] {account_name}: Error during login: {e}')
-		await browser.close()
+		await context.close()
 		return None
 
 
@@ -291,18 +308,17 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 	if account.has_login_credentials():
 		print(f'[INFO] {account_name}: Attempting email/password login (priority)...')
 		assert account.email is not None and account.password is not None
-		all_cookies = await login_with_credentials(account_name, provider_config, account.email, account.password)
+		all_cookies = await login_with_credentials(
+			account_name,
+			provider_config,
+			account.provider,
+			account.email,
+			account.password,
+		)
 		if all_cookies:
 			auth_method = 'email/password'
-		elif account.cookies:
-			print(f'[WARN] {account_name}: Email/password login FAILED, falling back to session cookies')
-			user_cookies = parse_cookies(account.cookies)
-			if user_cookies:
-				all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
-				if all_cookies:
-					auth_method = 'session cookies (fallback)'
-		if not all_cookies:
-			print(f'[FAILED] {account_name}: All login methods failed')
+		else:
+			print(f'[FAILED] {account_name}: Email/password login failed, will not use stale session cookies')
 			return False, None, None
 	else:
 		user_cookies = parse_cookies(account.cookies)

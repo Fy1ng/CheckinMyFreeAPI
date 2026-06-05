@@ -6,5 +6,6 @@ __pycache__
 .ruff_cache
 .mypy_cache
 balance_hash.txt
+.browser_profiles
 
 .DS_Store
