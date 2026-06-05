@@ -18,11 +18,19 @@ if TYPE_CHECKING:
 EMAIL_LOGIN_BUTTON_NAMES = (
 	re.compile(r'邮箱或用户名'),
 	re.compile(r'使用.*邮箱'),
+	re.compile(r'Email or Username', re.I),
+	re.compile(r'Sign in with Email', re.I),
 )
 EMAIL_LOGIN_ENTRY_SELECTORS = (
 	'.semi-card button:has(.semi-icon-mail):not(form.semi-form button)',
 	'.semi-card button:has([aria-label="mail"]):not(form.semi-form button)',
 	'.semi-card button.semi-button-primary:has(.semi-icon-mail)',
+	'button:has(.semi-icon-mail):not(form.semi-form button)',
+)
+LOGIN_PAGE_READY_SELECTORS = (
+	'.semi-card button:has(.semi-icon-mail)',
+	'.semi-card',
+	'button:has(.semi-icon-mail)',
 )
 LOGIN_FORM_SELECTOR = 'form.semi-form'
 USERNAME_SELECTORS = ('#username', 'input[name="username"]', 'input[name="email"]', 'input[type="email"]')
@@ -202,6 +210,43 @@ async def _dismiss_blocking_overlays(page: Page) -> None:
 		await asyncio.sleep(0.3)
 
 
+async def _click_locator(button: Locator) -> bool:
+	try:
+		await button.scroll_into_view_if_needed()
+		await button.click(timeout=FORM_ACTION_TIMEOUT_MS)
+		return True
+	except Exception:
+		try:
+			await button.click(force=True, timeout=FORM_ACTION_TIMEOUT_MS)
+			return True
+		except Exception:  # nosec B112
+			return False
+
+
+async def _wait_for_login_page_ready(page: Page, timeout_ms: int) -> None:
+	if await _is_email_form_visible(page):
+		return
+
+	remaining_ms = timeout_ms
+	for selector in LOGIN_PAGE_READY_SELECTORS:
+		if remaining_ms <= 0:
+			break
+		try:
+			await page.locator(selector).first.wait_for(state='visible', timeout=remaining_ms)
+			return
+		except Exception:  # nosec B112
+			continue
+
+	for pattern in EMAIL_LOGIN_BUTTON_NAMES:
+		if remaining_ms <= 0:
+			break
+		try:
+			await page.get_by_role('button', name=pattern).first.wait_for(state='visible', timeout=remaining_ms)
+			return
+		except Exception:  # nosec B112
+			continue
+
+
 async def _click_email_login_entry(page: Page) -> bool:
 	for selector in EMAIL_LOGIN_ENTRY_SELECTORS:
 		buttons = page.locator(selector)
@@ -210,22 +255,19 @@ async def _click_email_login_entry(page: Page) -> bool:
 			button = buttons.nth(index)
 			try:
 				if await button.is_visible():
-					await button.scroll_into_view_if_needed()
-					await button.click(timeout=FORM_ACTION_TIMEOUT_MS)
-					return True
+					if await _click_locator(button):
+						return True
 			except Exception:  # nosec B112
 				continue
 
-	card = page.locator('.semi-card')
 	for pattern in EMAIL_LOGIN_BUTTON_NAMES:
-		try:
-			button = card.get_by_role('button', name=pattern).first
-			if await button.is_visible():
-				await button.scroll_into_view_if_needed()
-				await button.click(timeout=FORM_ACTION_TIMEOUT_MS)
-				return True
-		except Exception:  # nosec B112
-			continue
+		for scope in (page.locator('.semi-card'), page):
+			try:
+				button = scope.get_by_role('button', name=pattern).first
+				if await button.is_visible() and await _click_locator(button):
+					return True
+			except Exception:  # nosec B112
+				continue
 
 	return False
 
@@ -243,12 +285,43 @@ async def _wait_for_username_input(page: Page, timeout_ms: int) -> bool:
 	return False
 
 
+async def _log_login_page_state(page: Page) -> None:
+	state = await page.evaluate(
+		"""() => {
+			const isVisible = (el) => {
+				if (!el || !el.isConnected) return false;
+				const style = window.getComputedStyle(el);
+				if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return false;
+				const rect = el.getBoundingClientRect();
+				return rect.width > 0 && rect.height > 0;
+			};
+			const buttons = [...document.querySelectorAll('button')]
+				.filter(isVisible)
+				.map((b) => (b.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 60));
+			return {
+				hasSemiCard: !!document.querySelector('.semi-card'),
+				mailEntryCount: document.querySelectorAll('.semi-card button:has(.semi-icon-mail)').length,
+				usernameVisible: isVisible(document.querySelector('#username')),
+				modalVisible: [...document.querySelectorAll('div[role="dialog"][aria-modal="true"]')].some(isVisible),
+				buttons: buttons.slice(0, 8),
+			};
+		}"""
+	)
+	print(f'[INFO] Login page state: {state}')
+
+
 async def _open_email_login_form(page: Page, timeout_ms: int) -> None:
 	deadline = time.monotonic() + timeout_ms / 1000
 
 	await _dismiss_blocking_overlays(page)
 	if await _is_email_form_visible(page):
 		return
+
+	ready_timeout = min(timeout_ms, WAF_READY_TIMEOUT_MS)
+	try:
+		await _wait_for_login_page_ready(page, ready_timeout)
+	except Exception:  # nosec B110
+		pass
 
 	while time.monotonic() < deadline:
 		remaining_ms = int((deadline - time.monotonic()) * 1000)
@@ -291,6 +364,7 @@ async def _open_email_login_form(page: Page, timeout_ms: int) -> None:
 		return
 
 	print(f'[INFO] Login page URL: {page.url}')
+	await _log_login_page_state(page)
 	raise TimeoutError(f'Cannot open email login form, selectors: {USERNAME_SELECTORS}')
 
 

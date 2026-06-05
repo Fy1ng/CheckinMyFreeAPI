@@ -10,8 +10,8 @@ if TYPE_CHECKING:
 	from playwright.async_api import Page
 
 _MODAL_SELECTOR = 'div[role="dialog"][aria-modal="true"]'
-_CLOSE_ANNOUNCEMENT = re.compile(r'关闭公告')
-_DISMISS_TODAY = re.compile(r'今日关闭')
+_CLOSE_ANNOUNCEMENT = re.compile(r'关闭公告|Close Notice', re.I)
+_DISMISS_TODAY = re.compile(r'今日关闭|Close Today', re.I)
 
 _DISMISS_MODALS_CORE_JS = """
 	const isVisible = (el) => {
