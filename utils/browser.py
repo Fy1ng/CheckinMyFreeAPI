@@ -41,7 +41,7 @@ SUBMIT_SELECTORS = (
 	'button[type="submit"]',
 )
 SESSION_COOKIE_NAME = 'session'
-DEFAULT_SCREENSHOT_DIR = '.checkin_screenshots'
+DEFAULT_SCREENSHOT_DIR = 'checkin_screenshots'
 DEFAULT_TIMEOUT_MS = 60_000
 _pending_notify_screenshots: list[Path] = []
 FORM_ACTION_TIMEOUT_MS = 15_000

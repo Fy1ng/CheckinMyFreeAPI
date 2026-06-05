@@ -108,8 +108,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: checkin-screenshots-${{ github.run_id }}
-        path: .checkin_screenshots/
-        if-no-files-found: ignore
+        path: checkin_screenshots/
+        if-no-files-found: warn
+        include-hidden-files: true
         retention-days: 14
 
     - name: 执行结果
@@ -117,7 +118,7 @@ jobs:
       run: |
         echo "签到任务执行完成"
         echo "时间: $(date)"
-        if [ -d .checkin_screenshots ] && [ "$(ls -A .checkin_screenshots 2>/dev/null)" ]; then
+        if [ -d checkin_screenshots ] && [ "$(ls -A checkin_screenshots 2>/dev/null)" ]; then
           echo "调试截图已上传为 artifact: checkin-screenshots-${{ github.run_id }}"
-          ls -la .checkin_screenshots/
+          ls -la checkin_screenshots/
         fi

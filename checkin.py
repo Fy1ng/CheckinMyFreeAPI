@@ -542,7 +542,7 @@ async def main():
 				run_url = f'https://github.com/{github_repo}/actions/runs/{github_run_id}'
 				screenshot_hint += f'. Download artifact `checkin-screenshots-{github_run_id}` from: {run_url}'
 			else:
-				screenshot_hint += ' to `.checkin_screenshots/`'
+				screenshot_hint += ' to `checkin_screenshots/`'
 			notify_content += f'\n\n{screenshot_hint}'
 
 		print(notify_content)
