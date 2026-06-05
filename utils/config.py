@@ -136,7 +136,7 @@ class AccountConfig:
 	"""账号配置"""
 
 	cookies: dict | str | None
-	api_user: str
+	api_user: str | None = None
 	provider: str = 'anyrouter'
 	name: str | None = None
 	email: str | None = None
@@ -150,7 +150,7 @@ class AccountConfig:
 
 		return cls(
 			cookies=data.get('cookies'),
-			api_user=data['api_user'],
+			api_user=data.get('api_user'),
 			provider=provider,
 			name=name if name else None,
 			email=data.get('email'),
@@ -187,8 +187,10 @@ def load_accounts_config() -> list[AccountConfig] | None:
 				return None
 
 			if 'api_user' not in account_dict:
-				print(f'ERROR: Account {i + 1} missing required field (api_user)')
-				return None
+				has_login = account_dict.get('email') and account_dict.get('password')
+				if not has_login:
+					print(f'ERROR: Account {i + 1} missing required field (api_user) - only email+password login can omit it')
+					return None
 
 			has_cookies = 'cookies' in account_dict and account_dict['cookies']
 			has_login = account_dict.get('email') and account_dict.get('password')

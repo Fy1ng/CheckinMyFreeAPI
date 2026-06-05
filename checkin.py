@@ -394,8 +394,10 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			'Sec-Fetch-Dest': 'empty',
 			'Sec-Fetch-Mode': 'cors',
 			'Sec-Fetch-Site': 'same-origin',
-			provider_config.api_user_key: account.api_user,
 		}
+
+		if account.api_user:
+			headers[provider_config.api_user_key] = account.api_user
 
 		user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 		user_info_before = get_user_info(client, headers, user_info_url)
