@@ -127,7 +127,17 @@ async def _is_email_form_visible(page: Page) -> bool:
 	return bool(await page.locator(USERNAME_SELECTOR).is_visible())
 
 
+async def _dismiss_blocking_overlays(page: Page) -> None:
+	for _ in range(3):
+		closed = await dismiss_popups(page)
+		if closed == 0:
+			break
+		await asyncio.sleep(0.3)
+
+
 async def _open_email_login_form(page: Page, timeout_ms: int) -> None:
+	await _dismiss_blocking_overlays(page)
+
 	if await _is_email_form_visible(page):
 		return
 
@@ -146,16 +156,22 @@ async def _open_email_login_form(page: Page, timeout_ms: int) -> None:
 			if await _is_email_form_visible(page):
 				break
 
-	await page.locator(USERNAME_SELECTOR).wait_for(
-		state='visible',
-		timeout=min(timeout_ms, FORM_ACTION_TIMEOUT_MS),
-	)
+	await page.locator(USERNAME_SELECTOR).wait_for(state='visible', timeout=timeout_ms)
+	await _dismiss_blocking_overlays(page)
 
 
 async def _set_input_value(locator: Locator, value: str, timeout_ms: int) -> None:
-	await locator.click(timeout=timeout_ms)
-	await locator.fill(value, timeout=timeout_ms)
+	click_timeout = min(timeout_ms, 5000)
 	try:
+		await locator.click(timeout=click_timeout)
+	except Exception:
+		try:
+			await locator.click(force=True, timeout=click_timeout)
+		except Exception:  # nosec B110
+			pass
+
+	try:
+		await locator.fill(value, timeout=timeout_ms)
 		if await locator.input_value(timeout=2000) == value:
 			return
 	except Exception:  # nosec B110
@@ -175,6 +191,7 @@ async def _set_input_value(locator: Locator, value: str, timeout_ms: int) -> Non
 
 
 async def fill_email_credentials(page: Page, email: str, password: str, timeout_ms: int) -> None:
+	await _dismiss_blocking_overlays(page)
 	action_timeout = min(timeout_ms, FORM_ACTION_TIMEOUT_MS)
 	username_input = page.locator(USERNAME_SELECTOR)
 	password_input = page.locator(PASSWORD_SELECTOR)
@@ -190,7 +207,10 @@ async def submit_login_form(page: Page, timeout_ms: int) -> None:
 	action_timeout = min(timeout_ms, FORM_ACTION_TIMEOUT_MS)
 	submit = page.locator(SUBMIT_SELECTOR)
 	await submit.wait_for(state='visible', timeout=action_timeout)
-	await submit.click(timeout=action_timeout)
+	try:
+		await submit.click(timeout=action_timeout)
+	except Exception:
+		await submit.click(force=True, timeout=action_timeout)
 	try:
 		await page.wait_for_load_state('domcontentloaded', timeout=action_timeout)
 	except Exception:  # nosec B110
