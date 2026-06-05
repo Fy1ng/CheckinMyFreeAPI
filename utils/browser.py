@@ -7,6 +7,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -40,22 +41,52 @@ SUBMIT_SELECTORS = (
 	'button[type="submit"]',
 )
 SESSION_COOKIE_NAME = 'session'
+DEFAULT_SCREENSHOT_DIR = '.checkin_screenshots'
 DEFAULT_TIMEOUT_MS = 60_000
+_pending_notify_screenshots: list[Path] = []
 FORM_ACTION_TIMEOUT_MS = 15_000
 EMAIL_TAB_TIMEOUT_MS = 8_000
 WAF_READY_TIMEOUT_MS = 30_000
 SESSION_WAIT_TIMEOUT_MS = 15_000
 
-_SITE_READY_JS = """() => {
+_VISIBLE_CHECK_JS = """
+	const isVisible = (el) => {
+		if (!el || !el.isConnected) return false;
+		const style = window.getComputedStyle(el);
+		if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
+			return false;
+		}
+		const rect = el.getBoundingClientRect();
+		return rect.width > 0 && rect.height > 0;
+	};
+	const countVisible = (selector) => [...document.querySelectorAll(selector)].filter(isVisible).length;
+"""
+
+_SITE_READY_JS = f"""() => {{
+{_VISIBLE_CHECK_JS}
+	const text = document.body?.innerText || '';
+	const blocked = /请进行验证|为了更好的访问体验|访问受限|Access denied|verify you are human/i.test(text);
+	if (blocked) return false;
 	const wafBlockers = document.querySelector(
 		'iframe[src*="captcha"], iframe[src*="verify"], iframe[src*="slide"], .nc-container, #nocaptcha'
 	);
-	if (wafBlockers) {
+	if (wafBlockers) {{
 		const rect = wafBlockers.getBoundingClientRect?.();
 		if (rect && rect.width > 0 && rect.height > 0) return false;
-	}
-	return !!document.querySelector('a, button');
-}"""
+	}}
+	if (/\\/login/.test(location.pathname)) {{
+		return countVisible('.semi-card') > 0 || countVisible('#username') > 0 || countVisible('button') >= 2;
+	}}
+	return countVisible('a') > 0 || countVisible('button') > 0;
+}}"""
+
+_LOGIN_SHELL_READY_JS = f"""() => {{
+{_VISIBLE_CHECK_JS}
+	const text = document.body?.innerText || '';
+	const blocked = /请进行验证|为了更好的访问体验|访问受限|Access denied|verify you are human/i.test(text);
+	if (blocked) return false;
+	return countVisible('.semi-card') > 0 || countVisible('#username') > 0 || countVisible('button') >= 2;
+}}"""
 
 _OPEN_EMAIL_FORM_JS = """() => {
 	const isVisible = (el) => {
@@ -152,6 +183,46 @@ async def launch_login_context(settings: BrowserLoginSettings) -> BrowserContext
 	return await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs)
 
 
+def get_screenshot_dir() -> Path:
+	return Path(os.getenv('CHECKIN_SCREENSHOT_DIR', DEFAULT_SCREENSHOT_DIR))
+
+
+def _sanitize_screenshot_part(value: str) -> str:
+	cleaned = re.sub(r'[^\w.-]+', '_', value.strip())
+	return cleaned or 'unknown'
+
+
+async def save_login_screenshot(
+	page: Page,
+	provider: str,
+	account_name: str,
+	label: str,
+) -> Path | None:
+	screenshot_dir = get_screenshot_dir()
+	screenshot_dir.mkdir(parents=True, exist_ok=True)
+	timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+	filename = (
+		f'{_sanitize_screenshot_part(provider)}_{_sanitize_screenshot_part(account_name)}'
+		f'_{timestamp}_{_sanitize_screenshot_part(label)}.png'
+	)
+	path = screenshot_dir / filename
+	try:
+		await page.screenshot(path=str(path), full_page=True, timeout=15_000)
+		_pending_notify_screenshots.append(path)
+		print(f'[INFO] Screenshot saved: {path}')
+		return path
+	except Exception as exc:
+		print(f'[WARN] Failed to save screenshot ({label}): {exc}')
+		return None
+
+
+def take_pending_screenshots() -> list[Path]:
+	"""取出待推送的登录截图列表并清空缓存。"""
+	paths = list(_pending_notify_screenshots)
+	_pending_notify_screenshots.clear()
+	return paths
+
+
 async def prepare_browser_page(page: Page) -> None:
 	await setup_popup_guard(page)
 
@@ -163,10 +234,51 @@ async def wait_for_site_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS
 	try:
 		await page.wait_for_function(_SITE_READY_JS, timeout=waf_timeout)
 	except Exception:
-		await asyncio.sleep(2)
+		await asyncio.sleep(3)
 	closed = await dismiss_popups(page)
 	if closed:
 		print(f'[INFO] Dismissed {closed} popup dialog(s)')
+
+
+async def navigate_login_page(page: Page, login_url: str, timeout_ms: int) -> None:
+	"""预热站点、导航登录页并等待 SPA 渲染完成。"""
+	from urllib.parse import urlparse
+
+	parsed = urlparse(login_url)
+	base_url = f'{parsed.scheme}://{parsed.netloc}/'
+	attempt_timeout = min(timeout_ms, 45_000)
+
+	try:
+		print(f'[INFO] Warming up {base_url} before login')
+		await page.goto(base_url, wait_until='domcontentloaded', timeout=attempt_timeout)
+		await asyncio.sleep(2)
+		closed = await dismiss_popups(page)
+		if closed:
+			print(f'[INFO] Dismissed {closed} popup dialog(s) during warmup')
+	except Exception as exc:
+		print(f'[WARN] Warmup navigation failed: {exc}')
+
+	for attempt in range(3):
+		print(f'[INFO] Navigating login page (attempt {attempt + 1}/3): {login_url}')
+		await page.goto(login_url, wait_until='load', timeout=attempt_timeout)
+		try:
+			await page.wait_for_function(_LOGIN_SHELL_READY_JS, timeout=attempt_timeout)
+			await wait_for_site_ready(page, timeout_ms)
+			if await page.evaluate(_LOGIN_SHELL_READY_JS):
+				return
+		except Exception:  # nosec B110
+			pass
+
+		print(f'[WARN] Login page shell not ready on attempt {attempt + 1}')
+		await _log_login_page_state(page)
+		if attempt < 2:
+			await asyncio.sleep(3)
+			try:
+				await page.reload(wait_until='load', timeout=attempt_timeout)
+			except Exception:  # nosec B110
+				pass
+
+	raise TimeoutError(f'Login page never rendered: {login_url}')
 
 
 async def has_session_cookie(page: Page) -> bool:
@@ -310,7 +422,13 @@ async def _log_login_page_state(page: Page) -> None:
 	print(f'[INFO] Login page state: {state}')
 
 
-async def _open_email_login_form(page: Page, timeout_ms: int) -> None:
+async def _open_email_login_form(
+	page: Page,
+	timeout_ms: int,
+	*,
+	provider: str = '',
+	account_name: str = '',
+) -> None:
 	deadline = time.monotonic() + timeout_ms / 1000
 
 	await _dismiss_blocking_overlays(page)
@@ -365,6 +483,8 @@ async def _open_email_login_form(page: Page, timeout_ms: int) -> None:
 
 	print(f'[INFO] Login page URL: {page.url}')
 	await _log_login_page_state(page)
+	if provider and account_name:
+		await save_login_screenshot(page, provider, account_name, 'email-form-timeout')
 	raise TimeoutError(f'Cannot open email login form, selectors: {USERNAME_SELECTORS}')
 
 
@@ -457,8 +577,21 @@ async def submit_login_form(page: Page, timeout_ms: int) -> None:
 	await wait_for_session_cookie(page, SESSION_WAIT_TIMEOUT_MS)
 
 
-async def login_with_email_form(page: Page, email: str, password: str, timeout_ms: int) -> None:
-	await _open_email_login_form(page, timeout_ms)
+async def login_with_email_form(
+	page: Page,
+	email: str,
+	password: str,
+	timeout_ms: int,
+	*,
+	provider: str = '',
+	account_name: str = '',
+) -> None:
+	await _open_email_login_form(
+		page,
+		timeout_ms,
+		provider=provider,
+		account_name=account_name,
+	)
 	await fill_email_credentials(page, email, password, timeout_ms)
 	await submit_login_form(page, timeout_ms)
 	await wait_for_site_ready(page, timeout_ms)

@@ -7,5 +7,6 @@ __pycache__
 .mypy_cache
 balance_hash.txt
 .browser_profiles
+.checkin_screenshots
 
 .DS_Store

@@ -24,8 +24,10 @@ from utils.browser import (
 	launch_login_context,
 	load_browser_login_settings,
 	login_with_email_form,
+	navigate_login_page,
 	prepare_browser_page,
-	wait_for_site_ready,
+	save_login_screenshot,
+	take_pending_screenshots,
 	wait_for_waf_ready,
 )
 from utils.config import AccountConfig, AppConfig, load_accounts_config
@@ -145,14 +147,22 @@ async def login_with_credentials(
 		print(f'[FAILED] {account_name}: Browser launch failed: {e}')
 		return None
 
+	page = None
 	try:
 		page = await context.new_page()
 		await prepare_browser_page(page)
-		await page.goto(login_url, wait_until='domcontentloaded', timeout=timeout_ms)
-		await wait_for_site_ready(page, timeout_ms)
+		await navigate_login_page(page, login_url, timeout_ms)
 
 		if not await has_session_cookie(page):
-			await login_with_email_form(page, email, password, timeout_ms)
+			await save_login_screenshot(page, provider_name, account_name, 'before-email-login')
+			await login_with_email_form(
+				page,
+				email,
+				password,
+				timeout_ms,
+				provider=provider_name,
+				account_name=account_name,
+			)
 
 		if not await has_session_cookie(page):
 			cookies = await context.cookies()
@@ -160,6 +170,7 @@ async def login_with_credentials(
 			print(f'[FAILED] {account_name}: Login failed - no session cookie found')
 			print(f'[INFO] {account_name}: Current URL: {page.url}')
 			print(f'[INFO] {account_name}: Got cookies: {cookie_names}')
+			await save_login_screenshot(page, provider_name, account_name, 'no-session')
 			await context.close()
 			return None
 
@@ -174,6 +185,8 @@ async def login_with_credentials(
 
 	except Exception as e:
 		print(f'[FAILED] {account_name}: Error during login: {e}')
+		if page is not None:
+			await save_login_screenshot(page, provider_name, account_name, 'login-error')
 		await context.close()
 		return None
 
@@ -514,6 +527,17 @@ async def main():
 		time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
 
 		notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
+		screenshot_paths = take_pending_screenshots()
+		if screenshot_paths:
+			github_run_id = os.getenv('GITHUB_RUN_ID', '').strip()
+			github_repo = os.getenv('GITHUB_REPOSITORY', '').strip()
+			screenshot_hint = f'[SCREENSHOT] {len(screenshot_paths)} debug screenshot(s) saved'
+			if github_run_id and github_repo:
+				run_url = f'https://github.com/{github_repo}/actions/runs/{github_run_id}'
+				screenshot_hint += f'. Download artifact `checkin-screenshots-{github_run_id}` from: {run_url}'
+			else:
+				screenshot_hint += ' to `.checkin_screenshots/`'
+			notify_content += f'\n\n{screenshot_hint}'
 
 		print(notify_content)
 		notify.push_message('AnyRouter Check-in Alert', notify_content, msg_type='text')
