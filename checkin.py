@@ -14,8 +14,10 @@ import httpx
 from cloakbrowser import launch_async
 from dotenv import load_dotenv
 
+from utils.browser import is_logged_in, login_with_email_form, wait_for_site_ready
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.notify import notify
+from utils.popups import dismiss_popups
 
 load_dotenv()
 
@@ -74,21 +76,8 @@ async def get_waf_cookies_with_browser(account_name: str, login_url: str, requir
 		page = await browser.new_page()
 		print(f'[PROCESSING] {account_name}: Access login page to get initial cookies...')
 
-		await page.goto(login_url, wait_until='networkidle')
-
-		try:
-			await page.wait_for_function('document.readyState === "complete"', timeout=5000)
-		except Exception:
-			await page.wait_for_timeout(3000)
-
-		# 关闭可能出现的弹窗
-		try:
-			modal_close = await page.wait_for_selector('.semi-modal-close', timeout=3000)
-			if modal_close:
-				await modal_close.click()
-				await page.wait_for_timeout(500)
-		except Exception:
-			pass
+		await page.goto(login_url, wait_until='domcontentloaded')
+		await wait_for_site_ready(page)
 
 		cookies = await page.context.cookies()
 
@@ -125,110 +114,32 @@ async def login_with_credentials(account_name: str, provider_config, email: str,
 	login_url = f'{provider_config.domain}{provider_config.login_path}'
 
 	try:
-		browser = await launch_async(headless=True, humanize=True)
+		browser = await launch_async(headless=True, humanize=True, human_preset='careful')
 	except Exception as e:
 		print(f'[FAILED] {account_name}: Browser launch failed: {e}')
 		return None
 
 	try:
 		page = await browser.new_page()
-		await page.goto(login_url, wait_until='networkidle')
+		await page.goto(login_url, wait_until='domcontentloaded')
+		await wait_for_site_ready(page)
 
-		try:
-			await page.wait_for_function('document.readyState === "complete"', timeout=10000)
-		except Exception:
-			await page.wait_for_timeout(3000)
+		if not await is_logged_in(page):
+			await login_with_email_form(page, email, password)
 
-		# 填写邮箱
-		email_selectors = [
-			'input[name="email"]',
-			'input[type="email"]',
-			'input[name="username"]',
-			'input[id="email"]',
-			'input[placeholder*="email" i]',
-		]
+		if not await is_logged_in(page):
+			console_url = f'{provider_config.domain}/console'
+			await page.goto(console_url, wait_until='domcontentloaded')
+			await wait_for_site_ready(page)
 
-		email_input = None
-		for selector in email_selectors:
-			try:
-				email_input = await page.wait_for_selector(selector, timeout=2000)
-				if email_input:
-					break
-			except Exception:
-				continue
-
-		if not email_input:
-			print(f'[FAILED] {account_name}: Cannot find email input field')
+		if not await is_logged_in(page):
+			print(f'[FAILED] {account_name}: Login may have failed - not redirected to logged-in page')
 			await browser.close()
 			return None
 
-		await email_input.fill(email)
-
-		# 填写密码
-		password_selectors = [
-			'input[name="password"]',
-			'input[type="password"]',
-			'input[id="password"]',
-		]
-
-		password_input = None
-		for selector in password_selectors:
-			try:
-				password_input = await page.wait_for_selector(selector, timeout=2000)
-				if password_input:
-					break
-			except Exception:
-				continue
-
-		if not password_input:
-			print(f'[FAILED] {account_name}: Cannot find password input field')
-			await browser.close()
-			return None
-
-		await password_input.fill(password)
-
-		# 点击登录按钮
-		login_selectors = [
-			'button[type="submit"]',
-			'button:has-text("登录")',
-			'button:has-text("Login")',
-			'button:has-text("Sign in")',
-			'input[type="submit"]',
-		]
-
-		login_button = None
-		for selector in login_selectors:
-			try:
-				login_button = await page.wait_for_selector(selector, timeout=2000)
-				if login_button:
-					break
-			except Exception:
-				continue
-
-		if not login_button:
-			print(f'[FAILED] {account_name}: Cannot find login button')
-			await browser.close()
-			return None
-
-		await login_button.click()
-
-		# 等待登录完成
-		try:
-			await page.wait_for_url('**/panel/**', timeout=15000)
-		except Exception:
-			await page.wait_for_timeout(5000)
-
-		await page.wait_for_timeout(2000)
-
-		# 关闭可能出现的弹窗（如系统公告）
-		try:
-			modal_close = await page.wait_for_selector('.semi-modal-close', timeout=3000)
-			if modal_close:
-				await modal_close.click()
-				await page.wait_for_timeout(500)
-				print(f'[INFO] {account_name}: Dismissed popup dialog')
-		except Exception:
-			pass
+		closed = await dismiss_popups(page)
+		if closed:
+			print(f'[INFO] {account_name}: Dismissed {closed} popup dialog(s)')
 
 		# 收集所有 cookies
 		cookies = await page.context.cookies()
@@ -384,6 +295,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 	auth_method = None
 	if account.has_login_credentials():
 		print(f'[INFO] {account_name}: Attempting email/password login (priority)...')
+		assert account.email is not None and account.password is not None
 		all_cookies = await login_with_credentials(account_name, provider_config, account.email, account.password)
 		if all_cookies:
 			auth_method = 'email/password'
@@ -410,39 +322,48 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	print(f'[AUTH] {account_name}: Using auth method -> {auth_method}')
 
-	client = httpx.Client(http2=True, timeout=30.0)
+	return run_check_in_requests(all_cookies, account, account_name, provider_config)
 
+
+def run_check_in_requests(
+	all_cookies: dict,
+	account: AccountConfig,
+	account_name: str,
+	provider_config,
+) -> tuple[bool, dict | None, dict | None]:
+	"""执行 HTTP 签到请求（同步，避免在 async 上下文中使用阻塞 httpx）。"""
 	try:
-		client.cookies.update(all_cookies)
+		with httpx.Client(http2=True, timeout=30.0) as client:
+			client.cookies.update(all_cookies)
 
-		headers = {
-			'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-			'Accept': 'application/json, text/plain, */*',
-			'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-			'Accept-Encoding': 'gzip, deflate, br, zstd',
-			'Referer': provider_config.domain,
-			'Origin': provider_config.domain,
-			'Connection': 'keep-alive',
-			'Sec-Fetch-Dest': 'empty',
-			'Sec-Fetch-Mode': 'cors',
-			'Sec-Fetch-Site': 'same-origin',
-		}
+			headers = {
+				'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+				'Accept': 'application/json, text/plain, */*',
+				'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+				'Accept-Encoding': 'gzip, deflate, br, zstd',
+				'Referer': provider_config.domain,
+				'Origin': provider_config.domain,
+				'Connection': 'keep-alive',
+				'Sec-Fetch-Dest': 'empty',
+				'Sec-Fetch-Mode': 'cors',
+				'Sec-Fetch-Site': 'same-origin',
+			}
 
-		if account.api_user:
-			headers[provider_config.api_user_key] = account.api_user
+			if account.api_user:
+				headers[provider_config.api_user_key] = account.api_user
 
-		user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
-		user_info_before = get_user_info(client, headers, user_info_url)
-		if user_info_before and user_info_before.get('success'):
-			print(user_info_before['display'])
-		elif user_info_before:
-			print(user_info_before.get('error', 'Unknown error'))
+			user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
+			user_info_before = get_user_info(client, headers, user_info_url)
+			if user_info_before and user_info_before.get('success'):
+				print(user_info_before['display'])
+			elif user_info_before:
+				print(user_info_before.get('error', 'Unknown error'))
 
-		if provider_config.needs_manual_check_in():
-			success = execute_check_in(client, account_name, provider_config, headers)
-			user_info_after = get_user_info(client, headers, user_info_url)
-			return success, user_info_before, user_info_after
-		else:
+			if provider_config.needs_manual_check_in():
+				success = execute_check_in(client, account_name, provider_config, headers)
+				user_info_after = get_user_info(client, headers, user_info_url)
+				return success, user_info_before, user_info_after
+
 			print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')
 			user_info_after = get_user_info(client, headers, user_info_url)
 			return True, user_info_before, user_info_after
@@ -450,8 +371,6 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 	except Exception as e:
 		print(f'[FAILED] {account_name}: Error occurred during check-in process - {str(e)[:50]}...')
 		return False, None, None
-	finally:
-		client.close()
 
 
 async def main():
