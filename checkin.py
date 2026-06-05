@@ -14,10 +14,9 @@ import httpx
 from cloakbrowser import launch_async
 from dotenv import load_dotenv
 
-from utils.browser import is_logged_in, login_with_email_form, wait_for_site_ready
+from utils.browser import has_session_cookie, login_with_email_form, prepare_browser_page, wait_for_waf_ready
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.notify import notify
-from utils.popups import dismiss_popups
 
 load_dotenv()
 
@@ -74,10 +73,11 @@ async def get_waf_cookies_with_browser(account_name: str, login_url: str, requir
 
 	try:
 		page = await browser.new_page()
+		await prepare_browser_page(page)
 		print(f'[PROCESSING] {account_name}: Access login page to get initial cookies...')
 
 		await page.goto(login_url, wait_until='domcontentloaded')
-		await wait_for_site_ready(page)
+		await wait_for_waf_ready(page)
 
 		cookies = await page.context.cookies()
 
@@ -121,25 +121,26 @@ async def login_with_credentials(account_name: str, provider_config, email: str,
 
 	try:
 		page = await browser.new_page()
+		await prepare_browser_page(page)
 		await page.goto(login_url, wait_until='domcontentloaded')
-		await wait_for_site_ready(page)
 
-		if not await is_logged_in(page):
+		if not await has_session_cookie(page):
 			await login_with_email_form(page, email, password)
 
-		if not await is_logged_in(page):
+		if not await has_session_cookie(page):
 			console_url = f'{provider_config.domain}/console'
+			print(f'[INFO] {account_name}: Retrying login via {console_url}')
 			await page.goto(console_url, wait_until='domcontentloaded')
-			await wait_for_site_ready(page)
+			if not await has_session_cookie(page):
+				await login_with_email_form(page, email, password)
 
-		if not await is_logged_in(page):
-			print(f'[FAILED] {account_name}: Login may have failed - not redirected to logged-in page')
+		if not await has_session_cookie(page):
+			cookies = await page.context.cookies()
+			cookie_names = [c.get('name') for c in cookies if c.get('name')]
+			print(f'[FAILED] {account_name}: Login failed - no session cookie found')
+			print(f'[INFO] {account_name}: Got cookies: {cookie_names}')
 			await browser.close()
 			return None
-
-		closed = await dismiss_popups(page)
-		if closed:
-			print(f'[INFO] {account_name}: Dismissed {closed} popup dialog(s)')
 
 		# 收集所有 cookies
 		cookies = await page.context.cookies()
@@ -150,12 +151,6 @@ async def login_with_credentials(account_name: str, provider_config, email: str,
 			cookie_value = cookie.get('value')
 			if cookie_name and cookie_value:
 				all_cookies[cookie_name] = cookie_value
-
-		if 'session' not in all_cookies:
-			print(f'[FAILED] {account_name}: Login may have failed - no session cookie found')
-			print(f'[INFO] {account_name}: Got cookies: {list(all_cookies.keys())}')
-			await browser.close()
-			return None
 
 		print(f'[SUCCESS] {account_name}: Login successful, got {len(all_cookies)} cookies')
 		await browser.close()
