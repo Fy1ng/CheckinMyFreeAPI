@@ -20,6 +20,8 @@ _DISMISS_MODALS_CORE_JS = """
 
 	const modalSelectors = [
 		'div[role="dialog"][aria-modal="true"]',
+		'div.semi-modal .semi-modal-content[role="dialog"]',
+		'div.semi-modal.semi-modal-large',
 		'div.semi-modal[role="dialog"]',
 		'div.semi-modal[aria-modal="true"]',
 		'div.semi-modal-wrap',
