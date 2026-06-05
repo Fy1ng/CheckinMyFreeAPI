@@ -123,7 +123,12 @@ async def login_with_credentials(account_name: str, provider_config, email: str,
 	print(f'[PROCESSING] {account_name}: Logging in with email/password...')
 
 	login_url = f'{provider_config.domain}{provider_config.login_path}'
-	browser = await launch_async(headless=True, humanize=True)
+
+	try:
+		browser = await launch_async(headless=True, humanize=True)
+	except Exception as e:
+		print(f'[FAILED] {account_name}: Browser launch failed: {e}')
+		return None
 
 	try:
 		page = await browser.new_page()
@@ -376,14 +381,19 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	# 邮箱密码优先
 	all_cookies = None
+	auth_method = None
 	if account.has_login_credentials():
-		print(f'[INFO] {account_name}: Using email/password login (priority)')
+		print(f'[INFO] {account_name}: Attempting email/password login (priority)...')
 		all_cookies = await login_with_credentials(account_name, provider_config, account.email, account.password)
-		if not all_cookies and account.cookies:
-			print(f'[INFO] {account_name}: Email/password login failed, falling back to session cookies')
+		if all_cookies:
+			auth_method = 'email/password'
+		elif account.cookies:
+			print(f'[WARN] {account_name}: Email/password login FAILED, falling back to session cookies')
 			user_cookies = parse_cookies(account.cookies)
 			if user_cookies:
 				all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
+				if all_cookies:
+					auth_method = 'session cookies (fallback)'
 		if not all_cookies:
 			print(f'[FAILED] {account_name}: All login methods failed')
 			return False, None, None
@@ -393,9 +403,12 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			print(f'[FAILED] {account_name}: Invalid configuration format')
 			return False, None, None
 		all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
+		auth_method = 'session cookies'
 
 	if not all_cookies:
 		return False, None, None
+
+	print(f'[AUTH] {account_name}: Using auth method -> {auth_method}')
 
 	client = httpx.Client(http2=True, timeout=30.0)
 
