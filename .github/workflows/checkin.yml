@@ -40,10 +40,10 @@ jobs:
         uv sync
         echo "✅ 环境初始化完成"
 
-    - name: 安装系统字体
+    - name: 安装系统依赖
       run: |
         sudo apt-get update
-        sudo apt-get install -y fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+        sudo apt-get install -y xvfb fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
           fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
 
     - name: 缓存 CloakBrowser 二进制
@@ -78,7 +78,9 @@ jobs:
 
     - name: 执行签到
       env:
-        CHECKIN_HEADLESS: true
+        CHECKIN_HEADLESS: false
+        CHECKIN_HUMANIZE: false
+        CHECKIN_WAIT_TIMEOUT_MS: 60000
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
@@ -99,7 +101,7 @@ jobs:
         BARK_KEY: ${{ secrets.BARK_KEY }}
         BARK_SERVER: ${{ secrets.BARK_SERVER }}
       run: |
-        uv run checkin.py
+        xvfb-run -a --server-args="-screen 0 1280x720x24" uv run checkin.py
 
     - name: 执行结果
       if: always()

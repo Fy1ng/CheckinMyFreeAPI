@@ -136,7 +136,7 @@ async def login_with_credentials(
 
 	print(
 		f'[INFO] {account_name}: Browser profile={settings.profile_dir}, '
-		f'headless={settings.headless}, timeout={timeout_ms}ms'
+		f'headless={settings.headless}, humanize={settings.humanize}, timeout={timeout_ms}ms'
 	)
 
 	try:
@@ -153,12 +153,6 @@ async def login_with_credentials(
 
 		if not await has_session_cookie(page):
 			await login_with_email_form(page, email, password, timeout_ms)
-
-		if not await has_session_cookie(page):
-			console_url = f'{provider_config.domain}/console'
-			print(f'[INFO] {account_name}: Checking login state via {console_url}')
-			await page.goto(console_url, wait_until='domcontentloaded', timeout=timeout_ms)
-			await wait_for_site_ready(page, timeout_ms)
 
 		if not await has_session_cookie(page):
 			cookies = await context.cookies()

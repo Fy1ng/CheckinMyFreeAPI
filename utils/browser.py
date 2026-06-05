@@ -21,7 +21,11 @@ USERNAME_SELECTOR = '#username'
 PASSWORD_SELECTOR = '#password'  # nosec B105
 SUBMIT_SELECTOR = f'{LOGIN_FORM_SELECTOR} button[type="submit"]'
 SESSION_COOKIE_NAME = 'session'
-DEFAULT_TIMEOUT_MS = 120_000
+DEFAULT_TIMEOUT_MS = 60_000
+FORM_ACTION_TIMEOUT_MS = 15_000
+EMAIL_TAB_TIMEOUT_MS = 8_000
+WAF_READY_TIMEOUT_MS = 30_000
+SESSION_WAIT_TIMEOUT_MS = 15_000
 
 _SITE_READY_JS = """() => {
 	const wafBlockers = document.querySelector(
@@ -38,6 +42,7 @@ _SITE_READY_JS = """() => {
 @dataclass(frozen=True)
 class BrowserLoginSettings:
 	headless: bool
+	humanize: bool
 	wait_timeout_ms: int
 	profile_dir: Path
 	cloakbrowser_binary_path: str | None
@@ -55,7 +60,8 @@ def load_browser_login_settings(account_name: str, provider: str) -> BrowserLogi
 	profile_dir = profile_base / provider / account_name
 	return BrowserLoginSettings(
 		headless=_env_bool('CHECKIN_HEADLESS', True),
-		wait_timeout_ms=int(os.getenv('CHECKIN_WAIT_TIMEOUT_MS', '120000')),
+		humanize=_env_bool('CHECKIN_HUMANIZE', True),
+		wait_timeout_ms=int(os.getenv('CHECKIN_WAIT_TIMEOUT_MS', str(DEFAULT_TIMEOUT_MS))),
 		profile_dir=profile_dir,
 		cloakbrowser_binary_path=os.getenv('CLOAKBROWSER_BINARY_PATH', '').strip() or None,
 	)
@@ -74,9 +80,11 @@ async def launch_login_context(settings: BrowserLoginSettings) -> BrowserContext
 
 	launch_kwargs: dict = {
 		'headless': settings.headless,
-		'humanize': True,
-		'human_preset': 'careful',
+		'humanize': settings.humanize,
 	}
+	if settings.humanize:
+		launch_kwargs['human_preset'] = 'careful'
+
 	return await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs)
 
 
@@ -84,13 +92,14 @@ async def prepare_browser_page(page: Page) -> None:
 	await setup_popup_guard(page)
 
 
-async def wait_for_site_ready(page: Page, timeout_ms: int) -> None:
+async def wait_for_site_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS) -> None:
 	"""等待 WAF 通过并关闭弹窗。"""
-	await page.wait_for_load_state('domcontentloaded', timeout=timeout_ms)
+	waf_timeout = min(timeout_ms, WAF_READY_TIMEOUT_MS)
+	await page.wait_for_load_state('domcontentloaded', timeout=waf_timeout)
 	try:
-		await page.wait_for_function(_SITE_READY_JS, timeout=timeout_ms)
+		await page.wait_for_function(_SITE_READY_JS, timeout=waf_timeout)
 	except Exception:
-		await asyncio.sleep(5)
+		await asyncio.sleep(2)
 	closed = await dismiss_popups(page)
 	if closed:
 		print(f'[INFO] Dismissed {closed} popup dialog(s)')
@@ -101,7 +110,7 @@ async def has_session_cookie(page: Page) -> bool:
 	return any(c.get('name') == SESSION_COOKIE_NAME and c.get('value') for c in cookies)
 
 
-async def wait_for_session_cookie(page: Page, timeout_ms: int) -> bool:
+async def wait_for_session_cookie(page: Page, timeout_ms: int = SESSION_WAIT_TIMEOUT_MS) -> bool:
 	deadline = time.monotonic() + timeout_ms / 1000
 	while time.monotonic() < deadline:
 		if await has_session_cookie(page):
@@ -110,7 +119,7 @@ async def wait_for_session_cookie(page: Page, timeout_ms: int) -> bool:
 	return False
 
 
-async def wait_for_waf_ready(page: Page, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> None:
+async def wait_for_waf_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS) -> None:
 	await wait_for_site_ready(page, timeout_ms)
 
 
@@ -124,8 +133,8 @@ async def _open_email_login_form(page: Page, timeout_ms: int) -> None:
 
 	try:
 		button = page.get_by_role('button', name=EMAIL_LOGIN_BUTTON)
-		await button.wait_for(state='visible', timeout=timeout_ms)
-		await button.click(timeout=timeout_ms)
+		await button.wait_for(state='visible', timeout=EMAIL_TAB_TIMEOUT_MS)
+		await button.click(timeout=FORM_ACTION_TIMEOUT_MS)
 	except Exception:
 		tabs = page.locator('.semi-tabs-tab')
 		tab_count = await tabs.count()
@@ -133,11 +142,14 @@ async def _open_email_login_form(page: Page, timeout_ms: int) -> None:
 			tab = tabs.nth(i)
 			if not await tab.is_visible():
 				continue
-			await tab.click(timeout=timeout_ms)
+			await tab.click(timeout=FORM_ACTION_TIMEOUT_MS)
 			if await _is_email_form_visible(page):
 				break
 
-	await page.locator(USERNAME_SELECTOR).wait_for(state='visible', timeout=timeout_ms)
+	await page.locator(USERNAME_SELECTOR).wait_for(
+		state='visible',
+		timeout=min(timeout_ms, FORM_ACTION_TIMEOUT_MS),
+	)
 
 
 async def _set_input_value(locator: Locator, value: str, timeout_ms: int) -> None:
@@ -163,21 +175,27 @@ async def _set_input_value(locator: Locator, value: str, timeout_ms: int) -> Non
 
 
 async def fill_email_credentials(page: Page, email: str, password: str, timeout_ms: int) -> None:
+	action_timeout = min(timeout_ms, FORM_ACTION_TIMEOUT_MS)
 	username_input = page.locator(USERNAME_SELECTOR)
 	password_input = page.locator(PASSWORD_SELECTOR)
 
-	await username_input.wait_for(state='visible', timeout=timeout_ms)
-	await _set_input_value(username_input, email, timeout_ms)
+	await username_input.wait_for(state='visible', timeout=action_timeout)
+	await _set_input_value(username_input, email, action_timeout)
 
-	await password_input.wait_for(state='visible', timeout=timeout_ms)
-	await _set_input_value(password_input, password, timeout_ms)
+	await password_input.wait_for(state='visible', timeout=action_timeout)
+	await _set_input_value(password_input, password, action_timeout)
 
 
 async def submit_login_form(page: Page, timeout_ms: int) -> None:
+	action_timeout = min(timeout_ms, FORM_ACTION_TIMEOUT_MS)
 	submit = page.locator(SUBMIT_SELECTOR)
-	await submit.wait_for(state='visible', timeout=timeout_ms)
-	await submit.click(timeout=timeout_ms)
-	await page.wait_for_load_state('networkidle', timeout=timeout_ms)
+	await submit.wait_for(state='visible', timeout=action_timeout)
+	await submit.click(timeout=action_timeout)
+	try:
+		await page.wait_for_load_state('domcontentloaded', timeout=action_timeout)
+	except Exception:  # nosec B110
+		pass
+	await wait_for_session_cookie(page, SESSION_WAIT_TIMEOUT_MS)
 
 
 async def login_with_email_form(page: Page, email: str, password: str, timeout_ms: int) -> None:
