@@ -6,7 +6,7 @@ on:
 
 jobs:
   checkin:
-    runs-on: windows-2025
+    runs-on: ubuntu-latest
     environment: production
     env:
       PYTHONIOENCODING: utf-8
@@ -39,27 +39,25 @@ jobs:
         uv sync
         echo "✅ 环境初始化完成"
 
-    - name: 获取 Playwright 版本
-      id: playwright-version
+    - name: 安装系统字体（反检测需要）
       run: |
-        $version = uv run python -c "import importlib.metadata; print(importlib.metadata.version('playwright'))"
-        echo "version=$version" >> $env:GITHUB_OUTPUT
-        echo "Playwright version: $version"
+        sudo apt-get update
+        sudo apt-get install -y fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
+          fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
 
-    - name: 缓存 Playwright 浏览器
+    - name: 缓存 CloakBrowser 二进制
       uses: actions/cache@v5
-      id: playwright-cache
+      id: cloakbrowser-cache
       with:
-        path: ~\AppData\Local\ms-playwright
-        key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+        path: ~/.cloakbrowser
+        key: ${{ runner.os }}-cloakbrowser-v1
         restore-keys: |
-          ${{ runner.os }}-playwright-
+          ${{ runner.os }}-cloakbrowser-
 
-    - name: 安装 Playwright 浏览器
-      if: steps.playwright-cache.outputs.cache-hit != 'true'
+    - name: 安装 CloakBrowser
       run: |
-        echo "缓存未命中，开始安装 Playwright 浏览器..."
-        uv run playwright install chromium --with-deps
+        uv run python -m cloakbrowser install
+        echo "✅ CloakBrowser 安装完成"
 
     - name: 恢复余额历史缓存
       uses: actions/cache@v5
@@ -97,4 +95,4 @@ jobs:
       if: always()
       run: |
         echo "签到任务执行完成"
-        echo "时间: $(Get-Date)"
+        echo "时间: $(date)"
