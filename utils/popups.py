@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
 	from playwright.async_api import Page
+
+_MODAL_SELECTOR = 'div[role="dialog"][aria-modal="true"]'
+_CLOSE_ANNOUNCEMENT = re.compile(r'关闭公告')
+_DISMISS_TODAY = re.compile(r'今日关闭')
 
 _DISMISS_MODALS_CORE_JS = """
 	const isVisible = (el) => {
@@ -158,7 +164,56 @@ async def setup_popup_guard(page: Page) -> None:
 	await page.add_init_script(_POPUP_GUARD_INIT_SCRIPT)
 
 
+async def _dismiss_popups_playwright(page: Page) -> int:
+	"""通过 Playwright 定位 Semi 公告弹窗并关闭。"""
+	closed = 0
+
+	for _ in range(5):
+		modals = page.locator(_MODAL_SELECTOR)
+		modal_count = await modals.count()
+		visible_indices: list[int] = []
+		for index in range(modal_count):
+			try:
+				if await modals.nth(index).is_visible():
+					visible_indices.append(index)
+			except Exception:  # nosec B112
+				continue
+
+		if not visible_indices:
+			break
+
+		round_closed = False
+		for index in reversed(visible_indices):
+			modal = modals.nth(index)
+			for pattern in (_CLOSE_ANNOUNCEMENT, _DISMISS_TODAY):
+				button = modal.get_by_role('button', name=pattern).first
+				try:
+					if await button.is_visible():
+						await button.click(timeout=3000)
+						closed += 1
+						round_closed = True
+						break
+				except Exception:  # nosec B112
+					continue
+			else:
+				close_button = modal.locator('button.semi-modal-close, button[aria-label="close"]').first
+				try:
+					if await close_button.is_visible():
+						await close_button.click(timeout=3000)
+						closed += 1
+						round_closed = True
+				except Exception:  # nosec B110
+					pass
+
+		if not round_closed:
+			break
+		await asyncio.sleep(0.4)
+
+	return closed
+
+
 async def dismiss_popups(page: Page) -> int:
-	"""手动触发一次 JS 弹窗关闭。"""
+	"""手动触发弹窗关闭：优先 Playwright 点公告按钮，再回退 JS。"""
+	closed = await _dismiss_popups_playwright(page)
 	result = await page.evaluate(_DISMISS_MODALS_JS)
-	return int(result) if result else 0
+	return closed + (int(result) if result else 0)
