@@ -15,11 +15,14 @@ from utils.popups import dismiss_popups, setup_popup_guard
 if TYPE_CHECKING:
 	from playwright.async_api import BrowserContext, Locator, Page
 
-EMAIL_LOGIN_BUTTON = re.compile(r'邮箱或用户名')
+EMAIL_LOGIN_BUTTON = re.compile(r'邮箱|用户名|email|username', re.I)
 LOGIN_FORM_SELECTOR = 'form.semi-form'
-USERNAME_SELECTOR = '#username'
-PASSWORD_SELECTOR = '#password'  # nosec B105
-SUBMIT_SELECTOR = f'{LOGIN_FORM_SELECTOR} button[type="submit"]'
+USERNAME_SELECTORS = ('#username', 'input[name="username"]', 'input[name="email"]', 'input[type="email"]')
+PASSWORD_SELECTORS = ('#password', 'input[name="password"]', 'input[type="password"]')  # nosec B105
+SUBMIT_SELECTORS = (
+	f'{LOGIN_FORM_SELECTOR} button[type="submit"]',
+	'button[type="submit"]',
+)
 SESSION_COOKIE_NAME = 'session'
 DEFAULT_TIMEOUT_MS = 60_000
 FORM_ACTION_TIMEOUT_MS = 15_000
@@ -36,6 +39,43 @@ _SITE_READY_JS = """() => {
 		if (rect && rect.width > 0 && rect.height > 0) return false;
 	}
 	return !!document.querySelector('a, button');
+}"""
+
+_OPEN_EMAIL_FORM_JS = """() => {
+	const isVisible = (el) => {
+		if (!el || !el.isConnected) return false;
+		const style = window.getComputedStyle(el);
+		if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
+			return false;
+		}
+		const rect = el.getBoundingClientRect();
+		return rect.width > 0 && rect.height > 0;
+	};
+
+	const usernameSelectors = ['#username', 'input[name="username"]', 'input[name="email"]', 'input[type="email"]'];
+	const findUsername = () => {
+		for (const selector of usernameSelectors) {
+			const el = document.querySelector(selector);
+			if (isVisible(el)) return el;
+		}
+		return null;
+	};
+
+	if (findUsername()) return true;
+
+	const clickables = [
+		...document.querySelectorAll('.semi-tabs-tab'),
+		...document.querySelectorAll('.semi-button-group button'),
+		...document.querySelectorAll('form.semi-form ~ button'),
+	];
+
+	for (const el of clickables) {
+		if (!isVisible(el)) continue;
+		el.click();
+		if (findUsername()) return true;
+	}
+
+	return !!findUsername();
 }"""
 
 
@@ -123,8 +163,19 @@ async def wait_for_waf_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS)
 	await wait_for_site_ready(page, timeout_ms)
 
 
+async def _first_visible_locator(page: Page, selectors: tuple[str, ...]) -> Locator | None:
+	for selector in selectors:
+		locator = page.locator(selector).first
+		try:
+			if await locator.is_visible():
+				return locator
+		except Exception:  # nosec B112
+			continue
+	return None
+
+
 async def _is_email_form_visible(page: Page) -> bool:
-	return bool(await page.locator(USERNAME_SELECTOR).is_visible())
+	return await _first_visible_locator(page, USERNAME_SELECTORS) is not None
 
 
 async def _dismiss_blocking_overlays(page: Page) -> None:
@@ -136,16 +187,20 @@ async def _dismiss_blocking_overlays(page: Page) -> None:
 
 
 async def _open_email_login_form(page: Page, timeout_ms: int) -> None:
-	await _dismiss_blocking_overlays(page)
+	deadline = time.monotonic() + timeout_ms / 1000
 
-	if await _is_email_form_visible(page):
-		return
+	while time.monotonic() < deadline:
+		await _dismiss_blocking_overlays(page)
+		if await _is_email_form_visible(page):
+			return
 
-	try:
-		button = page.get_by_role('button', name=EMAIL_LOGIN_BUTTON)
-		await button.wait_for(state='visible', timeout=EMAIL_TAB_TIMEOUT_MS)
-		await button.click(timeout=FORM_ACTION_TIMEOUT_MS)
-	except Exception:
+		try:
+			button = page.get_by_role('button', name=EMAIL_LOGIN_BUTTON)
+			if await button.is_visible():
+				await button.click(timeout=FORM_ACTION_TIMEOUT_MS)
+		except Exception:  # nosec B110
+			pass
+
 		tabs = page.locator('.semi-tabs-tab')
 		tab_count = await tabs.count()
 		for i in range(tab_count):
@@ -154,10 +209,27 @@ async def _open_email_login_form(page: Page, timeout_ms: int) -> None:
 				continue
 			await tab.click(timeout=FORM_ACTION_TIMEOUT_MS)
 			if await _is_email_form_visible(page):
-				break
+				return
 
-	await page.locator(USERNAME_SELECTOR).wait_for(state='visible', timeout=timeout_ms)
-	await _dismiss_blocking_overlays(page)
+		if await page.evaluate(_OPEN_EMAIL_FORM_JS):
+			await _dismiss_blocking_overlays(page)
+			if await _is_email_form_visible(page):
+				return
+
+		await asyncio.sleep(2)
+
+	remaining_ms = int((deadline - time.monotonic()) * 1000)
+	if remaining_ms > 0:
+		for selector in USERNAME_SELECTORS:
+			try:
+				await page.locator(selector).first.wait_for(state='visible', timeout=remaining_ms)
+				await _dismiss_blocking_overlays(page)
+				return
+			except Exception:  # nosec B112
+				continue
+
+	print(f'[INFO] Login page URL: {page.url}')
+	raise TimeoutError(f'Cannot open email login form, selectors: {USERNAME_SELECTORS}')
 
 
 async def _set_input_value(locator: Locator, value: str, timeout_ms: int) -> None:
@@ -193,20 +265,51 @@ async def _set_input_value(locator: Locator, value: str, timeout_ms: int) -> Non
 async def fill_email_credentials(page: Page, email: str, password: str, timeout_ms: int) -> None:
 	await _dismiss_blocking_overlays(page)
 	action_timeout = min(timeout_ms, FORM_ACTION_TIMEOUT_MS)
-	username_input = page.locator(USERNAME_SELECTOR)
-	password_input = page.locator(PASSWORD_SELECTOR)
 
-	await username_input.wait_for(state='visible', timeout=action_timeout)
+	username_input = await _first_visible_locator(page, USERNAME_SELECTORS)
+	if not username_input:
+		for selector in USERNAME_SELECTORS:
+			locator = page.locator(selector).first
+			try:
+				await locator.wait_for(state='visible', timeout=action_timeout)
+				username_input = locator
+				break
+			except Exception:  # nosec B112
+				continue
+	if not username_input:
+		raise TimeoutError(f'Cannot find username input: {USERNAME_SELECTORS}')
+
+	password_input = await _first_visible_locator(page, PASSWORD_SELECTORS)
+	if not password_input:
+		for selector in PASSWORD_SELECTORS:
+			locator = page.locator(selector).first
+			try:
+				await locator.wait_for(state='visible', timeout=action_timeout)
+				password_input = locator
+				break
+			except Exception:  # nosec B112
+				continue
+	if not password_input:
+		raise TimeoutError(f'Cannot find password input: {PASSWORD_SELECTORS}')
+
 	await _set_input_value(username_input, email, action_timeout)
-
-	await password_input.wait_for(state='visible', timeout=action_timeout)
 	await _set_input_value(password_input, password, action_timeout)
 
 
 async def submit_login_form(page: Page, timeout_ms: int) -> None:
 	action_timeout = min(timeout_ms, FORM_ACTION_TIMEOUT_MS)
-	submit = page.locator(SUBMIT_SELECTOR)
-	await submit.wait_for(state='visible', timeout=action_timeout)
+	submit = await _first_visible_locator(page, SUBMIT_SELECTORS)
+	if not submit:
+		for selector in SUBMIT_SELECTORS:
+			locator = page.locator(selector).first
+			try:
+				await locator.wait_for(state='visible', timeout=action_timeout)
+				submit = locator
+				break
+			except Exception:  # nosec B112
+				continue
+	if not submit:
+		raise TimeoutError(f'Cannot find submit button: {SUBMIT_SELECTORS}')
 	try:
 		await submit.click(timeout=action_timeout)
 	except Exception:
