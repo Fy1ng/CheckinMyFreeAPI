@@ -54,7 +54,7 @@ def load_browser_login_settings(account_name: str, provider: str) -> BrowserLogi
 	profile_base = Path(os.getenv('CHECKIN_BROWSER_PROFILE_DIR', '.browser_profiles'))
 	profile_dir = profile_base / provider / account_name
 	return BrowserLoginSettings(
-		headless=_env_bool('CHECKIN_HEADLESS', False),
+		headless=_env_bool('CHECKIN_HEADLESS', True),
 		wait_timeout_ms=int(os.getenv('CHECKIN_WAIT_TIMEOUT_MS', '120000')),
 		profile_dir=profile_dir,
 		cloakbrowser_binary_path=os.getenv('CLOAKBROWSER_BINARY_PATH', '').strip() or None,

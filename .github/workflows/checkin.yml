@@ -67,8 +67,17 @@ jobs:
         restore-keys: |
           balance-hash-
 
+    - name: 恢复浏览器 Profile 缓存
+      uses: actions/cache@v5
+      with:
+        path: .browser_profiles
+        key: browser-profiles-${{ runner.os }}-v1
+        restore-keys: |
+          browser-profiles-${{ runner.os }}-
+
     - name: 执行签到
       env:
+        CHECKIN_HEADLESS: true
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
