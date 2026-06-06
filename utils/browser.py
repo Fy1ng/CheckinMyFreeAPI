@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from utils.popups import dismiss_popups, setup_popup_guard
+from utils.proxy import get_playwright_proxy
 
 if TYPE_CHECKING:
 	from playwright.async_api import BrowserContext, Locator, Page
@@ -183,6 +184,11 @@ async def launch_login_context(settings: BrowserLoginSettings) -> BrowserContext
 	}
 	if settings.humanize:
 		launch_kwargs['human_preset'] = 'careful'
+
+	proxy = get_playwright_proxy()
+	if proxy:
+		launch_kwargs['proxy'] = proxy
+		print(f'[INFO] Browser proxy enabled: {proxy["server"]}')
 
 	return await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs)
 

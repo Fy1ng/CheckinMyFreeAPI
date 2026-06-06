@@ -32,6 +32,7 @@ from utils.browser import (
 )
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.notify import notify
+from utils.proxy import apply_proxy_env, get_playwright_proxy
 
 load_dotenv()
 
@@ -84,7 +85,11 @@ async def get_waf_cookies_with_browser(account_name: str, login_url: str, requir
 	"""使用浏览器获取 WAF cookies"""
 	print(f'[PROCESSING] {account_name}: Starting browser to get WAF cookies...')
 
-	browser = await launch_async(headless=True)
+	launch_kwargs: dict = {'headless': True}
+	proxy = get_playwright_proxy()
+	if proxy:
+		launch_kwargs['proxy'] = proxy
+	browser = await launch_async(**launch_kwargs)
 
 	try:
 		page = await browser.new_page()
@@ -404,6 +409,13 @@ def run_check_in_requests(
 
 async def main():
 	"""主函数"""
+	apply_proxy_env()
+	proxy_server = os.getenv('CHECKIN_PROXY_URL') or os.getenv('HTTPS_PROXY')
+	if proxy_server:
+		print(f'[INFO] HTTP proxy enabled: {proxy_server}')
+	else:
+		print('[INFO] HTTP proxy disabled')
+
 	print('[SYSTEM] AnyRouter.top multi-account auto check-in script started')
 	print(f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
