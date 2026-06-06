@@ -20,6 +20,7 @@ from cloakbrowser import launch_async
 from dotenv import load_dotenv
 
 from utils.browser import (
+	ensure_session_after_login,
 	has_session_cookie,
 	launch_login_context,
 	load_browser_login_settings,
@@ -176,14 +177,17 @@ async def login_with_credentials(
 			)
 
 		if not await has_session_cookie(page):
-			cookies = await context.cookies()
-			cookie_names = [c.get('name') for c in cookies if c.get('name')]
-			print(f'[FAILED] {account_name}: Login failed - no session cookie found')
-			print(f'[INFO] {account_name}: Current URL: {page.url}')
-			print(f'[INFO] {account_name}: Got cookies: {cookie_names}')
-			await save_login_screenshot(page, provider_name, account_name, 'no-session')
-			await context.close()
-			return None
+			console_url = f'{provider_config.domain}/console'
+			if not await ensure_session_after_login(page, console_url, timeout_ms):
+				cookies = await context.cookies()
+				cookie_names = [c.get('name') for c in cookies if c.get('name')]
+				print(f'[FAILED] {account_name}: Login failed - no session cookie found')
+				print(f'[INFO] {account_name}: Current URL: {page.url}')
+				print(f'[INFO] {account_name}: Got cookies: {cookie_names}')
+				await save_login_screenshot(page, provider_name, account_name, 'no-session')
+				await context.close()
+				return None
+			print(f'[INFO] {account_name}: Session cookie obtained after visiting console')
 
 		cookies = await context.cookies()
 		all_cookies = {

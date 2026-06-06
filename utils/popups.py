@@ -72,6 +72,25 @@ _DISMISS_MODALS_CORE_JS = """
 		});
 	};
 
+	const loginFieldSelectors = [
+		'form.semi-form',
+		'#username',
+		'input[name="username"]',
+		'input[name="email"]',
+		'input[type="email"]',
+		'input[type="password"]',
+		'#password',
+	];
+
+	const hasLoginFields = (root) => {
+		if (!root) return false;
+		for (const selector of loginFieldSelectors) {
+			const el = root.querySelector(selector);
+			if (el && isVisible(el)) return true;
+		}
+		return false;
+	};
+
 	const findCloseButton = (modal) => {
 		for (const selector of closeSelectors) {
 			const btn = modal.querySelector(selector);
@@ -83,7 +102,7 @@ _DISMISS_MODALS_CORE_JS = """
 	const dismissPortalButtons = () => {
 		let closed = 0;
 		for (const portal of document.querySelectorAll('div.semi-portal')) {
-			if (!isVisible(portal)) continue;
+			if (!isVisible(portal) || hasLoginFields(portal)) continue;
 			for (const selector of closeSelectors) {
 				for (const btn of portal.querySelectorAll(selector)) {
 					if (isVisible(btn)) {
@@ -100,6 +119,7 @@ _DISMISS_MODALS_CORE_JS = """
 		let closed = dismissPortalButtons();
 		const modals = findModals();
 		for (const modal of [...modals].reverse()) {
+			if (hasLoginFields(modal)) continue;
 			const btn = findCloseButton(modal);
 			if (btn) {
 				btn.click();
@@ -185,6 +205,11 @@ async def _dismiss_popups_playwright(page: Page) -> int:
 		round_closed = False
 		for index in reversed(visible_indices):
 			modal = modals.nth(index)
+			try:
+				if await modal.locator('form.semi-form, #username, input[type="password"]').count() > 0:
+					continue
+			except Exception:  # nosec B110
+				pass
 			for pattern in (_CLOSE_ANNOUNCEMENT, _DISMISS_TODAY):
 				button = modal.get_by_role('button', name=pattern).first
 				try:

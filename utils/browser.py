@@ -22,6 +22,7 @@ EMAIL_LOGIN_BUTTON_NAMES = (
 	re.compile(r'使用.*邮箱'),
 	re.compile(r'Email or Username', re.I),
 	re.compile(r'Sign in with Email', re.I),
+	re.compile(r'Sign in with Email or Username', re.I),
 )
 EMAIL_LOGIN_ENTRY_SELECTORS = (
 	'.semi-card button:has(.semi-icon-mail):not(form.semi-form button)',
@@ -48,7 +49,7 @@ _pending_notify_screenshots: list[Path] = []
 FORM_ACTION_TIMEOUT_MS = 15_000
 EMAIL_TAB_TIMEOUT_MS = 8_000
 WAF_READY_TIMEOUT_MS = 30_000
-SESSION_WAIT_TIMEOUT_MS = 15_000
+SESSION_WAIT_TIMEOUT_MS = 45_000
 
 _VISIBLE_CHECK_JS = """
 	const isVisible = (el) => {
@@ -330,6 +331,26 @@ async def wait_for_session_cookie(page: Page, timeout_ms: int = SESSION_WAIT_TIM
 	return False
 
 
+async def ensure_session_after_login(page: Page, console_url: str, timeout_ms: int) -> bool:
+	"""提交登录后等待 session；若仍未拿到则跳转 console 再试。"""
+	session_timeout = min(timeout_ms, SESSION_WAIT_TIMEOUT_MS)
+	if await wait_for_session_cookie(page, session_timeout):
+		return True
+
+	print(f'[INFO] Session cookie not found yet, navigating to {console_url}')
+	try:
+		await page.goto(console_url, wait_until='load', timeout=min(timeout_ms, 60_000))
+		try:
+			await page.wait_for_load_state('networkidle', timeout=20_000)
+		except Exception:  # nosec B110
+			pass
+	except Exception as exc:
+		print(f'[WARN] Console navigation failed: {exc}')
+		return False
+
+	return await wait_for_session_cookie(page, session_timeout)
+
+
 async def wait_for_waf_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS) -> None:
 	await wait_for_site_ready(page, timeout_ms)
 
@@ -350,6 +371,8 @@ async def _is_email_form_visible(page: Page) -> bool:
 
 
 async def _dismiss_blocking_overlays(page: Page) -> None:
+	if await _is_email_form_visible(page):
+		return
 	for _ in range(3):
 		closed = await dismiss_popups(page)
 		if closed == 0:
@@ -490,9 +513,9 @@ async def _open_email_login_form(
 			return
 
 		if await _click_email_login_entry(page):
+			await asyncio.sleep(1)
 			wait_ms = min(remaining_ms, FORM_ACTION_TIMEOUT_MS)
 			if await _wait_for_username_input(page, wait_ms):
-				await _dismiss_blocking_overlays(page)
 				return
 
 		tabs = page.locator('.semi-card .semi-tabs-tab')
@@ -504,20 +527,18 @@ async def _open_email_login_form(
 			await tab.click(timeout=EMAIL_TAB_TIMEOUT_MS)
 			wait_ms = min(int((deadline - time.monotonic()) * 1000), EMAIL_TAB_TIMEOUT_MS)
 			if await _wait_for_username_input(page, wait_ms):
-				await _dismiss_blocking_overlays(page)
 				return
 
 		if await page.evaluate(_OPEN_EMAIL_FORM_JS):
+			await asyncio.sleep(1)
 			wait_ms = min(int((deadline - time.monotonic()) * 1000), FORM_ACTION_TIMEOUT_MS)
 			if await _wait_for_username_input(page, wait_ms):
-				await _dismiss_blocking_overlays(page)
 				return
 
 		await asyncio.sleep(0.5)
 
 	remaining_ms = int((deadline - time.monotonic()) * 1000)
 	if remaining_ms > 0 and await _wait_for_username_input(page, remaining_ms):
-		await _dismiss_blocking_overlays(page)
 		return
 
 	print(f'[INFO] Login page URL: {page.url}')
@@ -613,6 +634,10 @@ async def submit_login_form(page: Page, timeout_ms: int) -> None:
 		await page.wait_for_load_state('domcontentloaded', timeout=action_timeout)
 	except Exception:  # nosec B110
 		pass
+	try:
+		await page.wait_for_load_state('networkidle', timeout=min(timeout_ms, 30_000))
+	except Exception:  # nosec B110
+		pass
 	await wait_for_session_cookie(page, SESSION_WAIT_TIMEOUT_MS)
 
 
@@ -633,4 +658,3 @@ async def login_with_email_form(
 	)
 	await fill_email_credentials(page, email, password, timeout_ms)
 	await submit_login_form(page, timeout_ms)
-	await wait_for_site_ready(page, timeout_ms)
