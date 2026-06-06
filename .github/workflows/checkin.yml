@@ -115,8 +115,6 @@ jobs:
       env:
         HTTP_PROXY: ''
         HTTPS_PROXY: ''
-        http_proxy: ''
-        https_proxy: ''
       uses: actions/upload-artifact@v4
       with:
         name: checkin-screenshots-${{ github.run_id }}
