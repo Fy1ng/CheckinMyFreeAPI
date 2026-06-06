@@ -268,6 +268,20 @@ async def wait_for_site_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS
 		print(f'[INFO] Dismissed {closed} popup dialog(s)')
 
 
+async def _wait_for_optional_load_state(page: Page, state: str, timeout_ms: int) -> bool:
+	try:
+		await page.wait_for_load_state(state, timeout=timeout_ms)
+		return True
+	except Exception as exc:  # nosec B110
+		debug_print(f'[INFO] Optional load state "{state}" not reached within {timeout_ms}ms: {exc}')
+		return False
+
+
+async def _settle_page(page: Page, delay_seconds: float, networkidle_timeout_ms: int) -> None:
+	await asyncio.sleep(delay_seconds)
+	await _wait_for_optional_load_state(page, 'networkidle', networkidle_timeout_ms)
+
+
 async def _wait_for_login_shell(page: Page, timeout_ms: int) -> bool:
 	shell_timeout = min(timeout_ms, 60_000)
 	try:
@@ -295,11 +309,7 @@ async def navigate_login_page(
 	try:
 		print(f'[INFO] Warming up {base_url} before login')
 		await page.goto(base_url, wait_until='load', timeout=attempt_timeout)
-		await asyncio.sleep(3)
-		try:
-			await page.wait_for_load_state('networkidle', timeout=15_000)
-		except Exception:  # nosec B110
-			pass
+		await _settle_page(page, 3, 15_000)
 		closed = await dismiss_popups(page)
 		if closed:
 			print(f'[INFO] Dismissed {closed} popup dialog(s) during warmup')
@@ -309,11 +319,7 @@ async def navigate_login_page(
 	for attempt in range(3):
 		print(f'[INFO] Navigating login page (attempt {attempt + 1}/3): {login_url}')
 		await page.goto(login_url, wait_until='load', timeout=attempt_timeout)
-		await asyncio.sleep(5)
-		try:
-			await page.wait_for_load_state('networkidle', timeout=20_000)
-		except Exception:  # nosec B110
-			pass
+		await _settle_page(page, 5, 20_000)
 
 		if await _wait_for_login_shell(page, attempt_timeout):
 			await wait_for_site_ready(page, timeout_ms)
@@ -722,14 +728,8 @@ async def submit_login_form(page: Page, timeout_ms: int) -> None:
 		await submit.click(timeout=action_timeout)
 	except Exception:
 		await submit.click(force=True, timeout=action_timeout)
-	try:
-		await page.wait_for_load_state('domcontentloaded', timeout=action_timeout)
-	except Exception:  # nosec B110
-		pass
-	try:
-		await page.wait_for_load_state('networkidle', timeout=min(timeout_ms, 30_000))
-	except Exception:  # nosec B110
-		pass
+	await _wait_for_optional_load_state(page, 'domcontentloaded', action_timeout)
+	await _wait_for_optional_load_state(page, 'networkidle', min(timeout_ms, 30_000))
 	await wait_for_logged_in(page, SESSION_WAIT_TIMEOUT_MS)
 
 

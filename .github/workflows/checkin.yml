@@ -33,18 +33,14 @@ jobs:
       uses: actions/cache@v5
       id: uv-cache
       with:
-        path: |
-          ~/.cache/uv
-          .venv
+        path: ~/.cache/uv
         key: ${{ runner.os }}-uv-${{ hashFiles('pyproject.toml', 'uv.lock') }}
         restore-keys: |
           ${{ runner.os }}-uv-
 
     - name: 安装依赖
-      if: steps.uv-cache.outputs.cache-hit != 'true'
       run: |
-        echo "缓存未命中，开始安装项目依赖..."
-        uv sync
+        uv sync --frozen
         echo "✅ 环境初始化完成"
 
     - name: 安装系统依赖
@@ -71,8 +67,9 @@ jobs:
       uses: actions/cache@v5
       with:
         path: balance_hash.txt
-        key: balance-hash-${{ github.sha }}
+        key: balance-hash-${{ github.ref_name }}-${{ github.run_id }}
         restore-keys: |
+          balance-hash-${{ github.ref_name }}-
           balance-hash-
 
     - name: 恢复浏览器 Profile 缓存
@@ -86,7 +83,7 @@ jobs:
     - name: 配置代理（mihomo 订阅）
       env:
         PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
-        PROXY_TEST_URL: https://agentrouter.org/login
+        PROXY_TEST_URL: https://www.google.com/generate_204
         PROXY_REQUIRED: false
       run: bash scripts/setup_mihomo_proxy.sh
 

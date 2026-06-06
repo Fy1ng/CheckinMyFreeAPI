@@ -2,7 +2,7 @@
 # 通过 mihomo 拉取订阅、启动本地代理并探测可用节点。
 # 环境变量:
 #   PROXY_SUBSCRIPTION_URL  订阅链接（必填才启用）
-#   PROXY_TEST_URL          探测目标，默认 https://agentrouter.org/login
+#   PROXY_TEST_URL          探测目标，默认 https://www.google.com/generate_204
 #   PROXY_REQUIRED          true 时探测失败则退出 1
 #   PROXY_PORT              本地 mixed-port，默认 7890
 
@@ -15,7 +15,7 @@ fi
 
 PROXY_DIR="${RUNNER_TEMP:-/tmp}/checkin-proxy"
 PROXY_PORT="${PROXY_PORT:-7890}"
-PROXY_TEST_URL="${PROXY_TEST_URL:-https://agentrouter.org/login}"
+PROXY_TEST_URL="${PROXY_TEST_URL:-https://www.google.com/generate_204}"
 MIHOMO_VERSION="${MIHOMO_VERSION:-v1.19.0}"
 PROXY_REQUIRED="${PROXY_REQUIRED:-false}"
 

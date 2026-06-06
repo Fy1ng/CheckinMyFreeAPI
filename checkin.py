@@ -65,7 +65,9 @@ def save_balance_hash(balance_hash):
 
 def generate_balance_hash(balances):
 	"""生成余额数据的hash"""
-	simple_balances = {k: v['quota'] for k, v in balances.items()} if balances else {}
+	simple_balances = (
+		{k: {'quota': v.get('quota'), 'used': v.get('used')} for k, v in balances.items()} if balances else {}
+	)
 	balance_json = json.dumps(simple_balances, sort_keys=True, separators=(',', ':'))
 	return hashlib.sha256(balance_json.encode('utf-8')).hexdigest()[:16]
 
