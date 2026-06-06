@@ -21,6 +21,7 @@ class ProviderConfig:
 	api_user_key: str = 'new-api-user'
 	bypass_method: Literal['waf_cookies'] | None = None
 	waf_cookie_names: List[str] | None = None
+	use_proxy: bool = False
 
 	def __post_init__(self):
 		required_waf_cookies = set()
@@ -39,22 +40,24 @@ class ProviderConfig:
 		self.waf_cookie_names = list(required_waf_cookies)
 
 	@classmethod
-	def from_dict(cls, name: str, data: dict) -> 'ProviderConfig':
+	def from_dict(cls, name: str, data: dict, *, defaults: 'ProviderConfig | None' = None) -> 'ProviderConfig':
 		"""从字典创建 ProviderConfig
 
 		配置格式:
 		- 基础: {"domain": "https://example.com"}
-		- 完整: {"domain": "https://example.com", "login_path": "/login", "api_user_key": "x-api-user", "bypass_method": "waf_cookies", ...}
+		- 完整: {"domain": "https://example.com", "login_path": "/login", "use_proxy": true, ...}
 		"""
+		default_use_proxy = defaults.use_proxy if defaults else False
 		return cls(
 			name=name,
 			domain=data['domain'],
-			login_path=data.get('login_path', '/login'),
-			sign_in_path=data.get('sign_in_path', '/api/user/sign_in'),
-			user_info_path=data.get('user_info_path', '/api/user/self'),
-			api_user_key=data.get('api_user_key', 'new-api-user'),
-			bypass_method=data.get('bypass_method'),
-			waf_cookie_names=data.get('waf_cookie_names'),
+			login_path=data.get('login_path', defaults.login_path if defaults else '/login'),
+			sign_in_path=data.get('sign_in_path', defaults.sign_in_path if defaults else '/api/user/sign_in'),
+			user_info_path=data.get('user_info_path', defaults.user_info_path if defaults else '/api/user/self'),
+			api_user_key=data.get('api_user_key', defaults.api_user_key if defaults else 'new-api-user'),
+			bypass_method=data.get('bypass_method', defaults.bypass_method if defaults else None),
+			waf_cookie_names=data.get('waf_cookie_names', defaults.waf_cookie_names if defaults else None),
+			use_proxy=data.get('use_proxy', default_use_proxy),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -85,6 +88,7 @@ class AppConfig:
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
 				waf_cookie_names=['acw_tc', 'cdn_sec_tc', 'acw_sc__v2'],
+				use_proxy=False,
 			),
 			'agentrouter': ProviderConfig(
 				name='agentrouter',
@@ -95,6 +99,7 @@ class AppConfig:
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
 				waf_cookie_names=['acw_tc'],
+				use_proxy=True,
 			),
 		}
 
@@ -111,7 +116,11 @@ class AppConfig:
 				# 解析自定义 providers,会覆盖默认配置
 				for name, provider_data in providers_data.items():
 					try:
-						providers[name] = ProviderConfig.from_dict(name, provider_data)
+						providers[name] = ProviderConfig.from_dict(
+							name,
+							provider_data,
+							defaults=providers.get(name),
+						)
 					except Exception as e:
 						print(f'[WARNING] Failed to parse provider "{name}": {e}, skipping')
 						continue
@@ -181,7 +190,6 @@ def load_accounts_config() -> list[AccountConfig] | None:
 		return None
 
 	try:
-
 		if not isinstance(accounts_data, list):
 			print('ERROR: Account configuration must use array format [{}]')
 			return None
@@ -195,7 +203,9 @@ def load_accounts_config() -> list[AccountConfig] | None:
 			if 'api_user' not in account_dict:
 				has_login = account_dict.get('email') and account_dict.get('password')
 				if not has_login:
-					print(f'ERROR: Account {i + 1} missing required field (api_user) - only email+password login can omit it')
+					print(
+						f'ERROR: Account {i + 1} missing required field (api_user) - only email+password login can omit it'
+					)
 					return None
 
 			has_cookies = 'cookies' in account_dict and account_dict['cookies']

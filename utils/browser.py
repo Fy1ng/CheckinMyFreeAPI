@@ -43,6 +43,8 @@ SUBMIT_SELECTORS = (
 	'button[type="submit"]',
 )
 SESSION_COOKIE_NAME = 'session'
+USER_SELF_API_SUFFIX = '/api/user/self'
+CONSOLE_PATH = '/console'
 DEFAULT_SCREENSHOT_DIR = 'checkin_screenshots'
 DEFAULT_TIMEOUT_MS = 60_000
 _pending_notify_screenshots: list[Path] = []
@@ -137,6 +139,12 @@ _OPEN_EMAIL_FORM_JS = """() => {
 
 
 @dataclass(frozen=True)
+class BrowserLoginResult:
+	cookies: dict[str, str]
+	api_user: str | None = None
+
+
+@dataclass(frozen=True)
 class BrowserLoginSettings:
 	headless: bool
 	humanize: bool
@@ -172,7 +180,7 @@ def _ensure_binary_path(settings: BrowserLoginSettings) -> None:
 		os.environ['CLOAKBROWSER_BINARY_PATH'] = settings.cloakbrowser_binary_path
 
 
-async def launch_login_context(settings: BrowserLoginSettings) -> BrowserContext:
+async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: bool = False) -> BrowserContext:
 	from cloakbrowser import launch_persistent_context_async
 
 	_ensure_binary_path(settings)
@@ -186,10 +194,12 @@ async def launch_login_context(settings: BrowserLoginSettings) -> BrowserContext
 	if settings.humanize:
 		launch_kwargs['human_preset'] = 'careful'
 
-	proxy = get_playwright_proxy()
+	proxy = get_playwright_proxy(use_proxy=use_proxy)
 	if proxy:
 		launch_kwargs['proxy'] = proxy
 		print(f'[INFO] Browser proxy enabled: {proxy["server"]}')
+	elif use_proxy:
+		print('[WARN] Provider requires proxy but CHECKIN_PROXY_URL is not set')
 
 	return await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs)
 
@@ -322,6 +332,43 @@ async def has_session_cookie(page: Page) -> bool:
 	return any(c.get('name') == SESSION_COOKIE_NAME and c.get('value') for c in cookies)
 
 
+def _extract_user_profile(payload: object) -> dict | None:
+	if not isinstance(payload, dict):
+		return None
+	data = payload.get('data')
+	if payload.get('success') is True and isinstance(data, dict) and data.get('id'):
+		return data
+	if payload.get('id'):
+		return payload
+	return None
+
+
+async def _parse_user_self_response(response) -> dict | None:
+	if USER_SELF_API_SUFFIX not in response.url or response.status != 200:
+		return None
+	try:
+		payload = await response.json()
+	except Exception:  # nosec B110
+		return None
+	return _extract_user_profile(payload)
+
+
+async def is_logged_in(page: Page) -> bool:
+	"""快速判断：是否在 /console，或仍停留在登录页。"""
+	url = page.url.lower()
+	if CONSOLE_PATH in url:
+		return True
+	if '/login' in url or '/signin' in url or '/sign-in' in url:
+		return False
+
+	try:
+		if await page.locator('.semi-card button:has(.semi-icon-mail)').first.is_visible():
+			return False
+	except Exception:  # nosec B110
+		pass
+	return False
+
+
 async def wait_for_session_cookie(page: Page, timeout_ms: int = SESSION_WAIT_TIMEOUT_MS) -> bool:
 	deadline = time.monotonic() + timeout_ms / 1000
 	while time.monotonic() < deadline:
@@ -331,24 +378,58 @@ async def wait_for_session_cookie(page: Page, timeout_ms: int = SESSION_WAIT_TIM
 	return False
 
 
-async def ensure_session_after_login(page: Page, console_url: str, timeout_ms: int) -> bool:
-	"""提交登录后等待 session；若仍未拿到则跳转 console 再试。"""
-	session_timeout = min(timeout_ms, SESSION_WAIT_TIMEOUT_MS)
-	if await wait_for_session_cookie(page, session_timeout):
-		return True
+async def wait_for_logged_in(page: Page, timeout_ms: int = SESSION_WAIT_TIMEOUT_MS) -> bool:
+	deadline = time.monotonic() + timeout_ms / 1000
+	while time.monotonic() < deadline:
+		if await is_logged_in(page):
+			return True
+		await asyncio.sleep(0.5)
+	return False
 
-	print(f'[INFO] Session cookie not found yet, navigating to {console_url}')
+
+async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) -> dict | None:
+	"""跳转 /console 并拦截 /api/user/self，用浏览器会话确认登录用户。"""
+	verify_timeout = min(timeout_ms, SESSION_WAIT_TIMEOUT_MS)
+	captured_profile: dict | None = None
+	verified = asyncio.Event()
+
+	async def on_response(response) -> None:
+		nonlocal captured_profile
+		if captured_profile is not None:
+			return
+		profile = await _parse_user_self_response(response)
+		if profile:
+			captured_profile = profile
+			verified.set()
+
+	page.on('response', on_response)
 	try:
+		print(f'[INFO] Verifying login via {console_url} and {USER_SELF_API_SUFFIX}')
 		await page.goto(console_url, wait_until='load', timeout=min(timeout_ms, 60_000))
 		try:
 			await page.wait_for_load_state('networkidle', timeout=20_000)
 		except Exception:  # nosec B110
 			pass
-	except Exception as exc:
-		print(f'[WARN] Console navigation failed: {exc}')
-		return False
 
-	return await wait_for_session_cookie(page, session_timeout)
+		if captured_profile is None:
+			try:
+				await asyncio.wait_for(verified.wait(), timeout=verify_timeout / 1000)
+			except TimeoutError:
+				pass
+	finally:
+		page.remove_listener('response', on_response)
+
+	if captured_profile:
+		user_id = captured_profile.get('id')
+		username = captured_profile.get('username', '')
+		print(f'[INFO] Login verified via {USER_SELF_API_SUFFIX}: id={user_id}, username={username}')
+		return captured_profile
+
+	if CONSOLE_PATH in page.url.lower():
+		print(f'[WARN] Reached {CONSOLE_PATH} but {USER_SELF_API_SUFFIX} returned no user profile')
+	else:
+		print(f'[WARN] Login verification failed: current URL={page.url}')
+	return None
 
 
 async def wait_for_waf_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS) -> None:
@@ -638,7 +719,7 @@ async def submit_login_form(page: Page, timeout_ms: int) -> None:
 		await page.wait_for_load_state('networkidle', timeout=min(timeout_ms, 30_000))
 	except Exception:  # nosec B110
 		pass
-	await wait_for_session_cookie(page, SESSION_WAIT_TIMEOUT_MS)
+	await wait_for_logged_in(page, SESSION_WAIT_TIMEOUT_MS)
 
 
 async def login_with_email_form(
