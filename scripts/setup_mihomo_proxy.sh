@@ -91,16 +91,7 @@ if [[ "${READY}" != "true" ]]; then
 fi
 
 echo "[SUCCESS] Proxy is ready: ${PROXY_URL}"
+echo "[INFO] Proxy is scoped to CHECKIN_PROXY_URL (browser/python only, not global HTTP_PROXY)"
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-	{
-		echo "CHECKIN_PROXY_URL=${PROXY_URL}"
-		echo "HTTP_PROXY=${PROXY_URL}"
-		echo "HTTPS_PROXY=${PROXY_URL}"
-		echo "NO_PROXY=127.0.0.1,localhost"
-	} >> "${GITHUB_ENV}"
+	echo "CHECKIN_PROXY_URL=${PROXY_URL}" >> "${GITHUB_ENV}"
 fi
-
-export CHECKIN_PROXY_URL="${PROXY_URL}"
-export HTTP_PROXY="${PROXY_URL}"
-export HTTPS_PROXY="${PROXY_URL}"
-export NO_PROXY="127.0.0.1,localhost"

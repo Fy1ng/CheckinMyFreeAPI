@@ -410,7 +410,7 @@ def run_check_in_requests(
 async def main():
 	"""主函数"""
 	apply_proxy_env()
-	proxy_server = os.getenv('CHECKIN_PROXY_URL') or os.getenv('HTTPS_PROXY')
+	proxy_server = os.getenv('CHECKIN_PROXY_URL', '').strip()
 	if proxy_server:
 		print(f'[INFO] HTTP proxy enabled: {proxy_server}')
 	else:

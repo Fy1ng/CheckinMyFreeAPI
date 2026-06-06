@@ -6,7 +6,8 @@ import os
 
 
 def get_proxy_server() -> str | None:
-	server = os.getenv('CHECKIN_PROXY_URL', '').strip() or os.getenv('HTTPS_PROXY', '').strip()
+	"""仅使用 CHECKIN_PROXY_URL，避免污染 GitHub Actions 等全局 HTTP_PROXY。"""
+	server = os.getenv('CHECKIN_PROXY_URL', '').strip()
 	return server or None
 
 
@@ -18,14 +19,13 @@ def get_playwright_proxy() -> dict[str, str] | None:
 
 
 def apply_proxy_env() -> None:
-	"""将 CHECKIN_PROXY_URL 同步到标准代理环境变量。"""
+	"""仅在当前 Python 进程内为 httpx 设置代理，不写入 shell 全局环境。"""
 	server = os.getenv('CHECKIN_PROXY_URL', '').strip()
 	if not server:
 		return
-	os.environ.setdefault('HTTP_PROXY', server)
-	os.environ.setdefault('HTTPS_PROXY', server)
-	os.environ.setdefault('http_proxy', server)
-	os.environ.setdefault('https_proxy', server)
-	no_proxy = os.getenv('NO_PROXY', '127.0.0.1,localhost')
-	os.environ.setdefault('NO_PROXY', no_proxy)
-	os.environ.setdefault('no_proxy', no_proxy)
+	os.environ['HTTP_PROXY'] = server
+	os.environ['HTTPS_PROXY'] = server
+	os.environ['http_proxy'] = server
+	os.environ['https_proxy'] = server
+	os.environ['NO_PROXY'] = '127.0.0.1,localhost'
+	os.environ['no_proxy'] = '127.0.0.1,localhost'

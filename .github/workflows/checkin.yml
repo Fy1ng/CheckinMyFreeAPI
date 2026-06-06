@@ -110,12 +110,13 @@ jobs:
       run: |
         xvfb-run -a --server-args="-screen 0 1920x1080x24" uv run checkin.py
 
-    - name: 停止代理
-      if: always()
-      run: bash scripts/stop_mihomo_proxy.sh
-
     - name: 上传调试截图
       if: always()
+      env:
+        HTTP_PROXY: ''
+        HTTPS_PROXY: ''
+        http_proxy: ''
+        https_proxy: ''
       uses: actions/upload-artifact@v4
       with:
         name: checkin-screenshots-${{ github.run_id }}
@@ -123,6 +124,10 @@ jobs:
         if-no-files-found: warn
         include-hidden-files: true
         retention-days: 14
+
+    - name: 停止代理
+      if: always()
+      run: bash scripts/stop_mihomo_proxy.sh
 
     - name: 执行结果
       if: always()
