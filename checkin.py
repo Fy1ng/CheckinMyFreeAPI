@@ -34,6 +34,7 @@ from utils.browser import (
 	wait_for_waf_ready,
 )
 from utils.config import AccountConfig, AppConfig, load_accounts_config
+from utils.debug import debug_print, is_debug_enabled
 from utils.notify import notify
 from utils.proxy import get_playwright_proxy, get_proxy_server
 
@@ -150,7 +151,7 @@ async def login_with_credentials(
 	settings = load_browser_login_settings(account_name, provider_name)
 	timeout_ms = settings.wait_timeout_ms
 
-	print(
+	debug_print(
 		f'[INFO] {account_name}: Browser profile={settings.profile_dir}, '
 		f'headless={settings.headless}, humanize={settings.humanize}, timeout={timeout_ms}ms'
 	)
@@ -199,8 +200,8 @@ async def login_with_credentials(
 			cookies = await context.cookies()
 			cookie_names = [c.get('name') for c in cookies if c.get('name')]
 			print(f'[FAILED] {account_name}: Login failed - /api/user/self not verified')
-			print(f'[INFO] {account_name}: Current URL: {page.url}')
-			print(f'[INFO] {account_name}: Got cookies: {cookie_names}')
+			debug_print(f'[INFO] {account_name}: Current URL: {page.url}')
+			debug_print(f'[INFO] {account_name}: Got cookies: {cookie_names}')
 			await save_login_screenshot(page, provider_name, account_name, 'not-authenticated')
 			await context.close()
 			return None
@@ -211,10 +212,10 @@ async def login_with_credentials(
 		}
 		api_user = str(user_profile['id']) if user_profile.get('id') is not None else None
 
-		print(
-			f'[SUCCESS] {account_name}: Login successful, got {len(all_cookies)} cookies'
-			+ (f', api_user={api_user}' if api_user else '')
-		)
+		success_msg = f'[SUCCESS] {account_name}: Login successful, got {len(all_cookies)} cookies'
+		if is_debug_enabled() and api_user:
+			success_msg += f', api_user={api_user}'
+		print(success_msg)
 		await context.close()
 		return BrowserLoginResult(cookies=all_cookies, api_user=api_user)
 
@@ -413,7 +414,10 @@ def run_check_in_requests(
 		proxy_url = get_proxy_server(use_proxy=use_proxy)
 		if proxy_url:
 			client_kwargs['proxy'] = proxy_url
-			print(f'[INFO] {account_name}: HTTP client proxy enabled: {proxy_url}')
+			if is_debug_enabled():
+				print(f'[INFO] {account_name}: HTTP client proxy enabled: {proxy_url}')
+			else:
+				print(f'[INFO] {account_name}: HTTP client proxy enabled')
 		elif use_proxy:
 			print(f'[WARN] {account_name}: Provider requires proxy but CHECKIN_PROXY_URL is not set')
 
@@ -464,19 +468,24 @@ def run_check_in_requests(
 
 async def main():
 	"""主函数"""
-	proxy_server = os.getenv('CHECKIN_PROXY_URL', '').strip()
-	if proxy_server:
-		print(f'[INFO] Proxy endpoint available: {proxy_server} (enabled per provider use_proxy)')
+	if is_debug_enabled():
+		print('[INFO] DEBUG_MODE enabled')
+		proxy_server = os.getenv('CHECKIN_PROXY_URL', '').strip()
+		if proxy_server:
+			print(f'[INFO] Proxy endpoint available: {proxy_server} (enabled per provider use_proxy)')
+		else:
+			print('[INFO] CHECKIN_PROXY_URL not set; providers with use_proxy=true will run without proxy')
 	else:
-		print('[INFO] CHECKIN_PROXY_URL not set; providers with use_proxy=true will run without proxy')
+		print('[INFO] Debug mode disabled (set DEBUG_MODE=true to enable screenshots and verbose logs)')
 
 	print('[SYSTEM] AnyRouter.top multi-account auto check-in script started')
 	print(f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
 	app_config = AppConfig.load_from_env()
 	print(f'[INFO] Loaded {len(app_config.providers)} provider configuration(s)')
-	for provider_name, provider in sorted(app_config.providers.items()):
-		print(f'[INFO] Provider "{provider_name}": use_proxy={provider.use_proxy}')
+	if is_debug_enabled():
+		for provider_name, provider in sorted(app_config.providers.items()):
+			print(f'[INFO] Provider "{provider_name}": use_proxy={provider.use_proxy}')
 
 	accounts = load_accounts_config()
 	if not accounts:
@@ -601,7 +610,7 @@ async def main():
 		time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
 
 		notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
-		screenshot_paths = take_pending_screenshots()
+		screenshot_paths = take_pending_screenshots() if is_debug_enabled() else []
 		if screenshot_paths:
 			github_run_id = os.getenv('GITHUB_RUN_ID', '').strip()
 			github_repo = os.getenv('GITHUB_REPOSITORY', '').strip()

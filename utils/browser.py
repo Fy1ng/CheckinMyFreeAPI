@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from utils.debug import debug_print, is_debug_enabled
 from utils.popups import dismiss_popups, setup_popup_guard
 from utils.proxy import get_playwright_proxy
 
@@ -197,7 +198,10 @@ async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: boo
 	proxy = get_playwright_proxy(use_proxy=use_proxy)
 	if proxy:
 		launch_kwargs['proxy'] = proxy
-		print(f'[INFO] Browser proxy enabled: {proxy["server"]}')
+		if is_debug_enabled():
+			print(f'[INFO] Browser proxy enabled: {proxy["server"]}')
+		else:
+			print('[INFO] Browser proxy enabled')
 	elif use_proxy:
 		print('[WARN] Provider requires proxy but CHECKIN_PROXY_URL is not set')
 
@@ -219,6 +223,9 @@ async def save_login_screenshot(
 	account_name: str,
 	label: str,
 ) -> Path | None:
+	if not is_debug_enabled():
+		return None
+
 	screenshot_dir = get_screenshot_dir()
 	screenshot_dir.mkdir(parents=True, exist_ok=True)
 	timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -420,15 +427,19 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 		page.remove_listener('response', on_response)
 
 	if captured_profile:
-		user_id = captured_profile.get('id')
-		username = captured_profile.get('username', '')
-		print(f'[INFO] Login verified via {USER_SELF_API_SUFFIX}: id={user_id}, username={username}')
+		if is_debug_enabled():
+			user_id = captured_profile.get('id')
+			username = captured_profile.get('username', '')
+			print(f'[INFO] Login verified via {USER_SELF_API_SUFFIX}: id={user_id}, username={username}')
+		else:
+			print('[INFO] Login verified')
 		return captured_profile
 
 	if CONSOLE_PATH in page.url.lower():
 		print(f'[WARN] Reached {CONSOLE_PATH} but {USER_SELF_API_SUFFIX} returned no user profile')
 	else:
-		print(f'[WARN] Login verification failed: current URL={page.url}')
+		debug_print(f'[WARN] Login verification failed: current URL={page.url}')
+		print('[WARN] Login verification failed')
 	return None
 
 
@@ -562,7 +573,7 @@ async def _log_login_page_state(page: Page) -> None:
 			};
 		}"""
 	)
-	print(f'[INFO] Login page state: {state}')
+	debug_print(f'[INFO] Login page state: {state}')
 
 
 async def _open_email_login_form(
@@ -622,7 +633,7 @@ async def _open_email_login_form(
 	if remaining_ms > 0 and await _wait_for_username_input(page, remaining_ms):
 		return
 
-	print(f'[INFO] Login page URL: {page.url}')
+	debug_print(f'[INFO] Login page URL: {page.url}')
 	await _log_login_page_state(page)
 	if provider and account_name:
 		await save_login_screenshot(page, provider, account_name, 'email-form-timeout')
