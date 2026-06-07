@@ -270,6 +270,23 @@
 - `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter` 和 `agentrouter`
 - 自定义的 provider 配置会覆盖同名的默认配置
 
+## 代理配置（可选）
+
+内置的 `agentrouter` 默认 `use_proxy: true`。如果你的运行环境访问该平台不稳定，可以在 GitHub Actions 中配置 mihomo 订阅代理。
+
+在仓库 Settings -> Environments -> production -> Environment secrets 中添加：
+
+- `PROXY_SUBSCRIPTION_URL`：Clash/Mihomo 订阅链接。设置后，workflow 会运行 `scripts/setup_mihomo_proxy.sh`，启动本地代理并写入 `CHECKIN_PROXY_URL`。
+
+本地运行时也可以直接使用已有代理：
+
+```bash
+CHECKIN_PROXY_URL=http://127.0.0.1:7890
+PROVIDERS={"agentrouter":{"use_proxy":true}}
+```
+
+如果使用订阅脚本，默认会用 `https://www.google.com/generate_204` 测试代理连通性；也可以通过 `PROXY_TEST_URL` 覆盖。
+
 ## 开启通知
 
 脚本支持多种通知方式，可以通过配置以下环境变量开启，如果 `webhook` 有要求安全设置，例如钉钉，可以在新建机器人时选择自定义关键词，填写 `AnyRouter`。
@@ -350,6 +367,8 @@ uv run python -m cloakbrowser install
 # 示例：
 # ANYROUTER_ACCOUNTS=[{"name":"账号1","email":"your@email.com","password":"your_password"}]
 # PROVIDERS={"agentrouter":{"domain":"https://agentrouter.org"}}
+# PROXY_SUBSCRIPTION_URL=https://example.com/sub?token=xxx
+# CHECKIN_PROXY_URL=http://127.0.0.1:7890
 
 # 运行签到脚本
 uv run checkin.py
