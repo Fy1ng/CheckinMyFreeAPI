@@ -24,8 +24,14 @@ cd "${PROXY_DIR}"
 
 echo "[INFO] Downloading mihomo ${MIHOMO_VERSION}..."
 ARCHIVE="mihomo-linux-amd64-${MIHOMO_VERSION}.gz"
-curl -fsSL -o "${ARCHIVE}" \
-	"https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/${ARCHIVE}"
+if ! curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL -o "${ARCHIVE}" \
+	"https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/${ARCHIVE}"; then
+	echo "[WARN] Failed to download mihomo ${MIHOMO_VERSION}, skip proxy setup"
+	if [[ "${PROXY_REQUIRED}" == "true" ]]; then
+		exit 1
+	fi
+	exit 0
+fi
 gunzip -f "${ARCHIVE}"
 chmod +x "mihomo-linux-amd64-${MIHOMO_VERSION}"
 MIHOMO_BIN="${PROXY_DIR}/mihomo-linux-amd64-${MIHOMO_VERSION}"
