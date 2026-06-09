@@ -150,12 +150,17 @@ async def login_with_credentials(
 	print(f'[PROCESSING] {account_name}: Logging in with email/password...')
 
 	login_url = f'{provider_config.domain}{provider_config.login_path}'
-	settings = load_browser_login_settings(account_name, provider_name)
+	settings = load_browser_login_settings(
+		account_name,
+		provider_name,
+		persist_profile=provider_config.persist_profile,
+	)
 	timeout_ms = settings.wait_timeout_ms
 
 	debug_print(
 		f'[INFO] {account_name}: Browser profile={settings.profile_dir}, '
-		f'headless={settings.headless}, humanize={settings.humanize}, timeout={timeout_ms}ms'
+		f'persist={settings.persist_profile}, headless={settings.headless}, '
+		f'humanize={settings.humanize}, timeout={timeout_ms}ms'
 	)
 
 	print(
