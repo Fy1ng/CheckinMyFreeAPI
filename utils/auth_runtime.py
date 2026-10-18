@@ -136,9 +136,9 @@ class AuthenticationRuntime:
 		compatibility = f'{os.name}:{version("cloakbrowser")}:{get_chromium_version()}'
 		store = SnapshotStore(
 			Path(os.getenv('CHECKIN_AUTH_ROOT', '.auth-state')),
-			Path('.auth-cache/auth-state.enc'),
+			Path(os.getenv('CHECKIN_AUTH_CACHE_FILE', '.auth-cache/auth-state.enc')),
 			os.getenv('CHECKIN_STATE_KEY', ''),
-			scope=os.getenv('GITHUB_REPOSITORY', 'local-test'),
+			scope=os.getenv('CHECKIN_STATE_SCOPE', os.getenv('GITHUB_REPOSITORY', 'local-test')),
 			compatibility=compatibility,
 		)
 		try:

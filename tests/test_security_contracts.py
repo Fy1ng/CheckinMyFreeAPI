@@ -36,31 +36,16 @@ def test_account_json_secrets_are_collected(monkeypatch):
 	assert {'synthetic-pass', 'synthetic-session'} <= values
 
 
-def test_production_workflow_caches_only_encrypted_authentication_state():
+def test_actions_never_run_real_checkin_or_receive_login_configuration():
 	root = Path(__file__).resolve().parent.parent
-	workflow = yaml.safe_load((root / '.github/workflows/checkin.yml').read_text(encoding='utf-8'))
-	job = workflow['jobs']['checkin']
-	assert 'default_branch' in job['if']
-	assert workflow['permissions'] == {'contents': 'read'}
-	assert workflow['concurrency']['cancel-in-progress'] is False
-	assert job['environment'] == 'production'
-	assert job['env']['CHECKIN_SECURE_MODE'] == 'true'
-	for step in job['steps']:
-		uses = step.get('uses', '')
-		assert 'upload-artifact' not in uses
-		if 'cache' in uses:
-			path = step['with']['path']
-			assert '.browser_profiles' not in path
-			assert '.auth-state' not in path
-			if '.auth-cache' in path:
-				assert path == '.auth-cache/*.enc'
-				if 'restore' in uses:
-					assert 'github.run_attempt' in step['with']['key']
-					assert 'CHECKIN_STATE_EPOCH' in step['with']['key']
-				if 'save' in uses:
-					assert 'ready' in step['if']
-		if uses:
-			assert len(uses.rsplit('@', 1)[-1]) == 40
+	assert not (root / '.github/workflows/checkin.yml').exists()
+	for path in (root / '.github/workflows').glob('*.yml'):
+		text = path.read_text(encoding='utf-8')
+		workflow = yaml.safe_load(text)
+		assert 'schedule' not in workflow.get('on', workflow.get(True, {}))
+		assert 'uv run checkin.py' not in text
+		assert 'secrets.ANYROUTER_ACCOUNTS' not in text
+		assert 'secrets.CHECKIN_STATE_KEY' not in text
 
 
 @pytest.mark.asyncio

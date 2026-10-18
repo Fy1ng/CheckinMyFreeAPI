@@ -243,10 +243,13 @@ class ManualTakeover:
 			raise ManualLoginError('Manual browser login is disabled')
 		if sys.platform != 'linux' or not os.getenv('DISPLAY'):
 			raise ManualLoginError('Manual login requires the headed Linux/Xvfb workflow')
+		if os.getenv('CHECKIN_MANUAL_HEADLESS') == 'true':
+			raise ManualLoginError('Manual login requires headless mode to be disabled')
 		x11vnc = shutil.which('x11vnc')
+		local = os.getenv('CHECKIN_MANUAL_TRANSPORT') == 'local'
 		cloudflared = shutil.which('cloudflared')
 		assets = Path(os.getenv('NOVNC_WEB_ROOT', '/usr/share/novnc'))
-		if not x11vnc or not cloudflared or not (assets / 'core' / 'rfb.js').is_file():
+		if not x11vnc or (not local and not cloudflared) or not (assets / 'core' / 'rfb.js').is_file():
 			raise ManualLoginError('Manual login dependencies are unavailable')
 		try:
 			vnc_port = unused_local_port()
@@ -277,6 +280,11 @@ class ManualTakeover:
 			await site.start()
 			addresses = self._runner.addresses
 			gateway_port = addresses[0][1]
+			if local:
+				self.url = f'http://127.0.0.1:{gateway_port}'
+				self.gateway.origin = self.url
+				self.gateway._session = os.environ['CHECKIN_MANUAL_SESSION']
+				return self
 			tunnel = await asyncio.create_subprocess_exec(
 				cloudflared,
 				'tunnel',
