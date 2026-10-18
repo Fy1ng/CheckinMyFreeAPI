@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import os
+import signal
 import sys
 from datetime import datetime
 
@@ -19,6 +20,7 @@ import httpx
 from cloakbrowser import launch_async
 from dotenv import load_dotenv
 
+from utils.auth_runtime import AuthenticationRuntime
 from utils.browser import (
 	BrowserLoginResult,
 	has_session_cookie,
@@ -35,8 +37,11 @@ from utils.browser import (
 )
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.debug import debug_print, is_debug_enabled
+from utils.logging_safety import install_redaction
 from utils.notify import notify
+from utils.oauth import AuthError, ManualLoginRequired
 from utils.proxy import get_playwright_proxy, get_proxy_server
+from utils.secure_state import StateError
 
 load_dotenv()
 
@@ -215,7 +220,7 @@ async def login_with_credentials(
 
 		cookies = await context.cookies()
 		all_cookies = {
-			cookie.get('name'): cookie.get('value') for cookie in cookies if cookie.get('name') and cookie.get('value')
+			cookie['name']: cookie['value'] for cookie in cookies if cookie.get('name') and cookie.get('value')
 		}
 		api_user = str(user_profile['id']) if user_profile.get('id') is not None else None
 
@@ -417,14 +422,11 @@ def run_check_in_requests(
 ) -> tuple[bool, dict | None, dict | None]:
 	"""执行 HTTP 签到请求（同步，避免在 async 上下文中使用阻塞 httpx）。"""
 	try:
-		client_kwargs: dict = {'http2': True, 'timeout': 30.0}
+		client_kwargs: dict = {'http2': True, 'timeout': 30.0, 'trust_env': False}
 		proxy_url = get_proxy_server(use_proxy=use_proxy)
 		if proxy_url:
 			client_kwargs['proxy'] = proxy_url
-			if is_debug_enabled():
-				print(f'[INFO] {account_name}: HTTP client proxy enabled: {proxy_url}')
-			else:
-				print(f'[INFO] {account_name}: HTTP client proxy enabled')
+			print(f'[INFO] {account_name}: HTTP client proxy enabled')
 		elif use_proxy:
 			print(f'[WARN] {account_name}: Provider requires proxy but CHECKIN_PROXY_URL is not set')
 
@@ -475,11 +477,17 @@ def run_check_in_requests(
 
 async def main():
 	"""主函数"""
+	if os.getenv('CHECKIN_STATE_KEY') or os.getenv('CHECKIN_IDENTITIES'):
+		os.environ['CHECKIN_SECURE_MODE'] = 'true'
+	if os.name == 'posix':
+		task = asyncio.current_task()
+		if task is not None:
+			asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
 	if is_debug_enabled():
 		print('[INFO] DEBUG_MODE enabled')
 		proxy_server = os.getenv('CHECKIN_PROXY_URL', '').strip()
 		if proxy_server:
-			print(f'[INFO] Proxy endpoint available: {proxy_server} (enabled per provider use_proxy)')
+			print('[INFO] Proxy endpoint configured (enabled per provider or identity)')
 		else:
 			print('[INFO] CHECKIN_PROXY_URL not set; providers with use_proxy=true will run without proxy')
 	else:
@@ -513,10 +521,11 @@ async def main():
 	need_notify = False
 	balance_changed = False
 
+	results = await run_account_batch(accounts, app_config)
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
 		try:
-			success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
+			success, user_info_before, user_info_after = results[i]
 			if success:
 				success_count += 1
 
@@ -635,18 +644,69 @@ async def main():
 	else:
 		print('[INFO] All accounts successful and no balance changes detected, notification skipped')
 
-	sys.exit(0 if success_count > 0 else 1)
+	sys.exit(0 if success_count == total_count else 1)
+
+
+async def notify_manual_ready(url: str, account_name: str, timeout: int) -> None:
+	content = (
+		f'{account_name} 需要在本次运行中完成网页登录。\n{url}\n'
+		f'请使用预先配置的远程接管密码。入口约 {timeout} 秒后关闭；不要发送 Cookie、密码或验证码到日志。'
+	)
+	await asyncio.to_thread(notify.push_message, '签到需要人工登录', content, msg_type='text')
+
+
+async def run_account_batch(accounts: list[AccountConfig], app_config: AppConfig) -> list[tuple]:
+	use_secure = bool(os.getenv('CHECKIN_STATE_KEY')) or any(account.has_oauth() for account in accounts)
+	runtime = (
+		AuthenticationRuntime.from_environment(accounts, app_config, notify_ready=notify_manual_ready)
+		if use_secure
+		else None
+	)
+	results: list[tuple] = [(False, None, None) for account in accounts]
+	deferred: list[int] = []
+
+	async def execute(index: int, allow_manual: bool) -> None:
+		account = accounts[index]
+		try:
+			if runtime is not None:
+				results[index] = await runtime.execute(account, index, allow_manual=allow_manual)
+			else:
+				results[index] = await check_in_account(account, index, app_config)
+		except ManualLoginRequired:
+			if not allow_manual:
+				deferred.append(index)
+			else:
+				results[index] = (False, None, {'success': False, 'error': 'MANUAL_LOGIN_REQUIRED'})
+		except (AuthError, StateError) as failure:
+			reason = failure.reason if isinstance(failure, AuthError) else 'STATE_PERSISTENCE_FAILED'
+			print(f'[FAILED] Account {index + 1}: {reason}')
+			results[index] = (False, None, {'success': False, 'error': reason})
+		except Exception as failure:
+			print(f'[FAILED] Account {index + 1}: {type(failure).__name__}')
+			results[index] = (False, None, {'success': False, 'error': type(failure).__name__})
+
+	try:
+		for index in range(len(accounts)):
+			await execute(index, False)
+		for index in deferred:
+			await execute(index, True)
+		return results
+	finally:
+		if runtime is not None:
+			runtime.close()
 
 
 def run_main():
 	"""运行主函数的包装函数"""
+	install_redaction()
 	try:
 		asyncio.run(main())
-	except KeyboardInterrupt:
+	except (KeyboardInterrupt, asyncio.CancelledError):
 		print('\n[WARNING] Program interrupted by user')
 		sys.exit(1)
 	except Exception as e:
-		print(f'\n[FAILED] Error occurred during program execution: {e}')
+		message = str(e) if isinstance(e, (AuthError, StateError)) else type(e).__name__
+		print(f'\n[FAILED] Error occurred during program execution: {message}')
 		sys.exit(1)
 
 

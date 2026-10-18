@@ -8,6 +8,11 @@
 
 set -euo pipefail
 
+if [[ -n "${CHECKIN_PROXY_URL:-}" ]]; then
+	echo '[INFO] Explicit per-provider proxy configured; skipping subscription setup'
+	exit 0
+fi
+
 if [[ -z "${PROXY_SUBSCRIPTION_URL:-}" ]]; then
 	echo "[INFO] PROXY_SUBSCRIPTION_URL not set, skip proxy setup"
 	exit 0
@@ -16,7 +21,15 @@ fi
 PROXY_DIR="${RUNNER_TEMP:-/tmp}/checkin-proxy"
 PROXY_PORT="${PROXY_PORT:-7890}"
 PROXY_TEST_URL="${PROXY_TEST_URL:-https://www.google.com/generate_204}"
-MIHOMO_VERSION="${MIHOMO_VERSION:-v1.19.0}"
+MIHOMO_VERSION="${MIHOMO_VERSION:-v1.19.27}"
+MIHOMO_SHA256="${MIHOMO_SHA256:-}"
+if [[ -z "$MIHOMO_SHA256" && "$MIHOMO_VERSION" == 'v1.19.27' ]]; then
+	MIHOMO_SHA256='fb3e34c55844f389ff54679e5a3aec331d5ec38006c20f8dcc476fb47768a58f'
+fi
+if [[ ! "$MIHOMO_SHA256" =~ ^[a-fA-F0-9]{64}$ ]]; then
+	echo '[FAILED] A verified MIHOMO_SHA256 is required for the selected version'
+	exit 1
+fi
 PROXY_REQUIRED="${PROXY_REQUIRED:-false}"
 
 mkdir -p "${PROXY_DIR}"
@@ -32,6 +45,10 @@ if ! curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL -o "${ARCHIVE}" \
 	fi
 	exit 0
 fi
+printf '%s  %s\n' "$MIHOMO_SHA256" "$ARCHIVE" | sha256sum --check --status || {
+	echo '[FAILED] Mihomo download failed SHA256 verification'
+	exit 1
+}
 gunzip -f "${ARCHIVE}"
 chmod +x "mihomo-linux-amd64-${MIHOMO_VERSION}"
 MIHOMO_BIN="${PROXY_DIR}/mihomo-linux-amd64-${MIHOMO_VERSION}"
@@ -86,7 +103,7 @@ done
 
 if [[ "${READY}" != "true" ]]; then
 	echo "[FAILED] Proxy health check failed for ${PROXY_TEST_URL}"
-	tail -n 30 mihomo.log || true
+	echo '[WARN] Proxy diagnostics are not printed because they may contain subscription credentials'
 	if [[ -f mihomo.pid ]]; then
 		kill "$(cat mihomo.pid)" 2>/dev/null || true
 	fi

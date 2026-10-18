@@ -9,11 +9,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from utils.debug import debug_print, is_debug_enabled
 from utils.popups import dismiss_popups, setup_popup_guard
-from utils.proxy import get_playwright_proxy
+from utils.proxy import get_playwright_proxy, playwright_proxy
 
 if TYPE_CHECKING:
 	from playwright.async_api import BrowserContext, Locator, Page
@@ -200,7 +200,14 @@ class _EphemeralBrowserContext:
 			await self._browser.close()
 
 
-async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: bool = False) -> BrowserContext:
+async def launch_login_context(
+	settings: BrowserLoginSettings,
+	*,
+	use_proxy: bool = False,
+	proxy_server: str | None = None,
+	fingerprint_seed: int | None = None,
+	secure: bool = False,
+) -> BrowserContext | _EphemeralBrowserContext:
 	_ensure_binary_path(settings)
 
 	launch_kwargs: dict = {
@@ -211,13 +218,24 @@ async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: boo
 	if settings.humanize:
 		launch_kwargs['human_preset'] = 'careful'
 
-	proxy = get_playwright_proxy(use_proxy=use_proxy)
+	if secure:
+		from utils.manual_login import child_environment
+
+		launch_kwargs.update(
+			{
+				'env': child_environment(),
+				'service_workers': 'block',
+				'accept_downloads': False,
+				'locale': 'en-US',
+				'timezone': 'UTC',
+			}
+		)
+	if fingerprint_seed is not None:
+		launch_kwargs['args'] = [f'--fingerprint={fingerprint_seed}']
+	proxy = playwright_proxy(proxy_server) if proxy_server is not None else get_playwright_proxy(use_proxy=use_proxy)
 	if proxy:
 		launch_kwargs['proxy'] = proxy
-		if is_debug_enabled():
-			print(f'[INFO] Browser proxy enabled: {proxy["server"]}')
-		else:
-			print('[INFO] Browser proxy enabled')
+		print('[INFO] Browser proxy enabled')
 	elif use_proxy:
 		print('[WARN] Provider requires proxy but CHECKIN_PROXY_URL is not set')
 
@@ -225,7 +243,7 @@ async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: boo
 		from cloakbrowser import launch_persistent_context_async
 
 		settings.profile_dir.mkdir(parents=True, exist_ok=True)
-		return await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs)
+		return cast('BrowserContext', await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs))
 
 	from cloakbrowser import launch_async
 
@@ -250,7 +268,7 @@ async def save_login_screenshot(
 	account_name: str,
 	label: str,
 ) -> Path | None:
-	if not is_debug_enabled():
+	if not is_debug_enabled() or os.getenv('CHECKIN_SECURE_MODE', '').lower() in {'true', '1'}:
 		return None
 
 	screenshot_dir = get_screenshot_dir()
@@ -295,7 +313,9 @@ async def wait_for_site_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS
 		print(f'[INFO] Dismissed {closed} popup dialog(s)')
 
 
-async def _wait_for_optional_load_state(page: Page, state: str, timeout_ms: int) -> bool:
+async def _wait_for_optional_load_state(
+	page: Page, state: Literal['domcontentloaded', 'load', 'networkidle'], timeout_ms: int
+) -> bool:
 	try:
 		await page.wait_for_load_state(state, timeout=timeout_ms)
 		return True

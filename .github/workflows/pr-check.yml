@@ -96,9 +96,15 @@ jobs:
             echo "status=warning" >> $GITHUB_OUTPUT
           fi
 
+      - name: 安装隔离测试浏览器
+        run: uv run --frozen playwright install --with-deps chromium
+
       - name: 运行测试 (Pytest)
         id: pytest
         continue-on-error: true
+        env:
+          CHECKIN_BROWSER_TESTS: '1'
+          CHECKIN_TEST_BROWSER_CHANNEL: ''
         run: |
           echo "## Pytest 测试" >> $GITHUB_STEP_SUMMARY
           uv run pytest tests/ -v --cov=. --cov-report=term --cov-report=xml --cov-report=html 2>&1 | tee pytest.log

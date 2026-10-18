@@ -7,6 +7,8 @@ import os
 
 def is_debug_enabled() -> bool:
 	"""是否开启调试模式，读取 DEBUG_MODE，默认 false。"""
+	if os.getenv('CHECKIN_SECURE_MODE', '').strip().lower() in {'1', 'true', 'yes'}:
+		return False
 	raw = os.getenv('DEBUG_MODE', '').strip().lower()
 	return raw in {'1', 'true', 'yes', 'on'}
 

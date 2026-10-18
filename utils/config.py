@@ -5,7 +5,7 @@
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Literal
 
 
@@ -23,6 +23,9 @@ class ProviderConfig:
 	waf_cookie_names: List[str] | None = None
 	use_proxy: bool = False
 	persist_profile: bool = False
+	status_path: str = '/api/status'
+	auth_state_path: str = '/api/oauth/state'
+	oauth_client_ids: dict[str, str] = field(default_factory=dict)
 
 	def __post_init__(self):
 		required_waf_cookies = set()
@@ -61,6 +64,9 @@ class ProviderConfig:
 			waf_cookie_names=data.get('waf_cookie_names', defaults.waf_cookie_names if defaults else None),
 			use_proxy=data.get('use_proxy', default_use_proxy),
 			persist_profile=data.get('persist_profile', default_persist_profile),
+			status_path=data.get('status_path', defaults.status_path if defaults else '/api/status'),
+			auth_state_path=data.get('auth_state_path', defaults.auth_state_path if defaults else '/api/oauth/state'),
+			oauth_client_ids=data.get('oauth_client_ids', defaults.oauth_client_ids if defaults else {}),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -77,10 +83,12 @@ class AppConfig:
 	"""应用配置"""
 
 	providers: Dict[str, ProviderConfig]
+	identities: dict[str, 'IdentityConfig'] = field(default_factory=dict)
 
 	@classmethod
 	def load_from_env(cls) -> 'AppConfig':
 		"""从环境变量加载配置"""
+		identities = load_identities_config()
 		providers = {
 			'anyrouter': ProviderConfig(
 				name='anyrouter',
@@ -116,7 +124,7 @@ class AppConfig:
 
 				if not isinstance(providers_data, dict):
 					print('[WARNING] PROVIDERS must be a JSON object, ignoring custom providers')
-					return cls(providers=providers)
+					return cls(providers=providers, identities=identities)
 
 				# 解析自定义 providers,会覆盖默认配置
 				for name, provider_data in providers_data.items():
@@ -138,7 +146,7 @@ class AppConfig:
 			except Exception as e:
 				print(f'[WARNING] Error loading PROVIDERS: {e}, using default configuration only')
 
-		return cls(providers=providers)
+		return cls(providers=providers, identities=identities)
 
 	def get_provider(self, name: str) -> ProviderConfig | None:
 		"""获取指定 provider 配置"""
@@ -149,12 +157,16 @@ class AppConfig:
 class AccountConfig:
 	"""账号配置"""
 
-	cookies: dict | str | None
+	cookies: dict | str | None = field(repr=False)
 	api_user: str | None = None
 	provider: str = 'anyrouter'
 	name: str | None = None
 	email: str | None = None
-	password: str | None = None
+	password: str | None = field(default=None, repr=False)
+	id: str | None = None
+	auth: dict[str, str] | None = None
+	expected_username: str | None = None
+	proxy: str | None = field(default=None, repr=False)
 
 	@classmethod
 	def from_dict(cls, data: dict, index: int) -> 'AccountConfig':
@@ -169,11 +181,18 @@ class AccountConfig:
 			name=name if name else None,
 			email=data.get('email'),
 			password=data.get('password'),
+			id=data.get('id'),
+			auth=data.get('auth'),
+			expected_username=data.get('expected_username'),
+			proxy=data.get('proxy'),
 		)
 
 	def has_login_credentials(self) -> bool:
 		"""是否配置了邮箱密码登录"""
 		return bool(self.email and self.password)
+
+	def has_oauth(self) -> bool:
+		return bool(self.auth and self.auth.get('type') in {'linuxdo', 'github'})
 
 	def get_display_name(self, index: int) -> str:
 		"""获取显示名称"""
@@ -205,7 +224,24 @@ def load_accounts_config() -> list[AccountConfig] | None:
 				print(f'ERROR: Account {i + 1} configuration format is incorrect')
 				return None
 
-			if 'api_user' not in account_dict:
+			auth = account_dict.get('auth')
+			if auth is not None:
+				if (
+					not isinstance(auth, dict)
+					or auth.get('type') not in {'linuxdo', 'github'}
+					or not isinstance(auth.get('identity'), str)
+					or not auth['identity'].strip()
+				):
+					print(f'ERROR: Account {i + 1} has invalid OAuth configuration')
+					return None
+				if not account_dict.get('api_user') and not account_dict.get('expected_username'):
+					print(f'ERROR: Account {i + 1} OAuth requires api_user or expected_username for identity binding')
+					return None
+				if account_dict.get('email') or account_dict.get('password') or account_dict.get('cookies'):
+					print(f'ERROR: Account {i + 1} cannot mix OAuth with cookies or password credentials')
+					return None
+
+			if 'api_user' not in account_dict and not auth:
 				has_login = account_dict.get('email') and account_dict.get('password')
 				if not has_login:
 					print(
@@ -216,7 +252,7 @@ def load_accounts_config() -> list[AccountConfig] | None:
 			has_cookies = 'cookies' in account_dict and account_dict['cookies']
 			has_login = account_dict.get('email') and account_dict.get('password')
 
-			if not has_cookies and not has_login:
+			if not has_cookies and not has_login and not auth:
 				print(f'ERROR: Account {i + 1} must have either cookies or email+password')
 				return None
 
@@ -230,3 +266,29 @@ def load_accounts_config() -> list[AccountConfig] | None:
 	except Exception as e:
 		print(f'ERROR: Account configuration format is incorrect: {e}')
 		return None
+
+
+@dataclass(frozen=True)
+class IdentityConfig:
+	type: Literal['linuxdo', 'github']
+	proxy: str | None = field(default=None, repr=False)
+
+
+def load_identities_config() -> dict[str, IdentityConfig]:
+	try:
+		payload = json.loads(os.getenv('CHECKIN_IDENTITIES', '').strip() or '{}')
+	except json.JSONDecodeError:
+		raise ValueError('CHECKIN_IDENTITIES must be valid JSON') from None
+	if not isinstance(payload, dict):
+		raise ValueError('CHECKIN_IDENTITIES must be an object')
+	identities = {}
+	for alias, settings in payload.items():
+		if not isinstance(alias, str) or not alias.strip() or len(alias) > 128:
+			raise ValueError('Identity alias must be a nonempty string of at most 128 characters')
+		if not isinstance(settings, dict) or settings.get('type') not in {'linuxdo', 'github'}:
+			raise ValueError('Identity type must be linuxdo or github')
+		proxy = settings.get('proxy')
+		if proxy is not None and not isinstance(proxy, str):
+			raise ValueError('Identity proxy must be a string')
+		identities[alias] = IdentityConfig(type=settings['type'], proxy=proxy)
+	return identities

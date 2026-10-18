@@ -1,5 +1,7 @@
 .claude
 .env
+.env.*
+!.env.example
 .venv
 __pycache__
 .pytest_cache
@@ -10,6 +12,13 @@ coverage.xml
 htmlcov
 balance_hash.txt
 .browser_profiles
+.auth-state
+.auth-cache
+.manual-login
 checkin_screenshots
+*.log
+*.tmp
+.idea/
+.vscode/
 
 .DS_Store
