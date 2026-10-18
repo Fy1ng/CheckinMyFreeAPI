@@ -1,4 +1,9 @@
 import asyncio
+import json
+import os
+import platform
+import subprocess
+import sys
 import time
 
 import pytest
@@ -141,6 +146,38 @@ def test_browser_children_do_not_inherit_account_or_repository_secrets(monkeypat
 	monkeypatch.setenv('HTTPS_PROXY', 'http://credentials@example.test:8080')
 	environment = child_environment()
 	assert not {'CHECKIN_STATE_KEY', 'GITHUB_TOKEN', 'ANYROUTER_ACCOUNTS', 'HTTPS_PROXY'} & environment.keys()
+
+
+def test_child_environment_preserves_windows_architecture_without_secrets(monkeypatch):
+	monkeypatch.setenv('PROCESSOR_ARCHITECTURE', 'AMD64')
+	monkeypatch.setenv('PROCESSOR_ARCHITEW6432', 'ARM64')
+	monkeypatch.setenv('CHECKIN_WEB_PASSWORD', 'synthetic-private-password')
+	monkeypatch.setenv('CHECKIN_WEB_KEY_FILE', 'synthetic-private-key-path')
+	environment = child_environment()
+	assert environment['PROCESSOR_ARCHITECTURE'] == 'AMD64'
+	assert environment['PROCESSOR_ARCHITEW6432'] == 'ARM64'
+	assert 'CHECKIN_WEB_PASSWORD' not in environment
+	assert 'CHECKIN_WEB_KEY_FILE' not in environment
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows child process platform detection')
+def test_isolated_windows_worker_can_detect_cloakbrowser_platform():
+	result = subprocess.run(
+		[
+			sys.executable,
+			'-c',
+			'import json,platform; from cloakbrowser.config import get_chromium_version; print(json.dumps({"machine":platform.machine(),"chromium":get_chromium_version()}))',
+		],
+		env=child_environment(),
+		capture_output=True,
+		text=True,
+		timeout=15,
+		check=True,
+	)
+	payload = json.loads(result.stdout)
+	assert payload['machine'] == platform.machine()
+	assert payload['machine']
+	assert payload['chromium']
 
 
 @pytest.mark.asyncio

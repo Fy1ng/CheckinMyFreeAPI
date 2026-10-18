@@ -213,6 +213,9 @@ def child_environment() -> dict[str, str]:
 		'LC_ALL',
 		'LD_LIBRARY_PATH',
 		'SYSTEMROOT',
+		# platform.machine() needs these non-secret Windows architecture variables.
+		'PROCESSOR_ARCHITECTURE',
+		'PROCESSOR_ARCHITEW6432',
 		'TEMP',
 		'TMP',
 		'USERPROFILE',
