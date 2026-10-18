@@ -99,7 +99,16 @@
     } else {
       $('save-hint').textContent = '敏感字段已隐藏. 输入新值替换, 使用清除按钮删除.';
     }
-    $('task-hint').textContent = state.dirty ? '请先保存当前修改, 再开始签到.' : state.status?.platform?.manual_supported === false ? '当前平台不支持远程人工接管. 需要时请使用支持 Linux 图形会话的运行环境.' : '保存配置不会执行签到. 定时任务使用最近一次保存的配置.';
+    let taskHint = '保存配置不会执行签到. 定时任务使用最近一次保存的配置.';
+    if (state.status?.platform?.manual_supported === false) taskHint = '当前环境不支持人工登录. 请使用 Windows 本地有界面浏览器, 或 Linux 图形会话.';
+    else if (state.status?.platform?.manual_mode === 'desktop') taskHint = '本机登录会使用已打开的 Chromium 窗口. 请在窗口中完成验证和登录, 程序会连续等待.';
+    if (state.config?.browser?.headless) taskHint = '无头模式只尝试自动登录. 需要人工验证或登录时会停止该账号, 请关闭无头模式后再运行.';
+    const manualRun = state.status?.run;
+    if (state.status?.running && manualRun?.manual_transport === 'desktop') {
+      const seconds = manualRun.manual_remaining_seconds;
+      taskHint = `请在本机已打开的 Chromium 窗口完成验证, 登录和授权. ${Number.isFinite(seconds) ? `剩余约 ${seconds} 秒. ` : ''}验证后继续在同一窗口登录, 无需重新运行.`;
+    }
+    $('task-hint').textContent = state.dirty ? '请先保存当前修改, 再开始签到.' : taskHint;
   }
 
   function setBusy(value) {
@@ -205,12 +214,16 @@
     return el('span', `badge ${kind}`, runLabel(runState));
   }
 
+  function explainError(code) {
+    return ({ MANUAL_LOGIN_UNAVAILABLE: '当前环境无法进行人工登录', MANUAL_LOGIN_TIMED_OUT: '等待人工登录超时', MANUAL_LOGIN_REQUIRES_HEADED_BROWSER: '需要人工登录, 请关闭无头模式后再运行', OAUTH_BROWSER_CLOSED: '浏览器窗口已关闭, 登录未完成', IDENTITY_MANUAL_LOGIN_FAILED: '同一身份的前一个人工登录未完成' })[code] || code;
+  }
+
   function renderStatus(data) {
     const run = data.run;
     const currentBadge = badge(run?.state);
     currentBadge.id = 'task-badge';
     $('task-badge').replaceWith(currentBadge);
-    $('task-description').textContent = run ? `任务 #${run.id}, ${formatTime(run.started_at)} 开始.${run.error ? ` ${run.error}` : ''}` : '还没有运行中的任务. 配置完成后即可开始.';
+    $('task-description').textContent = run ? `任务 #${run.id}, ${formatTime(run.started_at)} 开始.${run.error ? ` ${run.error}` : ''}${data.running && run.manual_transport === 'desktop' ? ' 正在等待本机浏览器中的人工登录.' : ''}` : '还没有运行中的任务. 配置完成后即可开始.';
     $('next-run').textContent = data.next_run_at ? `下次计划: ${formatTime(data.next_run_at)}` : '定时任务未启用, 或尚未安排下一次运行.';
     const link = $('manual-link');
     link.hidden = true;
@@ -281,7 +294,7 @@
             const details = el('details', 'run-details');
             details.append(el('summary', '', '查看账号结果'));
             run.summary.accounts.forEach((account) => {
-              if (account && typeof account === 'object') details.append(el('p', 'run-meta', `${account.name || account.id || '账号'}: ${account.success ? '成功' : '未完成'}${account.error ? `, ${account.error}` : ''}`));
+              if (account && typeof account === 'object') details.append(el('p', 'run-meta', `${account.name || account.id || '账号'}: ${account.success ? '成功' : '未完成'}${account.error ? `, ${explainError(account.error)}` : ''}`));
             });
             main.append(details);
           }
@@ -667,7 +680,7 @@
     const browsing = el('section', 'runtime-group'); browsing.append(el('h3', '', '浏览器与人工登录'));
     const browserGrid = el('div', 'form-grid');
     browserGrid.append(
-      checkField('使用无头浏览器', browser.headless, (value) => { browser.headless = value; }, '关闭后需要可用的图形会话.'),
+      checkField('使用无头浏览器', browser.headless, (value) => { browser.headless = value; }, '人工登录需要关闭此项. Windows 操作本机窗口, Linux 通过 WebUI 接管有界面浏览器.'),
       checkField('启用自然交互', browser.humanize, (value) => { browser.humanize = value; }),
       field('页面等待上限, 毫秒', browser.wait_timeout_ms, (value) => { browser.wait_timeout_ms = value; }, { type: 'number', min: 1000, max: 120000, required: true }),
       field('单次人工登录上限, 秒', browser.manual_timeout_seconds, (value) => { browser.manual_timeout_seconds = value; }, { type: 'number', min: 30, max: 1800, required: true }),

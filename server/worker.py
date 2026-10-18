@@ -64,13 +64,13 @@ async def execute(payload: dict) -> int:
 	class LocalTakeover(ManualTakeover):
 		async def __aenter__(self):
 			await super().__aenter__()
-			publish(
-				manual={
-					'url': self.url,
-					'session': payload['manual_session'],
-					'deadline': asyncio.get_running_loop().time() + self.timeout,
-				}
-			)
+			manual = {
+				'transport': self.transport,
+				'deadline': asyncio.get_running_loop().time() + self.timeout,
+			}
+			if self.transport == 'remote':
+				manual.update(url=self.url, session=payload['manual_session'])
+			publish(manual=manual)
 			return self
 
 		async def __aexit__(self, *args):
@@ -86,16 +86,16 @@ async def execute(payload: dict) -> int:
 		remove_owned_tree(directory, root)
 
 	async def notify_ready(url: str, account_name: str, timeout: int):
+		instructions = '请在本机已打开的 Chromium 中完成登录' if not url else '请通过已登录的 WebUI 打开当前任务'
 		await asyncio.to_thread(
 			notify.push_message,
 			'签到需要人工登录',
-			f'{account_name} 需要人工登录. 请通过已登录的 WebUI 打开当前任务, 剩余约 {timeout} 秒.',
+			f'{account_name} 需要人工登录. {instructions}, 剩余约 {timeout} 秒.',
 			msg_type='text',
 		)
 
 	runtime = AuthenticationRuntime.from_environment(accounts, build_app_config(config), notify_ready=notify_ready)
 	results: list[dict | None] = [None] * len(accounts)
-	deferred = []
 	from utils.oauth import AuthError, ManualLoginRequired
 
 	async def run(index, allow_manual):
@@ -109,15 +109,12 @@ async def execute(payload: dict) -> int:
 				'balance': after.get('quota') if after else None,
 			}
 		except ManualLoginRequired:
-			if not allow_manual:
-				deferred.append(index)
-			else:
-				results[index] = {
-					'id': account.id,
-					'name': account.name,
-					'success': False,
-					'error': 'MANUAL_LOGIN_REQUIRED',
-				}
+			results[index] = {
+				'id': account.id,
+				'name': account.name,
+				'success': False,
+				'error': 'MANUAL_LOGIN_REQUIRED' if allow_manual else 'MANUAL_LOGIN_REQUIRES_HEADED_BROWSER',
+			}
 		except Exception as error:
 			results[index] = {
 				'id': account.id,
@@ -129,9 +126,7 @@ async def execute(payload: dict) -> int:
 	publish()
 	try:
 		for index in range(len(accounts)):
-			await run(index, False)
-		for index in deferred:
-			await run(index, True)
+			await run(index, not config['browser']['headless'])
 	finally:
 		runtime.close()
 	summary = {

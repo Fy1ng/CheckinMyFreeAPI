@@ -11,7 +11,14 @@ import pytest_asyncio
 from aiohttp import CookieJar, WSServerHandshakeError
 from aiohttp.test_utils import TestClient, TestServer
 
-from utils.manual_login import ManualGateway, ManualLoginError, ManualTakeover, child_environment
+from utils.manual_login import (
+	DesktopGateway,
+	ManualGateway,
+	ManualLoginError,
+	ManualTakeover,
+	child_environment,
+	desktop_manual_available,
+)
 
 REMOTE_PASSWORD = 'synthetic-remote-password-for-tests'
 
@@ -186,3 +193,90 @@ async def test_disabled_takeover_does_not_start_processes(monkeypatch):
 	with pytest.raises(ManualLoginError, match='disabled'):
 		async with ManualTakeover(60):
 			pytest.fail('Disabled takeover must not start')
+
+
+def test_desktop_manual_availability_is_windows_only():
+	assert desktop_manual_available() is (sys.platform == 'win32')
+
+
+@pytest.mark.asyncio
+async def test_local_desktop_takeover_waits_without_processes_or_ports(monkeypatch):
+	monkeypatch.setenv('CHECKIN_MANUAL_LOGIN', 'true')
+	monkeypatch.setenv('CHECKIN_MANUAL_TRANSPORT', 'local')
+	monkeypatch.setenv('CHECKIN_MANUAL_HEADLESS', 'false')
+	monkeypatch.delenv('DISPLAY', raising=False)
+	monkeypatch.delenv('CHECKIN_REMOTE_PASSWORD', raising=False)
+	monkeypatch.delenv('CHECKIN_MANUAL_SESSION', raising=False)
+	monkeypatch.setattr('utils.manual_login.desktop_manual_available', lambda: True)
+
+	def unexpected_resource(*args, **kwargs):
+		pytest.fail('Local desktop waiting must not start network or subprocess resources')
+
+	monkeypatch.setattr('utils.manual_login.asyncio.create_subprocess_exec', unexpected_resource)
+	monkeypatch.setattr('utils.manual_login.unused_local_port', unexpected_resource)
+	monkeypatch.setattr('utils.manual_login.shutil.which', unexpected_resource)
+	monkeypatch.setattr('utils.manual_login.web.AppRunner', unexpected_resource)
+	takeover = ManualTakeover(60)
+	assert takeover.transport == 'remote'
+	started = time.monotonic()
+	async with takeover as active:
+		assert active is takeover
+		assert active.transport == 'desktop'
+		assert active.url == ''
+		assert isinstance(active.gateway, DesktopGateway)
+		assert started + 60 <= active.gateway.deadline <= time.monotonic() + 60
+		assert not active.gateway.resume.is_set()
+		active.gateway.resume.set()
+		assert active.gateway.resume.is_set()
+		assert active._processes == []
+		assert active._runner is None
+	assert takeover.gateway is not None
+	assert takeover.gateway.deadline == 0
+	assert not takeover.gateway.resume.is_set()
+	await takeover.close()
+	assert takeover.gateway.deadline == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('disabled', ['false', ''])
+async def test_local_desktop_takeover_still_requires_manual_login_enabled(monkeypatch, disabled):
+	monkeypatch.setenv('CHECKIN_MANUAL_LOGIN', disabled)
+	monkeypatch.setenv('CHECKIN_MANUAL_TRANSPORT', 'local')
+	monkeypatch.setenv('CHECKIN_MANUAL_HEADLESS', 'false')
+	monkeypatch.setattr('utils.manual_login.desktop_manual_available', lambda: True)
+	takeover = ManualTakeover(60)
+	with pytest.raises(ManualLoginError, match='disabled'):
+		await takeover.__aenter__()
+	assert takeover.gateway is None
+
+
+@pytest.mark.asyncio
+async def test_local_desktop_takeover_rejects_headless_browser(monkeypatch):
+	monkeypatch.setenv('CHECKIN_MANUAL_LOGIN', 'true')
+	monkeypatch.setenv('CHECKIN_MANUAL_TRANSPORT', 'local')
+	monkeypatch.setenv('CHECKIN_MANUAL_HEADLESS', 'true')
+	monkeypatch.setattr('utils.manual_login.desktop_manual_available', lambda: True)
+	takeover = ManualTakeover(60)
+	with pytest.raises(ManualLoginError, match='headless mode to be disabled'):
+		await takeover.__aenter__()
+	assert takeover.gateway is None
+
+
+@pytest.mark.asyncio
+async def test_desktop_takeover_is_not_used_for_other_transports(monkeypatch):
+	monkeypatch.setenv('CHECKIN_MANUAL_LOGIN', 'true')
+	monkeypatch.setenv('CHECKIN_MANUAL_TRANSPORT', 'remote')
+	monkeypatch.setenv('CHECKIN_MANUAL_HEADLESS', 'false')
+	monkeypatch.delenv('DISPLAY', raising=False)
+	monkeypatch.setattr('utils.manual_login.desktop_manual_available', lambda: True)
+	takeover = ManualTakeover(60)
+	with pytest.raises(ManualLoginError, match='Linux/Xvfb'):
+		await takeover.__aenter__()
+	assert takeover.gateway is None
+	assert takeover.transport == 'remote'
+
+
+@pytest.mark.parametrize('timeout', [29, 1801])
+def test_desktop_takeover_preserves_timeout_bounds(timeout):
+	with pytest.raises(ManualLoginError, match='between 30 and 1800'):
+		ManualTakeover(timeout)

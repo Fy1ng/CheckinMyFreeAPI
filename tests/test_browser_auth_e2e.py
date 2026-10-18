@@ -14,7 +14,7 @@ from playwright.async_api import async_playwright
 
 from utils.auth_runtime import AuthenticationRuntime
 from utils.config import AccountConfig, AppConfig, IdentityConfig, ProviderConfig
-from utils.oauth import ManualLoginRequired, OAuthAttempt, OAuthFlow
+from utils.oauth import OAuthAttempt, OAuthFlow
 from utils.secure_state import SnapshotStore
 
 pytestmark = pytest.mark.skipif(
@@ -124,7 +124,7 @@ async def test_native_oauth_cookie_state_manual_recovery_and_second_run(monkeypa
 				await route.fulfill(status=404, body='Fixture route not found')
 			return
 		if parsed.netloc == 'identity.fixture.test':
-			if parsed.path not in {authorize_path, '/fixture-login', '/oauth2/approve'}:
+			if parsed.path not in {authorize_path, '/fixture-verification', '/fixture-login', '/oauth2/approve'}:
 				await route.fulfill(status=404, body='Fixture route not found')
 				return
 			if kind == 'github' and parsed.path == authorize_path and request.method == 'POST':
@@ -140,9 +140,19 @@ async def test_native_oauth_cookie_state_manual_recovery_and_second_run(monkeypa
 						body = f'<html><link rel="icon" href="data:,"><h1>Synthetic authorization</h1><a href="/oauth2/approve?{parameters}">Approve fixture</a></html>'
 					else:
 						body = f'<html><link rel="icon" href="data:,"><h1>Synthetic authorization</h1><form action="/login/oauth/authorize" method="post"><input type="hidden" name="client_id" value="{provider}"><input type="hidden" name="state" value="{state}"><button name="authorize" value="1">Approve fixture</button></form></html>'
+				elif 'fixture_clearance=complete' not in cookies:
+					body = f'<html><link rel="icon" href="data:,"><h1>Synthetic verification</h1><form action="/fixture-verification?{parameters}" method="post"><button>Continue fixture verification</button></form></html>'
 				else:
 					body = f'<html><link rel="icon" href="data:,"><h1>Synthetic identity login</h1><form action="/fixture-login?{parameters}" method="post"><input name="username"><input name="password" type="password"><button type="submit">Sign in fixture</button></form></html>'
 				await route.fulfill(status=200, content_type='text/html', body=body)
+			elif parsed.path == '/fixture-verification':
+				assert request.method == 'POST'
+				await redirect(
+					authorize_path + '?' + parameters,
+					headers={
+						'Set-Cookie': 'fixture_clearance=complete; Path=/; HttpOnly; Secure; Max-Age=3600; SameSite=Lax'
+					},
+				)
 			elif parsed.path == '/fixture-login':
 				assert request.method == 'POST'
 				await redirect(
@@ -179,7 +189,8 @@ async def test_native_oauth_cookie_state_manual_recovery_and_second_run(monkeypa
 
 		class SyntheticTakeover:
 			def __init__(self, timeout):
-				self.url = 'https://manual.fixture.test'
+				self.transport = 'desktop'
+				self.url = ''
 				self.gateway = SimpleNamespace(resume=asyncio.Event())
 
 			async def __aenter__(self):
@@ -188,6 +199,10 @@ async def test_native_oauth_cookie_state_manual_recovery_and_second_run(monkeypa
 
 				async def user_interaction():
 					page = contexts[-1].pages[-1]
+					context = contexts[-1]
+					assert not page.is_closed()
+					await page.get_by_role('button', name='Continue fixture verification').click()
+					assert contexts[-1] is context and page in context.pages and not page.is_closed()
 					await page.locator('input[name="username"]').fill('synthetic-user')
 					await page.locator('input[name="password"]').fill('synthetic-password')
 					await page.get_by_role('button', name='Sign in fixture').click()
@@ -232,13 +247,12 @@ async def test_native_oauth_cookie_state_manual_recovery_and_second_run(monkeypa
 		first = AuthenticationRuntime(accounts, config, first_store)
 		try:
 			for index, account in enumerate(accounts):
-				with pytest.raises(ManualLoginRequired):
-					await first.execute(account, index, allow_manual=False)
-			for index, account in enumerate(accounts):
 				assert (await first.execute(account, index, allow_manual=True))[0]
 		finally:
 			first.close()
 		assert manual_count == 1
+		assert len(contexts) == len(accounts)
+		assert len(state_requests) == len(accounts)
 		assert exchanges == ['anyrouter', 'agentrouter']
 		assert not blocked_requests
 		second_store = SnapshotStore(

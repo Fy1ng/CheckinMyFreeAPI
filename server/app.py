@@ -175,7 +175,12 @@ class WebService:
 
 	async def manual(self, request):
 		manual = self.jobs.manual
-		if self.jobs.stopping or not manual or str(self.jobs.active_id) != request.match_info['run_id']:
+		if (
+			self.jobs.stopping
+			or not manual
+			or manual.get('transport') == 'desktop'
+			or str(self.jobs.active_id) != request.match_info['run_id']
+		):
 			return web.Response(status=410, text='人工登录窗口已关闭')
 		origin = manual.get('url', '')
 		parsed = urlsplit(origin)

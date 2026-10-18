@@ -207,6 +207,35 @@ async def test_stop_revokes_manual_access_and_finalizes_cancelled(configured_sto
 
 
 @pytest.mark.asyncio
+async def test_desktop_wait_exposes_remaining_time_without_remote_url(configured_store, tmp_path, fake_worker):
+	store, key = configured_store
+	manager = JobManager(store, tmp_path, key)
+	process, launched, _ = fake_worker
+	try:
+		run = await manager.start(1)
+		await launched.wait()
+		event_file = tmp_path / f'run-{run["id"]}.json'
+		event_file.write_text(
+			json.dumps({'state': 'running', 'manual': {'transport': 'desktop', 'deadline': time.monotonic() + 60}}),
+			encoding='utf-8',
+		)
+		manager._read_progress(event_file, run['id'])
+		status = manager.status()
+		assert status['run']['state'] == 'awaiting_login'
+		assert status['run']['manual_url'] is None
+		assert status['run']['manual_transport'] == 'desktop'
+		assert 0 < status['run']['manual_remaining_seconds'] <= 60
+		assert manager.manual is not None
+		manager.manual['deadline'] = time.monotonic() - 1
+		assert manager.status()['run']['manual_transport'] is None
+		process.finish(1)
+		assert manager.task is not None
+		await manager.task
+	finally:
+		await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_service_close_interrupts_running_worker_and_clears_manual(configured_store, tmp_path, fake_worker):
 	store, key = configured_store
 	manager = JobManager(store, tmp_path, key)

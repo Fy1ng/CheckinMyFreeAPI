@@ -156,9 +156,12 @@ class AuthenticationRuntime:
 		async with lock:
 			try:
 				return await self._execute(account, index, plan, allow_manual=allow_manual)
-			except (ManualLoginError, TimeoutError):
+			except ManualLoginError:
 				self._manual_failures.add(plan.profile_key)
-				raise AuthError('MANUAL_LOGIN_UNAVAILABLE_OR_TIMED_OUT') from None
+				raise AuthError('MANUAL_LOGIN_UNAVAILABLE') from None
+			except TimeoutError:
+				self._manual_failures.add(plan.profile_key)
+				raise AuthError('MANUAL_LOGIN_TIMED_OUT') from None
 
 	async def _execute(self, account: AccountConfig, index: int, plan: AccountPlan, *, allow_manual: bool):
 		provider = self.config.providers[account.provider]
@@ -385,8 +388,11 @@ class AuthenticationRuntime:
 		started = time.monotonic()
 		try:
 			async with ManualTakeover(remaining) as takeover:
-				print(f'[MANUAL] Protected temporary browser: {takeover.url}')
-				print(f'[MANUAL] Use the preconfigured remote access password; timeout {remaining}s')
+				if getattr(takeover, 'transport', 'remote') == 'desktop':
+					print(f'[MANUAL] Complete login in the existing local Chromium window; timeout {remaining}s')
+				else:
+					print(f'[MANUAL] Protected temporary browser: {takeover.url}')
+					print(f'[MANUAL] Use the preconfigured remote access password; timeout {remaining}s')
 				if self.notify_ready is not None:
 					try:
 						await asyncio.wait_for(

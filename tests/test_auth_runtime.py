@@ -119,7 +119,11 @@ async def test_shared_identity_and_fresh_run_restore_without_manual_login(monkey
 
 
 @pytest.mark.asyncio
-async def test_timeout_is_not_repeated_for_shared_identity(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+	'failure,reason',
+	[(ManualLoginError('unavailable'), 'MANUAL_LOGIN_UNAVAILABLE'), (TimeoutError(), 'MANUAL_LOGIN_TIMED_OUT')],
+)
+async def test_timeout_is_not_repeated_for_shared_identity(monkeypatch, tmp_path, failure, reason):
 	accounts, config = accounts_and_config()
 	store = SnapshotStore(
 		tmp_path / 'state',
@@ -129,9 +133,9 @@ async def test_timeout_is_not_repeated_for_shared_identity(monkeypatch, tmp_path
 		compatibility='test',
 	)
 	runtime = AuthenticationRuntime(accounts, config, store)
-	execute = AsyncMock(side_effect=ManualLoginError('timeout'))
+	execute = AsyncMock(side_effect=failure)
 	monkeypatch.setattr(runtime, '_execute', execute)
-	with pytest.raises(AuthError, match='MANUAL_LOGIN_UNAVAILABLE_OR_TIMED_OUT'):
+	with pytest.raises(AuthError, match=reason):
 		await runtime.execute(accounts[0], 0, allow_manual=True)
 	with pytest.raises(AuthError, match='IDENTITY_MANUAL_LOGIN_FAILED'):
 		await runtime.execute(accounts[1], 1, allow_manual=True)

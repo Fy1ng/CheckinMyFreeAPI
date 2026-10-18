@@ -129,11 +129,22 @@ async def test_worker_converts_config_and_derives_separate_login_key(isolated_wo
 	assert 'synthetic-account-password' not in json.dumps(progress)
 	assert 'synthetic-notification-password' not in json.dumps(progress)
 	assert fixture.key.hex() not in json.dumps(progress)
+	assert runtime.execute.await_count == len(accounts)
+	assert all(call.kwargs == {'allow_manual': True} for call in runtime.execute.await_args_list)
 	fixture.notify.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_all_automatic_accounts_run_before_manual_queue(isolated_worker, monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+	('failure', 'expected_error'),
+	[
+		(AuthError('SYNTHETIC_MANUAL_FAILURE'), 'SYNTHETIC_MANUAL_FAILURE'),
+		(ManualLoginRequired(), 'MANUAL_LOGIN_REQUIRED'),
+	],
+)
+async def test_headed_accounts_keep_one_continuous_attempt_and_failure_does_not_block_others(
+	isolated_worker, monkeypatch, tmp_path, failure, expected_error
+):
 	fixture = isolated_worker
 	fixture.payload['config']['accounts'].append(
 		{'id': 'third', 'email': 'third@example.test', 'password': 'synthetic'}
@@ -142,26 +153,50 @@ async def test_all_automatic_accounts_run_before_manual_queue(isolated_worker, m
 
 	async def execute(account, index, *, allow_manual):
 		order.append((index, allow_manual))
-		if index != 1 and not allow_manual:
-			raise ManualLoginRequired()
 		if index == 0:
-			raise AuthError('SYNTHETIC_MANUAL_FAILURE')
+			raise failure
 		return True, None, {'quota': index}
 
 	runtime = SimpleNamespace(execute=execute, close=Mock())
 	install_runtime(monkeypatch, runtime)
 	assert await worker_module.execute(fixture.payload) == 1
-	assert order == [(0, False), (1, False), (2, False), (0, True), (2, True)]
+	assert order == [(0, True), (1, True), (2, True)]
 	progress = json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))
 	assert progress['summary']['success_count'] == 2
 	assert [result['success'] for result in progress['summary']['accounts']] == [False, True, True]
-	assert progress['summary']['accounts'][0]['error'] == 'SYNTHETIC_MANUAL_FAILURE'
+	assert progress['summary']['accounts'][0]['error'] == expected_error
 	assert progress['manual'] is None
 	runtime.close.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_manual_entry_is_published_only_during_takeover(isolated_worker, monkeypatch, tmp_path):
+async def test_headless_attempt_reports_manual_requirement_without_reopening_browser(
+	isolated_worker, monkeypatch, tmp_path
+):
+	fixture = isolated_worker
+	fixture.payload['config']['browser']['headless'] = True
+	order = []
+
+	async def execute(account, index, *, allow_manual):
+		order.append((index, allow_manual))
+		if index == 0:
+			raise ManualLoginRequired()
+		return True, None, {'quota': 7}
+
+	runtime = SimpleNamespace(execute=execute, close=Mock())
+	install_runtime(monkeypatch, runtime)
+	assert await worker_module.execute(fixture.payload) == 1
+	assert order == [(0, False), (1, False)]
+	progress = json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))
+	assert progress['summary']['accounts'][0]['error'] == 'MANUAL_LOGIN_REQUIRES_HEADED_BROWSER'
+	assert progress['summary']['accounts'][1]['success'] is True
+	assert progress['manual'] is None
+	runtime.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('transport', ['remote', 'desktop'])
+async def test_manual_entry_is_published_only_during_takeover(isolated_worker, monkeypatch, tmp_path, transport):
 	fixture = isolated_worker
 	inside = []
 	exited = []
@@ -169,7 +204,8 @@ async def test_manual_entry_is_published_only_during_takeover(isolated_worker, m
 	class FakeTakeover:
 		def __init__(self, timeout):
 			self.timeout = timeout
-			self.url = 'http://127.0.0.1:1234'
+			self.transport = transport
+			self.url = 'http://127.0.0.1:1234' if transport == 'remote' else ''
 
 		async def __aenter__(self):
 			return self
@@ -178,22 +214,66 @@ async def test_manual_entry_is_published_only_during_takeover(isolated_worker, m
 			exited.append(True)
 
 	monkeypatch.setattr(worker_module, 'ManualTakeover', FakeTakeover)
+	captured: dict = {}
+	order = []
 
 	async def execute(account, index, *, allow_manual):
-		if not allow_manual:
-			raise ManualLoginRequired()
-		async with auth_module.ManualTakeover(30):
+		order.append((index, allow_manual))
+		assert allow_manual
+		async with auth_module.ManualTakeover(30) as takeover:
 			progress = json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))
 			inside.append(progress['manual'])
+			await captured['notify_ready'](takeover.url, account.name, takeover.timeout)
 		assert json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))['manual'] is None
 		return True, None, None
 
-	install_runtime(monkeypatch, SimpleNamespace(execute=execute, close=Mock()))
+	install_runtime(monkeypatch, SimpleNamespace(execute=execute, close=Mock()), captured)
 	assert await worker_module.execute(fixture.payload) == 0
+	assert order == [(0, True), (1, True)]
 	assert len(inside) == len(exited) == 2
-	assert all(manual['session'] == fixture.payload['manual_session'] for manual in inside)
-	assert all(manual['url'] == 'http://127.0.0.1:1234' and manual['deadline'] > 0 for manual in inside)
+	assert all(manual['transport'] == transport and manual['deadline'] > 0 for manual in inside)
+	if transport == 'desktop':
+		assert all(set(manual) == {'transport', 'deadline'} for manual in inside)
+		assert fixture.payload['manual_session'] not in json.dumps(inside)
+	else:
+		assert all(manual['session'] == fixture.payload['manual_session'] for manual in inside)
+		assert all(manual['url'] == 'http://127.0.0.1:1234' for manual in inside)
+	manual_messages = [call.args[1] for call in fixture.notify.call_args_list if call.args[0] == '签到需要人工登录']
+	assert len(manual_messages) == 2
+	assert all(('本机已打开的 Chromium' if transport == 'desktop' else 'WebUI') in msg for msg in manual_messages)
+	assert all(fixture.payload['manual_session'] not in msg and 'http://' not in msg for msg in manual_messages)
 	assert json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))['manual'] is None
+
+
+@pytest.mark.asyncio
+async def test_desktop_takeover_clears_event_on_cancellation_and_closes_runtime(isolated_worker, monkeypatch, tmp_path):
+	class FakeTakeover:
+		def __init__(self, timeout):
+			self.timeout = timeout
+			self.transport = 'desktop'
+			self.url = ''
+
+		async def __aenter__(self):
+			return self
+
+		async def __aexit__(self, *args):
+			return None
+
+	monkeypatch.setattr(worker_module, 'ManualTakeover', FakeTakeover)
+	monkeypatch.setattr(asyncio.get_running_loop(), 'add_signal_handler', Mock())
+
+	async def execute(account, index, *, allow_manual):
+		async with auth_module.ManualTakeover(30):
+			progress = json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))
+			assert progress['manual']['transport'] == 'desktop'
+			raise asyncio.CancelledError
+
+	runtime = SimpleNamespace(execute=execute, close=Mock())
+	install_runtime(monkeypatch, runtime)
+	assert await worker_module.main(isolated_worker.payload) == 130
+	assert json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))['manual'] is None
+	runtime.close.assert_called_once()
+	isolated_worker.notify.assert_not_called()
 
 
 @pytest.mark.asyncio

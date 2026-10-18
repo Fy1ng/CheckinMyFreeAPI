@@ -28,6 +28,9 @@ async def test_webui_save_conflict_secret_retention_and_job_controls(monkeypatch
 		)
 		service.jobs.db.commit()
 		service.jobs.active_id = cursor.lastrowid
+		service.jobs.manual = {'transport': 'desktop', 'deadline': time.monotonic() + 600}
+		service.jobs.db.execute("UPDATE runs SET state='awaiting_login' WHERE id=?", (service.jobs.active_id,))
+		service.jobs.db.commit()
 		return service.jobs.history()[0]
 
 	async def stop():
@@ -36,6 +39,7 @@ async def test_webui_save_conflict_secret_retention_and_job_controls(monkeypatch
 		)
 		service.jobs.db.commit()
 		service.jobs.active_id = None
+		service.jobs.manual = None
 		return True
 
 	monkeypatch.setattr(service.jobs, 'start', start)
@@ -92,6 +96,9 @@ async def test_webui_save_conflict_secret_retention_and_job_controls(monkeypatch
 			await page.get_by_role('button', name='开始签到', exact=True).click()
 			await expect(page.locator('#stop-button')).to_be_enabled()
 			assert starts == [3]
+			await expect(page.locator('#task-hint')).to_contain_text('本机已打开的 Chromium')
+			await expect(page.locator('#task-hint')).to_contain_text('剩余约')
+			await expect(page.locator('#manual-link')).to_be_hidden()
 			await expect(page.locator('#start-button')).to_be_disabled()
 			page.once('dialog', lambda dialog: dialog.accept())
 			await page.get_by_role('button', name='停止任务', exact=True).click()

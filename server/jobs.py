@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import os
 import secrets
 import signal
@@ -117,18 +118,32 @@ class JobManager:
 	def status(self) -> dict:
 		runs = self.history()
 		run = runs[0] if runs else None
+		manual = self.manual if self.active_id is not None and not self.stopping else None
+		remaining = None
+		if manual and isinstance(manual.get('deadline'), (int, float)):
+			remaining = max(0, math.ceil(manual['deadline'] - time.monotonic()))
+			if remaining == 0:
+				manual = None
+		transport = manual.get('transport', 'remote') if manual else None
 		if run is not None:
 			run = dict(
 				run,
 				manual_url=f'/manual/{run["id"]}/'
-				if self.manual and self.active_id == run['id'] and not self.stopping
+				if manual and transport == 'remote' and self.active_id == run['id']
 				else None,
+				manual_transport=transport,
+				manual_remaining_seconds=remaining,
 			)
 		return {
 			'running': self.active_id is not None,
 			'run': run,
 			'next_run_at': iso_time(self.db.execute('SELECT next_at FROM scheduler WHERE id=1').fetchone()[0]),
-			'platform': {'manual_supported': sys.platform == 'linux' and bool(os.getenv('DISPLAY'))},
+			'platform': {
+				'manual_supported': sys.platform == 'win32' or (sys.platform == 'linux' and bool(os.getenv('DISPLAY'))),
+				'manual_mode': 'desktop'
+				if sys.platform == 'win32'
+				else ('remote' if sys.platform == 'linux' and os.getenv('DISPLAY') else None),
+			},
 		}
 
 	def schedule_changed(self) -> None:

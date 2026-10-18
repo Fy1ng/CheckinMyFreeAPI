@@ -79,6 +79,11 @@ async def test_manual_proxy_requires_current_run_and_keeps_gateway_token_private
 	service, client = web_client
 	await login(client)
 	assert (await client.get('/manual/1/')).status == 410
+	service.jobs.active_id = 1
+	service.jobs.manual = {'transport': 'desktop'}
+	assert (await client.get('/manual/1/')).status == 410
+	service.jobs.active_id = None
+	service.jobs.manual = None
 
 	async def viewer(request):
 		assert request.headers['Cookie'] == 'checkin_session=synthetic-gateway-session'

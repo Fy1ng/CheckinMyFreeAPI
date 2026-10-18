@@ -1,4 +1,4 @@
-"""Short-lived, authenticated noVNC gateway; no authentication material enters URLs."""
+"""Bounded local browser waiting or authenticated noVNC access for manual login."""
 
 from __future__ import annotations
 
@@ -52,6 +52,17 @@ document.getElementById('logout').onclick = async () => {
 
 class ManualLoginError(RuntimeError):
 	pass
+
+
+class DesktopGateway:
+	"""Waiting state for an existing local browser, without a network gateway."""
+
+	def __init__(self, timeout: int):
+		self.deadline = time.monotonic() + timeout
+		self.resume = asyncio.Event()
+
+	async def revoke(self) -> None:
+		self.resume.clear()
 
 
 class ManualGateway:
@@ -230,12 +241,17 @@ def unused_local_port() -> int:
 		return int(probe.getsockname()[1])
 
 
+def desktop_manual_available() -> bool:
+	return sys.platform == 'win32'
+
+
 class ManualTakeover:
 	def __init__(self, timeout: int):
 		if not 30 <= timeout <= 1800:
 			raise ManualLoginError('Manual login timeout must be between 30 and 1800 seconds')
 		self.timeout = timeout
-		self.gateway: ManualGateway | None = None
+		self.gateway: ManualGateway | DesktopGateway | None = None
+		self.transport = 'remote'
 		self.url = ''
 		self._processes: list[asyncio.subprocess.Process] = []
 		self._runner: web.AppRunner | None = None
@@ -244,12 +260,17 @@ class ManualTakeover:
 	async def __aenter__(self) -> 'ManualTakeover':
 		if os.getenv('CHECKIN_MANUAL_LOGIN', '').lower() not in {'true', '1', 'yes'}:
 			raise ManualLoginError('Manual browser login is disabled')
-		if sys.platform != 'linux' or not os.getenv('DISPLAY'):
-			raise ManualLoginError('Manual login requires the headed Linux/Xvfb workflow')
 		if os.getenv('CHECKIN_MANUAL_HEADLESS') == 'true':
 			raise ManualLoginError('Manual login requires headless mode to be disabled')
-		x11vnc = shutil.which('x11vnc')
 		local = os.getenv('CHECKIN_MANUAL_TRANSPORT') == 'local'
+		if local and desktop_manual_available():
+			self.gateway = DesktopGateway(self.timeout)
+			self.transport = 'desktop'
+			self.url = ''
+			return self
+		if sys.platform != 'linux' or not os.getenv('DISPLAY'):
+			raise ManualLoginError('Manual login requires the headed Linux/Xvfb workflow')
+		x11vnc = shutil.which('x11vnc')
 		cloudflared = shutil.which('cloudflared')
 		assets = Path(os.getenv('NOVNC_WEB_ROOT', '/usr/share/novnc'))
 		if not x11vnc or (not local and not cloudflared) or not (assets / 'core' / 'rfb.js').is_file():
