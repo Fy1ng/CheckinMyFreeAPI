@@ -24,9 +24,9 @@ uv run --frozen python -m server
 4. 保存配置不会签到或发送通知. 确认配置后点击开始签到, 验证真实站点结果后再启用定时任务.
 5. 账号可禁用, 禁用后保留配置且不发站点请求. 定时任务默认关闭, 默认间隔 360 分钟, 不补跑停机期间任务.
 
-Any Cookie 模式提供 `复制提取脚本` 按钮. 先在自己的浏览器登录 https://anyrouter.top, 再按 F12 打开 Console, 粘贴并执行复制的脚本, 将剪贴板中的结果粘贴到 WebUI 的 Cookie 输入框. 可先展开 `查看提取脚本 / 手动复制` 审阅脚本; WebUI 无法写入剪贴板时会自动展开并选中脚本, 供手动复制. 复制脚本不会保存配置或执行签到.
+Any Cookie 模式需要非空的 `session` 登录 Cookie. 推荐先在自己的浏览器登录 https://anyrouter.top, 按 F12 -> Application -> Cookies -> https://anyrouter.top, 找到 `session` 并复制其 Value, 在 WebUI 填写 `session=复制的值`. 也可在 Network 中选择已登录的站点请求, 从 Request Headers 手动复制包含 `session` 的完整 Cookie 值. `acw_sc__v2` 只是访问验证 Cookie, 不能替代登录 Cookie; WebUI 会拦截缺少非空 `session` 的新输入.
 
-脚本仅允许在 https://anyrouter.top 执行, 读取当前页面的 `document.cookie` 并复制, 不发起网络请求、不在 Console 打印 Cookie 原文. 页面脚本无法读取 HttpOnly Cookie, 因此结果可能不完整; 若读取为空或仍无法登录, 请在浏览器 Network 中选择已登录的站点请求, 从 Request Headers 手动复制完整 Cookie 值. 脚本不会清空剪贴板中的原有内容来替代空结果.
+页面也提供 `复制提取脚本` 按钮. 可先展开 `查看提取脚本 / 手动复制` 审阅脚本, 再在 AnyRouter 页面的 Console 粘贴执行; WebUI 无法写入剪贴板时会自动展开并选中脚本, 供手动复制. 脚本仅允许在 https://anyrouter.top 执行, 读取当前页面的 `document.cookie`, 不发起网络请求、不在 Console 打印 Cookie 原文. 页面脚本无法读取 HttpOnly Cookie, 因此不能保证提取到登录凭据; 未读到非空 `session` 时不修改剪贴板, 并提示上述手动获取方法. 只有 Console 提示 Cookie 已复制后才将结果粘贴回 WebUI. 复制脚本不会保存配置或执行签到.
 
 ## 运行结果与人工处理
 

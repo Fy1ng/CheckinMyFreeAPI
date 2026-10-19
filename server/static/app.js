@@ -13,10 +13,14 @@
     console.warn('未读取到 Cookie. HttpOnly Cookie 无法由脚本读取, 请从 Network 的请求头中手动复制完整 Cookie.');
     return;
   }
+  if (!cookie.split(';').some((part) => part.trim().startsWith('session=') && part.trim().slice(8).trim())) {
+    console.warn('未读取到登录 Cookie session, 不修改剪贴板. acw_sc__v2 只是访问验证 Cookie. session 若设置了 HttpOnly, 请在 Application -> Cookies -> https://anyrouter.top 复制 session 的 Value, 在 WebUI 填写 session=复制的值; 或从 Network 请求头复制包含 session 的完整 Cookie.');
+    return;
+  }
   try {
     if (typeof copy === 'function') copy(cookie);
     else await navigator.clipboard.writeText(cookie);
-    console.info('已复制可读取的 Cookie, 请回到 WebUI 粘贴. 不包含 HttpOnly Cookie, 若登录无效请从 Network 请求头复制完整 Cookie.');
+    console.info('Cookie 已复制, 请回到 WebUI 粘贴. 不包含 HttpOnly Cookie, 登录有效性仍需由站点核验.');
   } catch (_) {
     console.warn('无法写入剪贴板. 请从 Network 的请求头中手动复制完整 Cookie.');
   }
@@ -542,7 +546,7 @@
     actions.append(button('复制提取脚本', 'button secondary', async () => {
       try {
         await navigator.clipboard.writeText(COOKIE_EXTRACTION_SCRIPT);
-        notice('已复制提取脚本. 请在已登录的 AnyRouter 页面按 F12, 粘贴到 Console 执行, 再回到此处粘贴结果.');
+        notice('已复制提取脚本. 请在 AnyRouter 的 Console 执行, 确认提示 Cookie 已复制后再粘贴结果. 若提示缺少 session, 请按页面说明手动获取.');
       } catch (_) {
         details.open = true;
         script.focus();
@@ -552,8 +556,8 @@
     }));
     wrap.append(
       actions,
-      el('p', 'field-hint', '先登录 https://anyrouter.top, 按 F12 打开 Console, 粘贴并执行脚本, 再将剪贴板内容粘贴到上方 Cookie 输入框.'),
-      el('p', 'field-hint', '脚本只能读取 document.cookie, 无法读取 HttpOnly Cookie. 若登录无效, 请在 Network 中选择已登录的站点请求, 从 Request Headers 手动复制完整 Cookie 值.'),
+      el('p', 'field-hint', '先登录 https://anyrouter.top, 按 F12 -> Application -> Cookies -> https://anyrouter.top, 找到 session 并复制其 Value, 在上方填写 session=复制的值. 也可从 Network 的 Request Headers 复制包含 session 的完整 Cookie 值.'),
+      el('p', 'field-hint', '脚本只能读取 document.cookie, 无法读取 HttpOnly Cookie. 可在 F12 的 Console 尝试执行脚本, 仅在读到非空 session 时复制. acw_sc__v2 只是访问验证 Cookie, 不能替代登录 Cookie.'),
       details,
     );
     return wrap;
@@ -826,6 +830,7 @@
         if (!account.username || !account.password) return `账号 ${name} 需要填写站点登录账号和密码.`;
       } else {
         if (!(account.auth_type === 'cookie' ? account.cookies : account.system_access_token)) return `账号 ${name} 需要填写${account.auth_type === 'cookie' ? 'Cookie' : '系统访问令牌'}.`;
+        if (account.auth_type === 'cookie' && typeof account.cookies === 'string' && account.cookies !== SECRET && !account.cookies.split(';').some((part) => part.trim().startsWith('session=') && part.trim().slice(8).trim())) return `账号 ${name} 的 Cookie 缺少非空 session. acw_sc__v2 只是访问验证 Cookie, 请按 Cookie 输入框下方说明获取登录 Cookie.`;
         if (!account.api_user || !/^\d+$/.test(String(account.api_user)) || Number(account.api_user) < 1) return `账号 ${name} 需要填写有效的目标站点用户 ID.`;
       }
       if (account.proxy === 'default' && !config.proxy_url) return `账号 ${name} 选择了默认代理, 请先配置代理 URL.`;

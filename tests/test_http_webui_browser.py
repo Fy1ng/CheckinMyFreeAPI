@@ -114,6 +114,22 @@ async def test_cookie_script_copy_failure_exposes_readonly_selected_script(tmp_p
 		assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
 
+@pytest.mark.parametrize('cookie', ['acw_sc__v2=synthetic-waf', 'acw_sc__v2=synthetic-waf; session='])
+@pytest.mark.asyncio
+async def test_cookie_draft_missing_session_is_actionable_and_never_saved(tmp_path, cookie):
+	async with local_ui(tmp_path) as (page, _, requests):
+		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+		await page.get_by_label('Cookie', exact=True).fill(cookie)
+		await page.get_by_label(re.compile('^目标站点用户 ID')).fill('17')
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#global-message')).to_contain_text('Cookie 缺少非空 session')
+		await expect(page.get_by_label('Cookie', exact=True)).to_have_value(cookie)
+		assert not any(method == 'PUT' for method, _ in requests)
+		await page.get_by_label('Cookie', exact=True).fill('session=synthetic-login; acw_sc__v2=synthetic-waf')
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#dirty-status')).to_have_text('所有修改已保存')
+
+
 @pytest.mark.asyncio
 async def test_cookie_extraction_script_on_isolated_target_origin(tmp_path):
 	async with local_ui(tmp_path) as (page, _, _):
@@ -172,11 +188,48 @@ async def test_cookie_extraction_script_on_isolated_target_origin(tmp_path):
 			assert await target.evaluate('window.copiedCookie') == 'preserved'
 			assert '无法写入剪贴板' in logs[-1]
 			await context.clear_cookies(name='session')
+			await context.add_cookies(
+				[
+					{
+						'name': 'session',
+						'value': 'synthetic-hidden-session',
+						'url': 'https://anyrouter.top/',
+						'httpOnly': True,
+						'secure': True,
+					},
+					{'name': 'acw_sc__v2', 'value': 'synthetic-waf', 'url': 'https://anyrouter.top/', 'secure': True},
+					{
+						'name': 'other_session',
+						'value': 'synthetic-decoy',
+						'url': 'https://anyrouter.top/',
+						'secure': True,
+					},
+				]
+			)
+			await target.evaluate("""() => {
+				window.copyAttempted = false;
+				window.copy = (value) => { window.copyAttempted = true; window.copiedCookie = value; };
+			}""")
+			await target.evaluate(script)
+			assert '未读取到登录 Cookie session' in logs[-1]
+			assert await target.evaluate('window.copiedCookie') == 'preserved'
+			assert await target.evaluate('window.copyAttempted') is False
+			await context.clear_cookies()
 			await target.evaluate(script)
 			assert await target.evaluate('window.copiedCookie') == 'preserved'
 			assert '未读取到 Cookie' in logs[-1]
 			assert not any(
-				'synthetic-readable-cookie' in entry or 'synthetic-httponly-cookie' in entry for entry in logs
+				any(
+					value in entry
+					for value in (
+						'synthetic-readable-cookie',
+						'synthetic-httponly-cookie',
+						'synthetic-hidden-session',
+						'synthetic-waf',
+						'synthetic-decoy',
+					)
+				)
+				for entry in logs
 			)
 			assert target_requests == [('GET', 'https://anyrouter.top/')]
 			page.on('console', lambda message: logs.append(message.text))
