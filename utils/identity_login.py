@@ -103,15 +103,16 @@ async def probe_identity_user(page, kind: str) -> dict | None:
 		  if (__IDENTITY_CHALLENGE__) return {challenge: true};
 		  try {
 		    const response = await fetch(url, {method: 'GET', credentials: 'same-origin',
+		      headers: kind === 'linuxdo' ? {Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest'} : {},
 		      cache: 'no-store', redirect: 'manual', referrerPolicy: 'no-referrer',
 		      signal: AbortSignal.timeout(15000)});
 		    if (response.type === 'opaqueredirect') return {redirected: true};
 		    const text = await response.text();
 		    if (text.length > 2097152) return {status: response.status, url: response.url};
 		    let data = null;
-		    if (response.status === 200 && response.url === url) {
+		    if (response.url === url) {
 		      if (kind === 'linuxdo') { try { data = JSON.parse(text); } catch {} }
-		      else {
+		      else if (response.status === 200) {
 		        const document = new DOMParser().parseFromString(text, 'text/html');
 		        const marker = (name) => {
 		          const nodes = document.querySelectorAll(`meta[name="${name}"]`);
@@ -147,6 +148,17 @@ async def probe_identity_user(page, kind: str) -> dict | None:
 	if status == 429:
 		raise AuthError('RATE_LIMITED')
 	if status == 403:
+		# Login-required Discourse sites can reject an anonymous JSON request with
+		# this explicit authentication error. Keep the original browser available
+		# for login; unrelated 403 responses must still stop without retrying.
+		data = result.get('data')
+		if (
+			kind == 'linuxdo'
+			and result.get('url') == origin + path
+			and isinstance(data, dict)
+			and data.get('error_type') == 'not_logged_in'
+		):
+			return None
 		raise AuthError('ACCESS_BLOCKED')
 	if not isinstance(status, int) or status == 0 or status >= 500:
 		raise AuthError('NETWORK_OR_SERVICE_ERROR')

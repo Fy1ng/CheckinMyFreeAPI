@@ -143,8 +143,19 @@ async def test_mismatched_subject_keeps_last_known_good_snapshot(browser):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('transport', ['desktop', 'remote'])
-async def test_manual_wait_uses_original_browser_and_notifies_when_ready(browser, monkeypatch, transport):
-	browser.page.evaluate.side_effect = [{'status': 401}, self_result()]
+@pytest.mark.parametrize(
+	'anonymous',
+	[
+		{'status': 401},
+		{
+			'status': 403,
+			'url': 'https://linux.do/session/current.json',
+			'data': {'error_type': 'not_logged_in', 'errors': ['You need to be logged in to do that.']},
+		},
+	],
+)
+async def test_manual_wait_uses_original_browser_and_notifies_when_ready(browser, monkeypatch, transport, anonymous):
+	browser.page.evaluate.side_effect = [anonymous, self_result()]
 	entered: list = []
 
 	class Takeover:
@@ -311,6 +322,38 @@ async def test_linuxdo_anonymous_session_or_visible_challenge_keeps_manual_login
 	browser.page.evaluate.return_value = result
 	assert await probe_identity_user(browser.page, 'linuxdo') is None
 	assert not browser.context.close.called
+
+
+@pytest.mark.asyncio
+async def test_linuxdo_explicit_not_logged_in_403_keeps_manual_login_open(browser):
+	browser.page.url = 'https://linux.do/login'
+	browser.page.evaluate.return_value = {
+		'status': 403,
+		'url': 'https://linux.do/session/current.json',
+		'data': {'error_type': 'not_logged_in', 'errors': ['You need to be logged in to do that.']},
+	}
+	assert await probe_identity_user(browser.page, 'linuxdo') is None
+	assert not browser.context.close.called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+	'kind,url,data',
+	[
+		('linuxdo', 'https://linux.do/session/current.json', {'error_type': 'invalid_access'}),
+		('linuxdo', 'https://linux.do/session/current.json', {'errors': ['You need to be logged in.']}),
+		('linuxdo', 'https://linux.do/session/current.json', None),
+		('linuxdo', 'https://other.test/session/current.json', {'error_type': 'not_logged_in'}),
+		('linuxdo', None, {'error_type': 'not_logged_in'}),
+		('github', 'https://github.com/settings/profile', {'error_type': 'not_logged_in'}),
+	],
+)
+async def test_other_forbidden_responses_still_stop_without_retry(browser, kind, url, data):
+	browser.page.url = 'https://linux.do/login' if kind == 'linuxdo' else 'https://github.com/login'
+	browser.page.evaluate.return_value = {'status': 403, 'url': url, 'data': data}
+	with pytest.raises(AuthError, match='ACCESS_BLOCKED'):
+		await probe_identity_user(browser.page, kind)
+	assert browser.page.evaluate.await_count == 1
 
 
 @pytest.mark.asyncio

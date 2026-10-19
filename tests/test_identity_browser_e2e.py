@@ -10,15 +10,20 @@ import pytest
 from playwright.async_api import async_playwright
 
 from utils.config import AppConfig, IdentityConfig
-from utils.identity_login import IdentityLoginRuntime
+from utils.identity_login import IdentityLoginRuntime, probe_identity_user
 from utils.secure_state import SnapshotStore, state_key
 
 pytestmark = pytest.mark.skipif(os.getenv('CHECKIN_BROWSER_TESTS') != '1', reason='Opt-in offline Chromium fixture')
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('kind', ['linuxdo', 'github'])
-async def test_verification_identity_login_and_fresh_profile_restore(monkeypatch, tmp_path, kind):
+@pytest.mark.parametrize(
+	'kind,anonymous_status,initial_challenge',
+	[('linuxdo', 404, True), ('linuxdo', 403, True), ('linuxdo', 403, False), ('github', 302, True)],
+)
+async def test_verification_identity_login_and_fresh_profile_restore(
+	monkeypatch, tmp_path, kind, anonymous_status, initial_challenge
+):
 	origin = 'https://identity.fixture.test'
 	monkeypatch.setitem(
 		__import__('utils.identity_login', fromlist=['IDENTITY_ORIGINS']).IDENTITY_ORIGINS, kind, origin
@@ -39,7 +44,7 @@ async def test_verification_identity_login_and_fresh_profile_restore(monkeypatch
 			return
 		cookies = (await request.all_headers()).get('cookie', '')
 		if parsed.path == '/login':
-			if 'fixture_clearance=complete' not in cookies:
+			if initial_challenge and 'fixture_clearance=complete' not in cookies:
 				body = '<script src="/cdn-cgi/challenge-platform/fixture.js"></script><h1>Synthetic verification</h1><form id="challenge-form" method="post" action="/clearance"><button>Continue fixture</button></form>'
 			elif 'identity_session=valid' not in cookies:
 				body = '<h1>Synthetic login</h1><form method="post" action="/sign-in"><input aria-label="Username"><input aria-label="Password" type="password"><button>Sign in fixture</button></form>'
@@ -55,11 +60,17 @@ async def test_verification_identity_login_and_fresh_profile_restore(monkeypatch
 				body='<script>location.replace("/login")</script>',
 			)
 		elif parsed.path == '/session/current.json':
-			await request_route.fulfill(
-				status=200 if 'identity_session=valid' in cookies else 404,
-				json={'current_user': {'id': 42, 'username': 'fixture-user'}}
+			headers = await request.all_headers()
+			assert headers.get('accept') == 'application/json'
+			assert headers.get('x-requested-with') == 'XMLHttpRequest'
+			payload: dict[str, object] = (
+				{'current_user': {'id': 42, 'username': 'fixture-user'}}
 				if 'identity_session=valid' in cookies
-				else {},
+				else {'error_type': 'not_logged_in', 'errors': ['You need to be logged in to do that.']}
+			)
+			await request_route.fulfill(
+				status=200 if 'identity_session=valid' in cookies else anonymous_status,
+				json=payload,
 			)
 		elif parsed.path == '/settings/profile':
 			if 'identity_session=valid' not in cookies:
@@ -96,9 +107,12 @@ async def test_verification_identity_login_and_fresh_profile_restore(monkeypatch
 				nonlocal manual_count
 				manual_count += 1
 				page = contexts[-1].pages[-1]
-				await page.get_by_role('button', name='Continue fixture', exact=True).click()
+				if initial_challenge:
+					await page.get_by_role('button', name='Continue fixture', exact=True).click()
 				assert len(contexts) == 1 and not page.is_closed()
 				await page.get_by_label('Username').fill('fixture-user')
+				assert await probe_identity_user(page, kind) is None
+				assert not page.is_closed()
 				await page.get_by_label('Password').fill('synthetic-password')
 				await page.get_by_role('button', name='Sign in fixture', exact=True).click()
 				return SimpleNamespace(url='')
