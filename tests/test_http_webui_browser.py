@@ -55,6 +55,139 @@ async def local_ui(tmp_path, intercept=None):
 
 
 @pytest.mark.asyncio
+async def test_cookie_script_copy_is_local_and_only_available_for_cookie_auth(tmp_path):
+	async with local_ui(tmp_path) as (page, service, requests):
+		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+		await page.get_by_label('Cookie', exact=True).fill('session=synthetic-saved-secret')
+		await page.get_by_label(re.compile('^目标站点用户 ID')).fill('17')
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#dirty-status')).to_have_text('所有修改已保存')
+		await page.evaluate("""() => {
+			Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+				writeText: async (value) => { window.copiedScript = value; }
+			} });
+		}""")
+		request_count = len(requests)
+		await page.get_by_role('button', name='复制提取脚本', exact=True).click()
+		await expect(page.locator('#global-message')).to_contain_text('已复制提取脚本')
+		script = await page.evaluate('window.copiedScript')
+		assert script == await page.get_by_label('Cookie 提取脚本', exact=True).input_value()
+		assert 'synthetic-saved-secret' not in script and SECRET_KEEP not in script
+		await expect(page.locator('#dirty-status')).to_have_text('所有修改已保存')
+		await expect(page.locator('#save-button')).to_be_disabled()
+		await page.get_by_label('Cookie', exact=True).fill('session=synthetic-draft-secret')
+		await page.get_by_role('button', name='复制提取脚本', exact=True).click()
+		assert await page.evaluate('window.copiedScript') == script
+		await expect(page.get_by_label('Cookie', exact=True)).to_have_value('session=synthetic-draft-secret')
+		assert not any(method != 'GET' for method, _ in requests[request_count:])
+		assert not service.jobs.history()
+		await expect(page.locator('.field-hint').filter(has_text='无法读取 HttpOnly Cookie')).to_be_visible()
+		await page.get_by_label('认证方式').select_option('password')
+		await expect(page.get_by_role('button', name='复制提取脚本', exact=True)).to_have_count(0)
+		await page.get_by_label(re.compile('^目标站点(?!用户)')).select_option('agentrouter')
+		await expect(page.get_by_role('button', name='复制提取脚本', exact=True)).to_have_count(0)
+
+
+@pytest.mark.parametrize('clipboard_available', [False, True])
+@pytest.mark.asyncio
+async def test_cookie_script_copy_failure_exposes_readonly_selected_script(tmp_path, clipboard_available):
+	async with local_ui(tmp_path) as (page, _, requests):
+		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+		await page.evaluate(
+			"""(available) => {
+			Object.defineProperty(navigator, 'clipboard', { configurable: true, value: available
+				? { writeText: async () => { throw new Error('synthetic permission denial'); } }
+				: undefined });
+		}""",
+			clipboard_available,
+		)
+		request_count = len(requests)
+		await page.get_by_role('button', name='复制提取脚本', exact=True).click()
+		await expect(page.locator('#global-message')).to_contain_text('请手动复制')
+		script = page.get_by_label('Cookie 提取脚本', exact=True)
+		await expect(script).to_be_visible()
+		assert await script.evaluate(
+			'(el) => el.readOnly && el.selectionStart === 0 && el.selectionEnd === el.value.length'
+		)
+		assert not any(method != 'GET' for method, _ in requests[request_count:])
+		await page.set_viewport_size({'width': 390, 'height': 844})
+		assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
+@pytest.mark.asyncio
+async def test_cookie_extraction_script_on_isolated_target_origin(tmp_path):
+	async with local_ui(tmp_path) as (page, _, _):
+		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+		script = await page.get_by_label('Cookie 提取脚本', exact=True).input_value()
+		context = await page.context.browser.new_context()
+		target_requests, logs = [], []
+
+		async def synthetic_site(route):
+			target_requests.append((route.request.method, route.request.url))
+			if route.request.url == 'https://anyrouter.top/':
+				await route.fulfill(content_type='text/html', body='<!doctype html><link rel="icon" href="data:,">')
+			else:
+				await route.abort()
+
+		try:
+			await context.route('**/*', synthetic_site)
+			await context.add_cookies(
+				[
+					{
+						'name': 'session',
+						'value': 'synthetic-readable-cookie',
+						'url': 'https://anyrouter.top/',
+						'secure': True,
+					},
+					{
+						'name': 'hidden',
+						'value': 'synthetic-httponly-cookie',
+						'url': 'https://anyrouter.top/',
+						'httpOnly': True,
+						'secure': True,
+					},
+				]
+			)
+			target = await context.new_page()
+			target.on('console', lambda message: logs.append(message.text))
+			await target.goto('https://anyrouter.top/')
+			await target.evaluate('() => { window.copy = (value) => { window.copiedCookie = value; }; }')
+			await target.evaluate(script)
+			assert await target.evaluate('window.copiedCookie') == 'session=synthetic-readable-cookie'
+			assert '不包含 HttpOnly Cookie' in logs[-1]
+			await target.evaluate("""() => {
+				delete window.copy;
+				Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+					writeText: async (value) => { window.copiedCookie = value; }
+				} });
+				window.copiedCookie = 'preserved';
+			}""")
+			await target.evaluate(script)
+			assert await target.evaluate('window.copiedCookie') == 'session=synthetic-readable-cookie'
+			await target.evaluate("""() => {
+				window.copiedCookie = 'preserved';
+				navigator.clipboard.writeText = async () => { throw new Error('synthetic denial'); };
+			}""")
+			await target.evaluate(script)
+			assert await target.evaluate('window.copiedCookie') == 'preserved'
+			assert '无法写入剪贴板' in logs[-1]
+			await context.clear_cookies(name='session')
+			await target.evaluate(script)
+			assert await target.evaluate('window.copiedCookie') == 'preserved'
+			assert '未读取到 Cookie' in logs[-1]
+			assert not any(
+				'synthetic-readable-cookie' in entry or 'synthetic-httponly-cookie' in entry for entry in logs
+			)
+			assert target_requests == [('GET', 'https://anyrouter.top/')]
+			page.on('console', lambda message: logs.append(message.text))
+			await page.evaluate('() => { window.copy = () => { throw new Error("must not read WebUI cookies"); }; }')
+			await page.evaluate(script)
+			assert '请在已登录的 https://anyrouter.top 页面执行' in logs[-1]
+		finally:
+			await context.close()
+
+
+@pytest.mark.asyncio
 async def test_http_auth_choices_draft_switching_and_incomplete_disabled_account(tmp_path):
 	async with local_ui(tmp_path) as (page, service, requests):
 		assert await page.locator('[data-tab]').count() == 3

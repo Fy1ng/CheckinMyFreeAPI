@@ -2,6 +2,25 @@
 
 (() => {
   const SECRET = '__UNCHANGED_SECRET__';
+  const COOKIE_EXTRACTION_SCRIPT = `// 在已登录的 AnyRouter 页面执行. 只读取 Cookie, 不发送网络请求.
+(async () => {
+  if (location.origin !== 'https://anyrouter.top') {
+    console.warn('请在已登录的 https://anyrouter.top 页面执行此脚本.');
+    return;
+  }
+  const cookie = document.cookie;
+  if (!cookie.trim()) {
+    console.warn('未读取到 Cookie. HttpOnly Cookie 无法由脚本读取, 请从 Network 的请求头中手动复制完整 Cookie.');
+    return;
+  }
+  try {
+    if (typeof copy === 'function') copy(cookie);
+    else await navigator.clipboard.writeText(cookie);
+    console.info('已复制可读取的 Cookie, 请回到 WebUI 粘贴. 不包含 HttpOnly Cookie, 若登录无效请从 Network 请求头复制完整 Cookie.');
+  } catch (_) {
+    console.warn('无法写入剪贴板. 请从 Network 的请求头中手动复制完整 Cookie.');
+  }
+})();`;
   const $ = (id) => document.getElementById(id);
   const copy = (value) => JSON.parse(JSON.stringify(value));
   const state = {
@@ -507,6 +526,39 @@
   }
   secretField.counter = 0;
 
+  function cookieExtractionHelp() {
+    const wrap = el('div', 'field');
+    const details = el('details', 'details-box');
+    details.append(el('summary', '', '查看提取脚本 / 手动复制'));
+    const scriptField = el('label', 'field');
+    const script = el('textarea');
+    script.readOnly = true;
+    script.spellcheck = false;
+    script.rows = 12;
+    script.value = COOKIE_EXTRACTION_SCRIPT;
+    scriptField.append(el('span', 'field-label', 'Cookie 提取脚本'), script);
+    details.append(scriptField);
+    const actions = el('div', 'secret-control');
+    actions.append(button('复制提取脚本', 'button secondary', async () => {
+      try {
+        await navigator.clipboard.writeText(COOKIE_EXTRACTION_SCRIPT);
+        notice('已复制提取脚本. 请在已登录的 AnyRouter 页面按 F12, 粘贴到 Console 执行, 再回到此处粘贴结果.');
+      } catch (_) {
+        details.open = true;
+        script.focus();
+        script.select();
+        notice('无法自动写入剪贴板. 已选中提取脚本, 请手动复制后在 AnyRouter 的 Console 中执行.', 'warning');
+      }
+    }));
+    wrap.append(
+      actions,
+      el('p', 'field-hint', '先登录 https://anyrouter.top, 按 F12 打开 Console, 粘贴并执行脚本, 再将剪贴板内容粘贴到上方 Cookie 输入框.'),
+      el('p', 'field-hint', '脚本只能读取 document.cookie, 无法读取 HttpOnly Cookie. 若登录无效, 请在 Network 中选择已登录的站点请求, 从 Request Headers 手动复制完整 Cookie 值.'),
+      details,
+    );
+    return wrap;
+  }
+
   function proxyField(label, object, key, hint) {
     const wrap = el('div', 'field');
     const title = el('span', 'field-label', label);
@@ -646,7 +698,9 @@
       } else if (account.auth_type === 'system_token') {
         grid.append(secretField('系统访问令牌', account.system_access_token, (value) => { account.system_access_token = value; }, { wide: true, hint: '填写站点控制台的系统访问令牌, 不是模型调用 API Key.' }));
       } else {
-        grid.append(secretField('Cookie', account.cookies, (value) => { account.cookies = value; }, { wide: true, placeholder: 'session=...; other=...', hint: '输入完整 Cookie header. 已保存值留空保留, 点击清除才删除.' }));
+        const cookie = secretField('Cookie', account.cookies, (value) => { account.cookies = value; }, { wide: true, placeholder: 'session=...; other=...', hint: '输入完整 Cookie header. 已保存值留空保留, 点击清除才删除.' });
+        cookie.append(cookieExtractionHelp());
+        grid.append(cookie);
       }
       grid.append(
         field('目标站点用户 ID', account.api_user, (value) => { account.api_user = value; }, { optional: account.auth_type === 'password', placeholder: '例如: 12345', hint: 'Cookie 和系统访问令牌认证必须填写站点用户 ID, 用于 new-api-user 请求头及账号核对.' }),
