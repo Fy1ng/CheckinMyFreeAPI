@@ -1,255 +1,101 @@
-# Any Router 多账号签到 WebUI
+# NewAPI HTTP 签到控制台
 
-本地或自有 Linux 服务器运行的多账号签到服务, 内置 AnyRouter 与 AgentRouter, 支持站点密码、LinuxDo/GitHub OAuth 和兼容已有 Cookie 配置. 账号、站点、身份、代理、通知与定时任务通过浏览器表单管理.
+Python 3.11 + aiohttp + SQLite 的私有 WebUI. 第一版只支持两个固定站点, 服务器不安装或启动任何浏览器, 不支持 OAuth、自定义站点或远程桌面.
 
-运行架构为 Python 3.11 + aiohttp + SQLite. 配置中的敏感值与已验证登录态使用独立主密钥加密, WebUI 密码只保存哈希. Linux Docker Compose 提供同一 WebUI 内的限时浏览器人工接管, 用于登录、验证码和 MFA. 不自动处理第三方平台密码或验证码, 不通过更换代理规避访问限制.
+| 站点 | 认证方式 | 请求行为 |
+|---|---|---|
+| anyrouter.top | Cookie + 用户 ID, 或站点用户名密码 | HTTP 登录/核验用户后 POST /api/user/sign_in, 再核对用户 |
+| agentrouter.org | 系统访问令牌 + 用户 ID | 单次 GET /api/user/self, 不额外发送签到 POST |
 
-GitHub Actions 只运行代码检查和模拟测试, 不运行真实账号签到. 当前版本尚未部署到服务器; Docker 构建、Linux 浏览器接管和真实网站登录需要在相应环境另行验收. 本地模拟检查通过不能证明目标站点接受自动签到或服务器出口 IP, 使用前应核对站点条款.
+Agent 的自动签到行为来自参考项目, 当前没有执行真实站点验收. 用户信息请求成功只说明接口和身份核验完成, 不证明奖励到账. 系统访问令牌是站点控制台的账户凭据, 不等同于模型调用 API key. 站点当前是否接受该认证方式需要实际确认.
 
-## 本地启动
+## 本地运行
 
-安装 Python 3.11+ 和 [uv](https://docs.astral.sh/uv/getting-started/installation/), 在仓库目录运行:
-
-```bash
-uv sync --frozen --dev
+```powershell
+uv sync --frozen
 uv run --frozen python -m server
 ```
 
-打开 `http://127.0.0.1:8765`. 首次交互式启动会在终端通过隐藏输入设置 WebUI 密码, 至少 16 字符. 推荐使用密码管理器生成的长密码. 密码不会放进 URL 或访问日志. 非交互启动应显式提供 `CHECKIN_WEB_PASSWORD_FILE` 指向密码文件; 也支持 `CHECKIN_WEB_PASSWORD`, 不建议写入命令历史或普通配置文件.
+首次启动会设置管理密码, 并创建原始 32 字节主密钥. 默认访问 http://127.0.0.1:8765. 若该端口被系统保留或占用, 设置 CHECKIN_WEB_PORT. `checkin.py` 是相同 WebUI 的兼容入口, 不读取旧环境变量启动签到.
 
-本地默认数据目录为 `./server-data`, SQLite 文件为 `server-data/webui.sqlite3`. 主密钥是 `./server-keys/master.key` 中的原始 32 字节, 本地首次启动可自动生成. `server-data` 与 `server-keys` 都不得提交到 Git. WebUI 日常启动不会读取 `.env`, 也不会自动导入旧账号或发起真实签到.
+1. 登录后添加账号, 选择 AnyRouter 或 AgentRouter. 账号详情可折叠, 草稿在成功保存后生效.
+2. Any Cookie 模式填写完整 Cookie header 和用户 ID; 密码模式填写目标站点用户名和密码, 可填写预期用户 ID/用户名加强核验. 不填写第三方平台密码.
+3. Agent 只能填写系统访问令牌和用户 ID. 切换站点或认证方式会清除草稿中不兼容的凭据.
+4. 保存配置不会签到或发送通知. 确认配置后点击开始签到, 验证真实站点结果后再启用定时任务.
+5. 账号可禁用, 禁用后保留配置且不发站点请求. 定时任务默认关闭, 默认间隔 360 分钟, 不补跑停机期间任务.
 
-Windows 可管理配置、查看状态和调度任务. 在 WebUI 的 `定时与浏览器` 中可选择 `系统 Chrome (仅 Windows)` 完成身份登录和账号运行, 需先安装 Google Chrome. 为兼容已有配置, 新增浏览器选项前的配置仍使用 CloakBrowser, 不会自动切换登录态. 选择 CloakBrowser 时需安装其浏览器:
+## 运行结果与人工处理
 
-```bash
-uv run --frozen python -m cloakbrowser install
-```
+- 凭据失效: 暂停该账号的后续定时执行, 通知用户在自己的浏览器完成站点操作后更新 Cookie 或令牌.
+- CF/WAF/验证码: 暂停并通知, 不启动浏览器, 不自动处理验证码, 不更换出口重试. 用户在本机通过验证不能保证服务器出口也能使用该凭据.
+- 限流: 遵守 Retry-After, 期限内包括手动运行也不重发请求; 未提供有效期限时保守等待一小时.
+- 写入结果不确定: 包括签到超时、异常响应或任务中断, 不自动重发. 在站点核对后通过账号卡片的 `已核对结果, 解除暂停` 明确恢复. 更新凭据本身也不会解除这种不确定状态.
+- 普通网络/服务故障: 显示固定原因代码, 本次任务不重试. 后续独立定时任务可重新尝试安全的读取流程.
 
-系统 Chrome 使用项目独立的 profile, 不读取或复用日常 Chrome 的个人资料和登录态. Chrome 与 CloakBrowser 的身份和账号登录态分别加密保存, 首次使用所选浏览器需重新登录, 原浏览器的状态会保留. `启用自然交互` 仅用于 CloakBrowser, Chrome 模式禁用该控件但保留原有设置. Linux 当前只支持 CloakBrowser, 选择系统 Chrome 会在运行时返回明确错误. 使用系统 Chrome 仍可能遇到 Cloudflare 验证或站点访问限制, 不保证放行.
+Any 密码登录会优先复用已验证、加密保存的 HTTP 会话; 失效后最多尝试一次 API 登录. 签到前核对账号, 签到后再次核对, 失败不覆盖上一份会话. HTTP 不跟随重定向, 凭据只发送到账号选定的固定站点.
 
-已有 Windows 本地测试实例若使用 `web-password`、`process-id` 和 `keys/master.key` 文件, 可手动运行 `scripts/restart_local_webui.ps1 -TestRoot <测试目录> -UseSystemChrome` 加载后端更新并只切换浏览器配置. 加 `-CheckOnly` 只检查实例是否空闲及进程归属. 脚本要求先关闭定时任务, 不会停止运行中的登录或签到, 不清空已有数据, 不会自动发起任务. 运行后刷新 WebUI 并重新登录管理界面.
+通知渠道包含 Fy1Push、邮件、Telegram、Bark、Gotify、PushPlus、Server 酱、钉钉、飞书和企业微信. Fy1Push 使用 HTTPS 地址与发送 token, token 不写日志. `accepted` 只表示服务端接收, 不保证手机送达. 相同待处理结果不反复通知; 配置变化、状态变化或通知失败可触发后续发送. 可配置 WebUI 地址, 通知中的链接只携带账号 ID, 不包含密码、Cookie 或 token. WebUI 仍需管理密码登录. 私有 SSH 转发场景按实际转发地址打开.
 
-Windows 本地测试时关闭无头模式, 可直接在已打开的 Chrome 或 Chromium 中完成验证、LinuxDo/GitHub 登录和授权. 自动登录未完成时程序会在同一窗口继续等待, 默认单次最多 600 秒, WebUI 显示等待状态和剩余时间. Windows 不需要启动 noVNC 或隧道. Linux 服务器仍通过 DISPLAY/Xvfb 和 WebUI 远程接管. headless 模式只尝试自动登录一次, 需要人工操作时该账号会报错, 不会关闭后重开窗口重试.
+## 数据与旧配置迁移
 
-## 浏览器配置和运行
+配置、HTTP 会话均通过独立用途的 AES-GCM 加密保存于 SQLite. 管理密码只保存加盐哈希. 执行记录和暂停原因不是全部加密, 整个数据目录仍应私有保存. 输入框隐藏已保存秘密, 留空保留, 点击清除才删除. 修改凭据使旧 HTTP 会话绑定失效, 不会误复用其他账号的会话.
 
-1. 登录 WebUI, 在表单中维护站点 Provider、OAuth 身份 Identity 与目标账号 Account. 账号、登录身份和自定义站点卡片均可收起详情, 收起不会丢弃未保存的修改.
-2. 账号切换到 LinuxDo/GitHub OAuth 时只修改账号草稿. 保存配置时, 若尚无对应类型的身份, 会自动新建并关联; 只有一个同类型身份时默认复用它, 有多个时需自行选择. 无论是否已有身份, 均可在账号的登录身份下拉框选择 `新建独立身份 (保存时创建)`, 为该账号创建独立身份. 保存失败不会向草稿添加身份. 也可先在身份页手动添加身份并配置代理.
-3. 登录身份可以在身份页独立登录, 不要求先创建目标站点账号. 先保存当前配置, 再点击对应身份的登录按钮. Windows 在本机所选浏览器操作, Linux 在当前任务的 WebUI 接管入口操作. 身份卡片显示的是当前已保存浏览器的最近验证记录.
-4. 设置目标站点的 `api_user` 或 `expected_username`, 保存配置. OAuth 至少提供其中一项, 同时填写时两项都必须匹配. 按需填写现有代理、通知渠道和浏览器参数, 保存后再点击手动运行.
-5. 需要人工登录时, Windows 直接在本机已打开的 Chrome 或 Chromium 中完成验证、登录和授权; Linux 服务器使用当前任务的 WebUI 接管入口. 验证完成后继续在同一窗口登录, 无需重新运行任务. 远程入口依赖当前登录会话, 只在任务需要且未超时时可用, 不会启动 Cloudflare 公网隧道.
-6. 确认手动运行结果后再启用定时任务. 调度默认关闭, 默认间隔为 360 分钟.
+旧版配置在取得服务独占锁后迁移: 先在同一数据库事务内归档原始密文与版本, 再生成 schema 2 配置, 关闭旧定时任务. 支持转换的 Any Cookie/密码账号保留; OAuth、Agent 缺令牌等账号转换为禁用待配置. 不支持的自定义站点仅从活动配置中移除, 原始内容保留在加密归档. 旧浏览器加密快照和历史记录不删除, 新执行器不读取或跨平台导入它们. 不会自动清空所有已保存数据.
 
-保存配置、登录身份与执行签到是独立操作. 独立身份登录不会发起目标站点签到, 也不表示目标站点 OAuth 授权已完成. 同一服务只允许一个任务运行, 身份登录与签到共用串行执行锁和停止按钮. 运行中的配置使用该次任务的快照, 后续保存供下一次运行使用. 可以取消当前任务, 取消后不会为该任务自动重试; 定时调度在仍启用时可产生后续独立任务. 人工接管超时后入口关闭, 需要下一次任务重新建立.
+迁移会增加配置版本. 若需要回退, 在首次启动新版本前停止服务, 备份整个数据目录与独立 master.key. 数据和密钥分开保管, 不更换密钥来重置已有数据. 本版本尚无图形化归档恢复或主密钥轮换入口.
 
-不要同时启动多个服务实例共用同一数据目录. 定时任务需要服务进程持续运行, 不补跑停机期间的每次计划. 站点限流、封锁、账号不匹配或登录失败会显示失败结果, 不轮换出口反复尝试.
+## 启动配置
 
-## Linux Docker Compose
+| 环境变量 | 默认值/说明 |
+|---|---|
+| CHECKIN_WEB_HOST | 127.0.0.1, 容器内部可为 0.0.0.0 |
+| CHECKIN_WEB_PORT | 8765 |
+| CHECKIN_WEB_DATA_DIR | server-data |
+| CHECKIN_WEB_KEY_FILE | server-keys/master.key, 原始 32 字节 |
+| CHECKIN_WEB_PASSWORD_FILE | 首次管理密码的只读文本文件, 至少 16 字符 |
+| CHECKIN_WEB_PASSWORD | 首次密码的备选进程环境来源, 优先使用密码文件 |
 
-此部分准备可部署配置, 不会在本地自动部署. 需要 Docker Engine 和 Compose v2. 镜像使用 Python 3.11, `uv.lock` 锁定依赖, 构建时安装对应 CloakBrowser 与 Chromium 系统依赖、Xvfb、x11vnc 和 noVNC. 构建过程需要访问依赖和浏览器下载源.
+账号、通知、代理与定时配置全部通过 WebUI 保存. 服务不自动读取 .env, 不支持旧 --import-env 参数. 缺少现有数据库所对应的密钥时拒绝启动.
 
-先在 Linux 仓库目录生成独立密钥与 WebUI 密码文件. 以下操作只生成本机秘密, 不打印内容; 生成时不得覆盖已有密钥:
+## Linux 容器
+
+Dockerfile 的生产依赖只有 HTTP、加密和 WebUI 库, 没有 Playwright、Chromium、CloakBrowser、Xvfb、noVNC 或浏览器共享内存配置. 需先准备 `server-keys/master.key` 和 `server-keys/web-password`, 文件允许容器 UID/GID 10001 读取.
 
 ```bash
 mkdir -p server-keys
+python3 -c "from pathlib import Path; import secrets; Path('server-keys/master.key').write_bytes(secrets.token_bytes(32))"
+# 使用本机安全编辑器创建 server-keys/web-password, 不把真实密码写进 shell 历史.
 chmod 700 server-keys
-python3 - <<'PY'
-import getpass
-import os
-import secrets
-from pathlib import Path
-
-key = Path('server-keys/master.key')
-password_file = Path('server-keys/web-password')
-if key.exists() or password_file.exists():
-    raise SystemExit('Key or password file already exists; preserve it instead of overwriting.')
-password = getpass.getpass('WebUI password (at least 16 characters): ')
-if len(password) < 16 or password != getpass.getpass('Confirm WebUI password: '):
-    raise SystemExit('Password too short or confirmation does not match.')
-for path, value in ((key, secrets.token_bytes(32)), (password_file, password.encode('utf-8'))):
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
-    with os.fdopen(descriptor, 'wb') as output:
-        output.write(value)
-PY
-sudo chown 10001:10001 server-keys/master.key server-keys/web-password
-
+chmod 600 server-keys/master.key server-keys/web-password
+sudo chown -R 10001:10001 server-keys
 docker compose up --build -d
 ```
 
-容器使用固定非 root UID/GID `10001:10001`. Linux 主机上的只读密钥和密码文件必须允许该 UID 读取. `compose.yaml` 不会自动创建缺失的秘密文件, 缺失时应先准备文件. Docker Desktop 的宿主文件权限映射与 Linux 不同, 仍需检查挂载结果.
-
-Compose 配置:
-
-| 项目 | 设置 |
-| --- | --- |
-| 宿主访问地址 | `127.0.0.1:8765`, 只允许宿主本机访问. |
-| 容器内监听 | `0.0.0.0:8765`, 仅用于 Docker 端口映射. |
-| 持久化数据 | 命名卷 `checkin-data` 挂载 `/data`. |
-| 独立密钥 | `server-keys/master.key` 只读挂载 `/keys/master.key`. |
-| 首次密码来源 | `server-keys/web-password` 只读挂载 `/run/secrets/web-password`. |
-| 明文认证工作目录 | `/tmp/checkin-auth` 使用限额 512 MiB 的 tmpfs. |
-| 浏览器共享内存 | `shm_size: 1gb`. |
-| 子进程管理 | `init: true`, 启动脚本按需使用 Xvfb. |
-| 接管访问 | noVNC 通过同一 WebUI 认证入口代理, 不发布 VNC 端口. |
-
-本机使用 `http://127.0.0.1:8765`. 查看状态可运行 `docker compose ps`, 停止使用 `docker compose down`. 普通 `down` 保留命名数据卷; 不要使用 `down -v` 删除需要的配置和登录态. WebUI 初始密码文件是引导输入, 后续密码校验依据数据库中的哈希; 不要假定修改该文件会重置已存在的 WebUI 密码.
-
-服务器访问推荐 SSH 本地转发, 例如在自己的电脑执行:
+Compose 将容器 8765 仅映射到宿主 127.0.0.1:8765. 在本机建立转发:
 
 ```bash
 ssh -N -L 18766:127.0.0.1:8765 your-server
 ```
 
-保持 SSH 会话, 在本机浏览器访问 `http://127.0.0.1:18766`, 使用 WebUI 管理密码登录. 若本机端口被占用, 只需更换命令左侧端口和浏览器访问端口.
+然后通过 http://127.0.0.1:18766 管理. 不直接公开明文 WebUI. 默认服务只接受 loopback Host, 公网 HTTPS 暴露和认证模型不在本次实现范围内. 本轮仅准备容器配置, 未部署服务器或验收 Docker 运行.
 
-服务器上的身份登录流程为: 在登录身份卡片保存 LinuxDo/GitHub 身份, 点击该身份的登录按钮, 再打开当前任务的人工接管入口. 浏览器显示受当前 WebUI 会话保护的 noVNC 画面, 在其中操作服务器上的 Chromium, 手动完成验证码、第三方登录或授权. Docker 中的 Xvfb 提供虚拟显示, 服务器不需要物理显示器. 验证后的登录态只在服务器保存为加密快照, 不需要把本机浏览器 Cookie 复制到服务器. 登录成功后再给目标账号选择该身份并运行, 首次仍可能需要确认目标站点的 OAuth 授权.
+Windows 已有本地测试实例可手动运行 `scripts/restart_local_webui.ps1 -TestRoot <测试目录>`. 脚本先检查无任务且定时关闭, 核对监听进程归属, 才重启. 加 `-CheckOnly` 只检查. 不删除数据、不自动签到、不切换浏览器选项. 服务启动后按上述规则迁移旧配置.
 
-不要直接把明文 HTTP WebUI 或 VNC 发布到公网; 需要公网访问时应另行配置 HTTPS 和访问控制. 无法保证依赖本机设备的 Passkey 或 Windows Hello 能跨 noVNC 使用, 需要平台支持的其他登录方式时应由用户手动选择.
-
-## Provider、Identity 与 Account
-
-- Provider 是目标站点的纯 HTTPS origin、接口路径、OAuth client 配置和默认代理策略. 内置 `anyrouter` 与 `agentrouter`.
-- Identity 是 LinuxDo/GitHub 第三方身份别名, 多个目标站点可关联同一身份, 不保存第三方平台密码.
-- Account 是需要签到的目标站点账号, 关联 Provider 和可选 Identity, 使用站点返回的用户信息核对绑定.
-
-身份卡片的登录状态表示最近一次验证结果, 不会为了刷新界面而实时访问第三方平台. `上次验证成功` 不保证当前会话仍有效, 到期或被撤销后需要重新登录. 老版本快照若没有独立身份验证记录会显示未验证, 原有账号登录态仍按原流程核验. 独立身份登录首次验证后绑定平台用户 ID, 同一别名后续独立登录其他用户会被拒绝; 要换号请新建身份. 目标站点仍单独核对 `api_user` 或 `expected_username`.
-
-LinuxDo 使用当前会话接口验证用户, GitHub 使用受认证保护的账户设置页及当前用户标记验证. GitHub 页面结构变化或缺少必要标记时会拒绝保存, 不会仅凭页面跳转成功就标记已验证. 当前真实平台页面和 Linux 远程登录尚需单独验收.
-
-共享身份示例:
-
-```json
-{
-  "linuxdo-main": {"type": "linuxdo", "proxy": "direct"}
-}
-```
-
-```json
-[
-  {
-    "id": "anyrouter-main",
-    "name": "AnyRouter 主账号",
-    "provider": "anyrouter",
-    "auth": {"type": "linuxdo", "identity": "linuxdo-main"},
-    "expected_username": "your_anyrouter_username"
-  },
-  {
-    "id": "agentrouter-main",
-    "name": "AgentRouter 主账号",
-    "provider": "agentrouter",
-    "auth": {"type": "linuxdo", "identity": "linuxdo-main"},
-    "expected_username": "your_agentrouter_username"
-  }
-]
-```
-
-表单填写对应字段即可, 无需手写 JSON. 上述 JSON 仅用于说明关联关系和兼容旧配置. `expected_username` 是目标站点自己的用户名, 不要假定等于第三方昵称. GitHub OAuth 将 Identity 的 `type` 与 Account 的 `auth.type` 同时设为 `github`. 目标站点本身必须支持对应 OAuth 平台.
-
-Account 的 `id` 应唯一且稳定, 修改它会影响登录态复用. OAuth 不能与 `email`、`password`、`cookies` 混用. 站点密码方式只填写目标站点凭据, 不要填写 LinuxDo/GitHub 密码. 已有 Cookie 方式继续兼容, 必须设置 `api_user`, 新 OAuth 配置无需导出 Cookie.
-
-自定义 Provider 至少填写 `domain`, 即使只是覆盖内置站点. `domain` 只接受纯 HTTPS origin, 不含路径、用户密码或查询参数. 可配置字段:
-
-| 字段 | 默认值或用途 |
-| --- | --- |
-| `login_path` | `/login`, 浏览器登录页面. |
-| `sign_in_path` | `/api/user/sign_in`, `null` 表示查询用户信息完成签到. |
-| `user_info_path` | `/api/user/self`, 会话与账号核验. |
-| `api_user_key` | `new-api-user`, 用户 ID 请求头名. |
-| `status_path` | `/api/status`, 读取站点 OAuth client 配置. |
-| `auth_state_path` | `/api/oauth/state`, 读取站点 OAuth state. |
-| `oauth_client_ids` | 可覆盖 `linuxdo`/`github` client ID, 必须使用该站点实际注册的值. |
-| `use_proxy` | 未显式指定代理时是否使用默认代理. |
-
-内置 AnyRouter 默认直连, AgentRouter 默认要求代理. 为共享 Identity 显式选择 `direct` 或 `default` 可以避免两者默认值不同. OAuth 支持标准站点回调路径 `/oauth/<type>` 和 `/api/oauth/<type>`, 自定义站点仍需核对实际接口.
-
-## 代理与通知
-
-代理支持 `direct`、`default` 或代理 URL. `default` 使用配置中的默认代理, 缺失时失败, 不静默直连. HTTP(S) 代理可带认证, SOCKS5 代理当前不支持认证. 同一 Identity 关联账号的最终代理配置必须完全一致. 相同代理 URL 不能保证上游公网出口固定, 需要稳定出口时应使用可保证固定出口的现有代理.
-
-WebUI 不会启动 Mihomo 或自动消费订阅. 原有 `scripts/setup_mihomo_proxy.sh` 作为独立 CLI 兼容工具保留, 订阅和代理服务由使用者管理. 容器中的 `127.0.0.1` 指容器自身, 不代表宿主机已有代理.
-
-通知在 WebUI 中按需配置, 支持 SMTP、钉钉、飞书、企业微信、PushPlus、Server 酱、Telegram、Gotify、Bark 和 Fy1Push. 保存秘密后界面使用掩码, 编辑时按表单说明保留或清除旧值. 通知密码、Webhook token、代理密码和站点凭据不应出现在 URL、运行记录或截图中. 通知失败或延迟不代表任务失败或成功, 以任务记录和站点实际结果为准.
-
-Fy1Push 在通知渠道的独立分组中配置, CLI 使用相同环境变量:
-
-| 字段 | 配置说明 |
-| --- | --- |
-| `FY1PUSH_SERVER` | 服务根 URL, 例如 `https://push.example.com`. 留空禁用该渠道. 也接受已有 `/v1/push` 后缀, 不会重复追加. 仅允许 HTTPS 或 HTTP loopback (`localhost`, `127.0.0.1`, `::1`), 路径仅允许根路径或 `/v1/push`, 不含 URL 凭据, 查询参数或片段. |
-| `FY1PUSH_TOKEN` | Fy1Push 发送 token, 通过 `Authorization: Bearer` 发送, 在数据库中作为敏感字段加密. WebUI 输入留空保留已有值, 点击清除才删除. |
-| `FY1PUSH_CHANNEL` | 可选消息分组, 留空或省略时默认 `签到`. 允许 1 至 24 个 Unicode 字母, 数字或 `-_.`. |
-
-Fy1Push 标题包含分组前缀, 合计最多 40 字符, 过长时截断. 正文超过 100 字符时截为摘要, 完整执行记录请查看 WebUI. 当前 WebUI 任务通知通常较短, 旧 CLI 的长通知可能截断. `accepted=true` 只表示 Fy1Push 服务端接收, 不代表手机已收到. 保存配置不会发送测试通知.
-
-## 数据备份与恢复
-
-配置和执行记录存放在 SQLite 中, 敏感配置与登录态加密. SQLite 中的元数据与运行状态并非全部加密, 整个数据目录仍应按私有数据保护. 明文浏览器 profile 只作为本次任务工作目录, 正常清理时删除; Compose 使用 tmpfs 避免把这部分写进持久卷.
-
-备份应同时保留数据目录或命名卷, 以及独立保存的 `master.key`. 先停止服务再复制, 避免复制到一半写入的 SQLite 文件或认证快照. 密钥与备份应分开保存, 遗失密钥无法解密既有敏感配置与登录态. 不要直接更换主密钥文件, 否则已有数据将无法读取; 当前版本没有自动密钥轮换迁移命令.
-
-加密登录态只在实际站点账号校验或独立身份验证通过后保存, 并保留上一份有效快照供恢复. 错误密钥、损坏或浏览器版本不兼容的快照会报错并拒绝覆盖. 恢复失败时先备份并保留旧数据, 不要关闭身份校验或改用明文缓存. 不同操作系统或不兼容浏览器版本之间不保证登录态可迁移, 必要时重新登录.
-
-若怀疑泄露, 应在相关站点与 OAuth 身份平台撤销会话, 再按备份和重新登录流程处理. 只删除本地缓存不会撤销服务器端会话. 密文与密钥都不应放到公开 issue 或日志中.
-
-## 导入已有配置与 CLI 兼容
-
-服务器不会隐式读取 `.env`. 可在首次配置时显式一次性导入:
+## 开发验证
 
 ```bash
-uv run --frozen python -m server --import-env .env
-```
-
-导入用于将旧账号、Identity、Provider、代理、通知和浏览器配置迁移到数据库. 在 WebUI 中检查后手动运行, 不要把包含真实秘密的 `.env` 提交到 Git. 首次 WebUI 密码与原 `CHECKIN_REMOTE_PASSWORD` 是不同用途, 旧 CLI 的 base64 `CHECKIN_STATE_KEY` 也不同于 WebUI 的原始 32 字节主密钥文件. 原 Actions 缓存没有自动迁移保证, 应保留备份, 必要时重新登录.
-
-旧命令仍保留:
-
-```bash
-# 复制 .env.example 为 .env, 按需填写真实的 CLI 配置.
-# 此命令会访问配置站点, 并可能发送已启用的通知.
-uv run --frozen checkin.py
-```
-
-CLI 的变量格式见 [.env.example](.env.example). CLI 不会读取 WebUI 数据库, 不要与 WebUI 同时使用同一明文认证工作目录或缓存. 服务器启动变量如下, 需由进程环境显式提供:
-
-| 变量 | 默认值或说明 |
-| --- | --- |
-| `CHECKIN_WEB_HOST` | `127.0.0.1`. Compose 内部显式改为 `0.0.0.0`. |
-| `CHECKIN_WEB_PORT` | `8765`. |
-| `CHECKIN_WEB_DATA_DIR` | `./server-data`. |
-| `CHECKIN_WEB_KEY_FILE` | `./server-keys/master.key`, 原始 32 字节文件. |
-| `CHECKIN_WEB_PASSWORD_FILE` | 可选, 首次密码的只读文件路径. |
-| `CHECKIN_WEB_PASSWORD` | 可选首次密码, 优先使用文件来源. |
-| `CHECKIN_AUTH_ROOT` | 临时明文认证目录, Compose 为 `/tmp/checkin-auth`. |
-| `CHECKIN_WEB_XVFB` | `scripts/start_server.sh` 专用, 默认 `true`, 可设 `false` 跳过 Xvfb. |
-
-Linux 原生运行且已安装 Xvfb/x11vnc/noVNC 时, 可用 `sh scripts/start_server.sh` 包装启动. 已有 `DISPLAY` 时脚本复用它, 否则创建禁用 TCP 监听的虚拟显示. 服务的人工接管能力还取决于本次任务的浏览器配置和系统依赖.
-
-## 开发检查
-
-```bash
-uv sync --frozen --dev
-uv run --frozen pytest tests/
-uv run --frozen ruff check .
+uv run --frozen pytest tests/ -q -o addopts=''
+uv run --frozen ruff check . --no-fix
 uv run --frozen ruff format --check .
-uv run --frozen mypy .
+uv run --frozen mypy . --ignore-missing-imports
 uv run --frozen bandit -r . -c pyproject.toml
 ```
 
-测试使用模拟账号与服务, 不应配置真实通知 token 或真实站点凭据. CI 不负责启动生产调度、读取生产密钥或执行真实签到. Docker 不可用时只能检查 Compose/YAML 和脚本语法, 不能将其表述为镜像构建或容器运行成功.
+Playwright 只在 dev 依赖中, 用于隔离 WebUI 测试, 不用于产品运行. 可设置 CHECKIN_BROWSER_TESTS=1 运行浏览器界面回归; CI 只安装测试浏览器并使用本地模拟服务. 不配置真实站点凭据或通知 token. GitHub Actions 仅做代码检查和模拟测试, 不运行真实签到. 自动化测试通过不表示 Any/Agent 当前线上接口、风控或奖励到账已验收.
 
-## 故障排除
+## 参考源码
 
-- 无法打开页面: 检查服务状态、端口占用和 SSH 转发. 默认只允许本机访问.
-- 密钥读取失败: 检查文件为原始 32 字节, 以及容器 UID `10001` 的读取权限. 不要用 base64 文本替代原始文件.
-- 人工接管不可用: Linux 检查 DISPLAY/Xvfb、x11vnc、noVNC 与浏览器运行模式; Windows 本地有界面模式直接操作所选浏览器, 不提供 noVNC 远程入口.
-- LinuxDo 登录表单或 CF 验证可见时保留原窗口等待人工操作. 登录后优先读取正常页面中由 Discourse 服务端预载的当前用户, 并要求页面 HTTP 200 和已登录用户控件可见. 人工登录期间不查询受保护接口, 也不再自动导航到 `/session/current.json` 或刷新页面, 避免程序触发额外的接口验证循环. 页面结构变化且无法可靠确认身份时不会保存登录态. 首次恢复检查若查询接口遇到 `403 / not_logged_in` 或 `cf-mitigated: challenge`, 仍转入原窗口的人工等待. 普通 403 以 `ACCESS_BLOCKED` 结束, 429 不自动重试. 只有确认当前平台用户并校验身份一致后才保存. 失败记录仅保留固定接口路径、状态码和响应类别, 不记录响应正文或 Cookie. 这些处理不保证 Cloudflare 放行.
-- `INVALID_BROWSER_ENGINE`: 在 `定时与浏览器` 中重新选择受支持的浏览器并保存.
-- `SYSTEM_CHROME_WINDOWS_ONLY`: 系统 Chrome 当前仅支持 Windows, Linux 请改用 CloakBrowser.
-- `SYSTEM_CHROME_NOT_INSTALLED` / `SYSTEM_CHROME_VERSION_UNAVAILABLE`: 安装或修复 Google Chrome 后重试. 不会自动改用其他浏览器或复用其登录态.
-- `OAUTH_IDENTITY_NOT_CONFIGURED`: 检查 Identity 别名、类型和 Account 关联.
-- `ACCOUNT_IDENTITY_PROXY_CONFLICT` / `SHARED_IDENTITY_PROXY_CONFLICT`: 统一同一身份的最终代理策略.
-- `ACCOUNT_MISMATCH`: 核对目标站点用户名和 ID, 不要删除校验字段接受未知账号.
-- 加密快照损坏或不兼容: 保留备份并核对密钥、操作系统与浏览器版本, 必要时重新登录.
-- `RATE_LIMITED` / `ACCESS_BLOCKED`: 等待站点限制解除或联系站点, 不自动更换代理重试.
-- HTTP 200 但业务失败: 检查任务结果和站点返回, HTTP 状态码不等于签到成功.
+- https://github.com/millylee/anyrouter-check-in
+- https://github.com/Fy1ng/newapi-ai-check-in
 
-本项目只操作本人或明确获授权的账号, 使用前请遵守相关网站条款. 贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md), 许可见 [LICENSE](LICENSE).
+当前实现已按 HTTP-only v1 范围重构, 不等同于参考仓库当前版本. 许可证见 LICENSE.

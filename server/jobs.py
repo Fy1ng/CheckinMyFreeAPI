@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import copy
 import json
-import math
 import os
-import secrets
 import signal
 import sqlite3
 import sys
@@ -17,8 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
 
-from utils.manual_login import child_environment
-from utils.secure_state import remove_owned_tree
+from server.execution_state import ExecutionState
+from utils.http_checkin import account_binding
+from utils.process_env import child_environment
 
 
 class BusyError(RuntimeError):
@@ -52,7 +50,7 @@ def acquire_file_lock(path: Path) -> BinaryIO:
 
 
 async def terminate_windows_tree(process) -> None:
-	"""Terminate the worker and its Chromium/driver descendants together."""
+	"""Terminate only the owned worker process tree."""
 	killer = await asyncio.create_subprocess_exec(
 		'taskkill',
 		'/PID',
@@ -67,12 +65,13 @@ async def terminate_windows_tree(process) -> None:
 
 
 class JobManager:
-	def __init__(self, config_store, data_dir: Path, key: bytes):
+	def __init__(self, config_store, data_dir: Path, key: bytes, *, instance_lock: BinaryIO | None = None):
 		self.config_store = config_store
 		self.data_dir = data_dir.resolve()
 		self.key = key
-		self._instance_lock: BinaryIO | None = None
-		self.acquire_instance_lock()
+		self._instance_lock = instance_lock
+		if self._instance_lock is None:
+			self.acquire_instance_lock()
 		self.db = sqlite3.connect(self.data_dir / 'webui.sqlite3')
 		self.db.executescript("""
 		CREATE TABLE IF NOT EXISTS runs (
@@ -87,6 +86,12 @@ class JobManager:
 			self.db.execute("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'checkin'")
 		if 'identity' not in columns:
 			self.db.execute('ALTER TABLE runs ADD COLUMN identity TEXT')
+		config, _ = self.config_store.load()
+		for run_id, kind in self.db.execute(
+			"SELECT id,kind FROM runs WHERE state IN ('running','awaiting_login','stopping')"
+		).fetchall():
+			if kind == 'checkin':
+				self._record_interrupted_account(self._progress(self.data_dir / f'run-{run_id}.json'), config)
 		self.db.execute(
 			"UPDATE runs SET state='interrupted',finished_at=?,error='服务重启, 请核对站点结果后再运行' WHERE state IN ('running','awaiting_login','stopping')",
 			(time.time(),),
@@ -126,33 +131,34 @@ class JobManager:
 	def status(self) -> dict:
 		runs = self.history()
 		run = runs[0] if runs else None
-		manual = self.manual if self.active_id is not None and not self.stopping else None
-		remaining = None
-		if manual and isinstance(manual.get('deadline'), (int, float)):
-			remaining = max(0, math.ceil(manual['deadline'] - time.monotonic()))
-			if remaining == 0:
-				manual = None
-		transport = manual.get('transport', 'remote') if manual else None
-		if run is not None:
-			run = dict(
-				run,
-				manual_url=f'/manual/{run["id"]}/'
-				if manual and transport == 'remote' and self.active_id == run['id']
-				else None,
-				manual_transport=transport,
-				manual_remaining_seconds=remaining,
-			)
+		config, _ = self.config_store.load()
+		state = ExecutionState(self.data_dir / 'webui.sqlite3')
+		try:
+			attention = {}
+			for account in config['accounts']:
+				pending = state.get(account['id'], account_binding(account, config))
+				if pending:
+					attention[account['id']] = pending
+		finally:
+			state.close()
 		return {
 			'running': self.active_id is not None,
 			'run': run,
+			'attention': attention,
 			'next_run_at': iso_time(self.db.execute('SELECT next_at FROM scheduler WHERE id=1').fetchone()[0]),
-			'platform': {
-				'manual_supported': sys.platform == 'win32' or (sys.platform == 'linux' and bool(os.getenv('DISPLAY'))),
-				'manual_mode': 'desktop'
-				if sys.platform == 'win32'
-				else ('remote' if sys.platform == 'linux' and os.getenv('DISPLAY') else None),
-			},
 		}
+
+	def resolve_attention(self, account_id: str, revision: int) -> None:
+		if self.active_id is not None:
+			raise BusyError('请等待当前任务结束后再解除暂停')
+		config, current = self.config_store.load()
+		if current != revision or not any(account['id'] == account_id for account in config['accounts']):
+			raise BusyError('配置已更新, 请重新读取')
+		state = ExecutionState(self.data_dir / 'webui.sqlite3')
+		try:
+			state.clear(account_id)
+		finally:
+			state.close()
 
 	def schedule_changed(self) -> None:
 		config, _ = self.config_store.load()
@@ -161,38 +167,31 @@ class JobManager:
 		self.db.execute('UPDATE scheduler SET next_at=? WHERE id=1', (next_at,))
 		self.db.commit()
 
-	async def start(self, revision: int) -> dict:
-		return await self._start(revision, kind='checkin')
-
-	async def start_identity(self, identity: str, revision: int) -> dict:
-		return await self._start(revision, kind='identity_login', identity=identity)
-
-	async def _start(self, revision: int, *, kind: str, identity: str | None = None) -> dict:
+	async def start(self, revision: int, *, trigger: str = 'manual') -> dict:
 		async with self._lock:
 			if self.active_id is not None:
 				raise BusyError('已有任务运行, 请等待完成或先停止')
 			config, current_revision = self.config_store.load()
 			if current_revision != revision:
 				raise BusyError('配置已更新, 请重新读取后运行')
-			if kind == 'identity_login':
-				if not isinstance(identity, str) or identity not in config['identities']:
-					raise BusyError('请选择已保存的登录身份')
-				config = copy.deepcopy(config)
-				config['browser']['headless'] = False
-			elif not config['accounts']:
-				raise BusyError('请先保存至少一个账号')
+			if trigger not in {'manual', 'scheduled'}:
+				raise BusyError('任务来源无效')
+			if not any(account.get('enabled', True) for account in config['accounts']):
+				raise BusyError('请先保存至少一个已启用账号')
 			cursor = self.db.execute(
 				"INSERT INTO runs(state,started_at,revision,kind,identity) VALUES ('running',?,?,?,?)",
-				(time.time(), revision, kind, identity),
+				(time.time(), revision, 'checkin', None),
 			)
 			self.db.commit()
 			assert cursor.lastrowid is not None
 			self.active_id = cursor.lastrowid
 			self.stopping = False
-			self.task = asyncio.create_task(self._execute(self.active_id, config), name='checkin-worker')
+			self.task = asyncio.create_task(
+				self._execute(self.active_id, config, trigger=trigger), name='checkin-worker'
+			)
 			return self.history()[0]
 
-	async def _execute(self, run_id: int, config: dict) -> None:
+	async def _execute(self, run_id: int, config: dict, *, trigger: str = 'manual') -> None:
 		event_file = self.data_dir / f'run-{run_id}.json'
 		try:
 			if self.stopping:
@@ -203,9 +202,6 @@ class JobManager:
 				return
 			environment = child_environment()
 			environment.update(PYTHONIOENCODING='utf-8', PYTHONUNBUFFERED='1')
-			for name in ('CLOAKBROWSER_BINARY_PATH', 'NOVNC_WEB_ROOT', 'CHECKIN_AUTH_ROOT'):
-				if os.getenv(name):
-					environment[name] = os.environ[name]
 			self.process = await asyncio.create_subprocess_exec(
 				sys.executable,
 				'-m',
@@ -224,10 +220,8 @@ class JobManager:
 				'data_dir': str(self.data_dir),
 				'event_file': str(event_file),
 				'run_id': run_id,
-				'manual_session': secrets.token_urlsafe(32),
+				'trigger': trigger,
 			}
-			kind, identity = self.db.execute('SELECT kind,identity FROM runs WHERE id=?', (run_id,)).fetchone()
-			payload.update(kind=kind, identity=identity)
 			self.process.stdin.write(json.dumps(payload).encode())
 			await self.process.stdin.drain()
 			self.process.stdin.close()
@@ -241,13 +235,20 @@ class JobManager:
 					pass
 			self._read_progress(event_file, run_id)
 			progress = self._progress(event_file)
+			terminal = progress.get('state')
 			state = (
 				'cancelled'
 				if self.stopping
 				else (
-					'succeeded' if self.process.returncode == 0 and progress.get('state') == 'succeeded' else 'failed'
+					'succeeded'
+					if self.process.returncode == 0 and terminal == 'succeeded'
+					else terminal
+					if terminal in {'needs_attention', 'uncertain', 'failed'}
+					else 'failed'
 				)
 			)
+			if state != 'succeeded':
+				self._record_interrupted_account(progress, config)
 			summary = progress.get('summary') if isinstance(progress.get('summary'), dict) else None
 			error = (
 				None
@@ -255,7 +256,7 @@ class JobManager:
 				else (
 					'任务已停止, 部分操作可能已完成, 请核对后再运行'
 					if self.stopping
-					else progress.get('error', '任务未正常完成, 请检查浏览器依赖和配置')
+					else progress.get('error', '任务未正常完成, 请检查执行记录和配置')
 				)
 			)
 			self.db.execute(
@@ -264,6 +265,7 @@ class JobManager:
 			)
 		except asyncio.CancelledError:
 			await self._terminate()
+			self._record_interrupted_account(self._progress(event_file), config)
 			self.db.execute(
 				"UPDATE runs SET state='interrupted',finished_at=?,error='服务关闭, 请核对站点结果' WHERE id=?",
 				(time.time(), run_id),
@@ -271,32 +273,12 @@ class JobManager:
 			raise
 		except Exception:
 			await self._terminate()
+			self._record_interrupted_account(self._progress(event_file), config)
 			self.db.execute(
 				"UPDATE runs SET state=?,finished_at=?,error='执行器启动或运行失败, 请核对后再运行' WHERE id=?",
 				('cancelled' if self.stopping else 'failed', time.time(), run_id),
 			)
 		finally:
-			if (
-				self.stopping
-				and event_file.exists()
-				and self.process is not None
-				and self.process.returncode is not None
-			):
-				root = Path(os.getenv('CHECKIN_AUTH_ROOT', str(self.data_dir / 'auth-live')))
-				from utils.browser_backend import browser_storage_paths
-
-				root, _ = browser_storage_paths(
-					root,
-					self.data_dir / 'auth-cache' / 'auth-state.enc',
-					config['browser'].get('engine', 'cloakbrowser'),
-				)
-				try:
-					for directory in (root / 'live', root / 'saved'):
-						remove_owned_tree(directory, root)
-				except (OSError, RuntimeError):
-					self.db.execute(
-						"UPDATE runs SET error='任务已停止, 临时认证文件清理失败, 请检查数据目录' WHERE id=?", (run_id,)
-					)
 			self.db.commit()
 			event_file.unlink(missing_ok=True)
 			self.process = None
@@ -315,11 +297,23 @@ class JobManager:
 
 	def _read_progress(self, event_file: Path, run_id: int) -> None:
 		progress = self._progress(event_file)
-		manual = progress.get('manual')
-		self.manual = manual if isinstance(manual, dict) else None
-		state = 'stopping' if self.stopping else ('awaiting_login' if self.manual else 'running')
+		state = 'stopping' if self.stopping else 'running'
 		self.db.execute('UPDATE runs SET state=? WHERE id=?', (state, run_id))
 		self.db.commit()
+
+	def _record_interrupted_account(self, progress: dict, config: dict) -> None:
+		account = next((item for item in config['accounts'] if item['id'] == progress.get('active_account')), None)
+		if account is None:
+			return
+		state = ExecutionState(self.data_dir / 'webui.sqlite3')
+		try:
+			state.record(
+				account['id'],
+				account_binding(account, config),
+				{'outcome': 'uncertain', 'reason': 'WORKER_INTERRUPTED_RESULT_UNKNOWN'},
+			)
+		finally:
+			state.close()
 
 	async def stop(self) -> bool:
 		if self.active_id is None:
@@ -372,7 +366,7 @@ class JobManager:
 				# Advance before starting: a restart or failure never creates a catch-up loop.
 				self.schedule_changed()
 				try:
-					await self.start(revision)
+					await self.start(revision, trigger='scheduled')
 				except BusyError:
 					pass
 

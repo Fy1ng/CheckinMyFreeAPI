@@ -2,7 +2,6 @@
 
 import os
 import re
-import time
 from pathlib import Path
 
 import pytest
@@ -16,34 +15,12 @@ pytestmark = pytest.mark.skipif(os.getenv('CHECKIN_BROWSER_TESTS') != '1', reaso
 
 
 @pytest.mark.asyncio
-async def test_webui_save_conflict_secret_retention_and_job_controls(monkeypatch, tmp_path):
+async def test_webui_save_conflict_secret_retention_and_job_controls(tmp_path):
 	app = create_app(tmp_path, os.urandom(32), 'synthetic-webui-password', scheduler=False)
 	service = app[SERVICE]
 	starts = []
-
-	async def start(revision):
-		starts.append(revision)
-		cursor = service.jobs.db.execute(
-			"INSERT INTO runs(state,started_at,revision) VALUES ('running',?,?)", (time.time(), revision)
-		)
-		service.jobs.db.commit()
-		service.jobs.active_id = cursor.lastrowid
-		service.jobs.manual = {'transport': 'desktop', 'deadline': time.monotonic() + 600}
-		service.jobs.db.execute("UPDATE runs SET state='awaiting_login' WHERE id=?", (service.jobs.active_id,))
-		service.jobs.db.commit()
-		return service.jobs.history()[0]
-
-	async def stop():
-		service.jobs.db.execute(
-			"UPDATE runs SET state='cancelled',finished_at=? WHERE id=?", (time.time(), service.jobs.active_id)
-		)
-		service.jobs.db.commit()
-		service.jobs.active_id = None
-		service.jobs.manual = None
-		return True
-
-	monkeypatch.setattr(service.jobs, 'start', start)
-	monkeypatch.setattr(service.jobs, 'stop', stop)
+	running = False
+	run = None
 	async with TestServer(app) as server, async_playwright() as playwright:
 		browser = await playwright.chromium.launch(
 			channel=os.getenv('CHECKIN_TEST_BROWSER_CHANNEL', 'chrome') or None, headless=True
@@ -54,11 +31,28 @@ async def test_webui_save_conflict_secret_retention_and_job_controls(monkeypatch
 			blocked = []
 
 			async def network_guard(route):
-				if route.request.url.startswith(origin + '/'):
-					await route.continue_()
-				else:
-					blocked.append(route.request.url)
+				nonlocal running, run
+				request = route.request
+				if not request.url.startswith(origin + '/'):
+					blocked.append(request.url)
 					await route.abort()
+				elif request.url == origin + '/api/status':
+					await route.fulfill(json={'running': running, 'run': run, 'next_run_at': None})
+				elif request.url == origin + '/api/runs' and request.method == 'POST':
+					assert request.headers.get('x-csrf-token')
+					starts.append(request.post_data_json['revision'])
+					running = True
+					run = {'id': 91, 'state': 'running', 'started_at': '2026-10-20T00:00:00Z'}
+					await route.fulfill(json={'run': run})
+				elif request.url == origin + '/api/runs/stop':
+					running = False
+					assert run is not None
+					run = {**run, 'state': 'cancelled'}
+					await route.fulfill(json={'stopped': True})
+				elif request.url == origin + '/api/runs':
+					await route.fulfill(json={'runs': [run] if run else []})
+				else:
+					await route.continue_()
 
 			await context.route('**/*', network_guard)
 			page = await context.new_page()
@@ -71,7 +65,7 @@ async def test_webui_save_conflict_secret_retention_and_job_controls(monkeypatch
 			await page.get_by_role('button', name='+ 添加账号', exact=True).click()
 			await page.get_by_label('认证方式').select_option('password')
 			await page.get_by_label(re.compile('^账号名称')).fill('本地模拟账号')
-			await page.get_by_label('站点登录邮箱').fill('fixture@example.test')
+			await page.get_by_label(re.compile('^站点登录账号')).fill('fixture@example.test')
 			await page.get_by_label('站点密码', exact=True).fill('fixture-site-password')
 			await expect(page.locator('#start-button')).to_be_disabled()
 			await page.get_by_role('button', name='保存配置', exact=True).click()
@@ -96,14 +90,13 @@ async def test_webui_save_conflict_secret_retention_and_job_controls(monkeypatch
 			await page.get_by_role('button', name='开始签到', exact=True).click()
 			await expect(page.locator('#stop-button')).to_be_enabled()
 			assert starts == [3]
-			await expect(page.locator('#task-hint')).to_contain_text('本机已打开的 Chromium')
-			await expect(page.locator('#task-hint')).to_contain_text('剩余约')
-			await expect(page.locator('#manual-link')).to_be_hidden()
+			await expect(page.locator('#task-hint')).to_contain_text('使用 HTTP 执行')
+			assert await page.locator('#manual-link').count() == 0
 			await expect(page.locator('#start-button')).to_be_disabled()
-			page.once('dialog', lambda dialog: dialog.accept())
 			await page.get_by_role('button', name='停止任务', exact=True).click()
 			await expect(page.locator('#start-button')).to_be_enabled()
-			assert service.jobs.history()[0]['state'] == 'cancelled'
+			assert run is not None and run['state'] == 'cancelled'
+			assert not service.jobs.history()
 			if os.getenv('CHECKIN_UI_SCREENSHOT_DIR'):
 				destination = Path(os.environ['CHECKIN_UI_SCREENSHOT_DIR'])
 				destination.mkdir(parents=True, exist_ok=True)

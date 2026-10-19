@@ -1,4 +1,3 @@
-import json
 import os
 import socket
 import subprocess
@@ -7,51 +6,6 @@ import time
 from pathlib import Path
 
 import httpx
-
-from server.__main__ import import_environment
-
-
-def test_explicit_import_preserves_legacy_accounts_and_browser_settings(tmp_path):
-	path = tmp_path / 'legacy.env'
-	path.write_text(
-		'\n'.join(
-			[
-				'ANYROUTER_ACCOUNTS='
-				+ json.dumps([{'email': 'synthetic@example.test', 'password': 'fixture-password'}]),
-				'CHECKIN_HEADLESS=true',
-				'CHECKIN_HUMANIZE=false',
-				'CHECKIN_WAIT_TIMEOUT_MS=45000',
-				'CHECKIN_MANUAL_TIMEOUT_SECONDS=300',
-				'CHECKIN_MANUAL_TOTAL_TIMEOUT_SECONDS=900',
-				'EMAIL_PASS=fixture-mail-password',
-				'CHECKIN_STATE_KEY=do-not-import-old-master-key',
-			]
-		),
-		encoding='utf-8',
-	)
-	before = dict(os.environ)
-	config = import_environment(path)
-	assert config['accounts'][0]['id'] == 'legacy-account-1'
-	assert config['accounts'][0]['password'] == 'fixture-password'
-	assert config['browser'] == {
-		'engine': 'cloakbrowser',
-		'headless': True,
-		'humanize': False,
-		'wait_timeout_ms': 45000,
-		'manual_timeout_seconds': 300,
-		'manual_total_timeout_seconds': 900,
-	}
-	assert config['notifications'] == {'EMAIL_PASS': 'fixture-mail-password'}
-	assert config['schedule']['enabled'] is False
-	assert dict(os.environ) == before
-
-
-def test_explicit_import_accepts_system_chrome_selection_without_starting_it(tmp_path):
-	path = tmp_path / 'chrome.env'
-	path.write_text('CHECKIN_BROWSER_ENGINE=chrome\n', encoding='utf-8')
-	before = dict(os.environ)
-	assert import_environment(path)['browser']['engine'] == 'chrome'
-	assert dict(os.environ) == before
 
 
 def test_cli_starts_locally_and_restores_configuration_after_restart(tmp_path):

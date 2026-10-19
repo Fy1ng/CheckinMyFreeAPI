@@ -17,6 +17,11 @@ balance_hash.txt
 .manual-login
 server-data/
 server-keys/
+webui.sqlite3
+webui.sqlite3-*
+http-result-fingerprint.txt
+service.lock
+execution.lock
 checkin_screenshots
 *.log
 *.tmp

@@ -4,20 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>AnyRouter 签到控制台</title>
+  <title>NewAPI 签到控制台</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
   <div class="page-shell">
     <header class="site-header">
-      <a class="brand" href="/" aria-label="签到控制台首页"><span class="brand-mark" aria-hidden="true">A</span><span>AnyRouter<span class="brand-caption">签到控制台</span></span></a>
-      <div class="header-end"><span class="local-tag">本地管理</span><button id="logout-button" class="button quiet" type="button" hidden>退出</button></div>
+      <a class="brand" href="/" aria-label="签到控制台首页"><span class="brand-mark" aria-hidden="true">N</span><span>NewAPI<span class="brand-caption">签到控制台</span></span></a>
+      <div class="header-end"><span class="local-tag">私有管理</span><button id="logout-button" class="button quiet" type="button" hidden>退出</button></div>
     </header>
 
     <main>
       <section id="login-view" class="login-wrap" aria-labelledby="login-title">
-        <div class="login-intro"><p class="eyebrow">LOCAL CHECK-IN</p><h1 id="login-title">你的账号,<br>在这里管理.</h1><p>配置站点和身份, 按计划执行签到.<br>需要重新登录时, 随时接管当前任务.</p></div>
+        <div class="login-intro"><p class="eyebrow">HTTP CHECK-IN</p><h1 id="login-title">你的账号,<br>在这里管理.</h1><p>支持 AnyRouter 和 AgentRouter.<br>保存账号凭据, 按计划通过 HTTP 执行.</p></div>
         <form id="login-form" class="login-card">
           <h2>进入控制台</h2><p class="muted">请输入启动服务时配置的管理密码.</p>
           <label class="field"><span class="field-label">管理密码</span><input id="login-password" type="password" autocomplete="current-password" required maxlength="512" autofocus></label>
@@ -35,7 +35,7 @@
             <div class="panel-title"><h2 id="task-title">当前任务</h2><span id="task-badge" class="badge">读取中</span></div>
             <p id="task-description" class="task-description">正在读取运行状态...</p>
             <p id="next-run" class="muted small"></p>
-            <div class="task-actions"><button id="start-button" class="button primary" type="button" disabled>开始签到</button><button id="stop-button" class="button danger-soft" type="button" disabled>停止任务</button><a id="manual-link" class="button secondary" target="_blank" rel="noopener noreferrer" hidden>人工登录</a></div>
+            <div class="task-actions"><button id="start-button" class="button primary" type="button" disabled>开始签到</button><button id="stop-button" class="button danger-soft" type="button" disabled>停止任务</button></div>
             <p id="task-hint" class="muted small"></p>
             <div id="status-error" class="load-error" hidden><span></span><button id="retry-status" class="text-button" type="button">重试状态读取</button></div>
           </div>
@@ -50,10 +50,8 @@
           <div class="config-layout">
             <nav id="config-nav" class="config-nav" aria-label="配置分类">
               <button type="button" class="nav-item active" data-tab="accounts" aria-current="page"><span>账号</span><span id="account-count" class="nav-count">0</span></button>
-              <button type="button" class="nav-item" data-tab="identities"><span>登录身份</span><span id="identity-count" class="nav-count">0</span></button>
-              <button type="button" class="nav-item" data-tab="providers"><span>自定义站点</span><span id="provider-count" class="nav-count">0</span></button>
               <button type="button" class="nav-item" data-tab="notifications"><span>通知渠道</span></button>
-              <button type="button" class="nav-item" data-tab="runtime"><span>定时与浏览器</span></button>
+              <button type="button" class="nav-item" data-tab="runtime"><span>定时与网络</span></button>
             </nav>
             <div class="config-content">
               <div id="config-error" class="empty-state" hidden><h3>配置暂不可用</h3><p></p><button id="retry-config" class="button secondary" type="button">重新读取配置</button></div>
@@ -64,7 +62,7 @@
         </section>
       </div>
     </main>
-    <footer>AnyRouter Assistant<span>配置保存和签到执行相互独立.</span></footer>
+    <footer>NewAPI Check-in<span>配置保存和签到执行相互独立.</span></footer>
   </div>
 </body>
 </html>

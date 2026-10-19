@@ -13,14 +13,12 @@ import os
 import re
 import sqlite3
 import threading
-from dataclasses import fields
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from utils.config import AccountConfig, AppConfig, IdentityConfig, ProviderConfig
 from utils.fy1push import fy1push_channel, fy1push_endpoint, validate_fy1push_token
 
 # Public UI marker; never an authentication credential.
@@ -68,12 +66,29 @@ SECRET_NOTIFICATION_ENV_NAMES = frozenset(
 	}
 )
 _TOP_LEVEL_FIELDS = frozenset(
-	{'accounts', 'identities', 'providers', 'proxy_url', 'notifications', 'schedule', 'browser'}
+	{'schema_version', 'accounts', 'proxy_url', 'notifications', 'schedule', 'http', 'webui_url'}
 )
-_ACCOUNT_FIELDS = frozenset(field.name for field in fields(AccountConfig))
-_PROVIDER_FIELDS = frozenset(field.name for field in fields(ProviderConfig)) - {'name'}
+_ACCOUNT_FIELDS = frozenset(
+	{
+		'id',
+		'name',
+		'provider',
+		'auth_type',
+		'enabled',
+		'cookies',
+		'username',
+		'password',
+		'system_access_token',
+		'api_user',
+		'expected_username',
+		'proxy',
+	}
+)
+_ACCOUNT_SECRETS = ('password', 'cookies', 'system_access_token')
 _AAD = b'anyrouter.server.configuration.v1:'
 _MAX_CONFIG_BYTES = 1024 * 1024
+_FIXED_ORIGINS = {'anyrouter': 'https://anyrouter.top', 'agentrouter': 'https://agentrouter.org'}
+_COOKIE_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
 class ConfigError(ValueError):
@@ -86,20 +101,13 @@ class ConflictError(ConfigError):
 
 def default_config() -> dict:
 	return {
+		'schema_version': 2,
 		'accounts': [],
-		'identities': {},
-		'providers': {},
 		'proxy_url': '',
 		'notifications': {},
 		'schedule': {'enabled': False, 'interval_minutes': 360},
-		'browser': {
-			'engine': 'cloakbrowser',
-			'headless': False,
-			'humanize': True,
-			'wait_timeout_ms': 60000,
-			'manual_timeout_seconds': 600,
-			'manual_total_timeout_seconds': 1800,
-		},
+		'http': {'timeout_seconds': 30},
+		'webui_url': '',
 	}
 
 
@@ -116,7 +124,7 @@ def _text(value, label: str, *, maximum: int = 8192, empty: bool = False, strip:
 	if (
 		len(result) > maximum
 		or (not result and not empty)
-		or any(ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF for char in result)
+		or any(ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF for char in value)
 	):
 		raise ConfigError(f'{label} has an invalid length or contains control characters')
 	if result == SECRET_KEEP:
@@ -191,124 +199,100 @@ def _proxy(value, label: str, *, optional: bool = True) -> str | None:
 	return server
 
 
-def _origin(value) -> str:
-	domain = _text(value, 'Provider domain', maximum=2048, strip=True)
+def _webui_origin(value) -> str:
+	if value == '':
+		return ''
+	origin = _text(value, 'WebUI URL', maximum=2048, strip=True)
 	try:
-		parsed = urlsplit(domain)
-		valid = (
-			parsed.scheme == 'https'
-			and _valid_host(parsed.hostname)
-			and parsed.username is None
-			and parsed.password is None
-			and parsed.path in {'', '/'}
-			and not parsed.query
-			and not parsed.fragment
-			and not any(char.isspace() for char in domain)
-			and '\\' not in domain
-			and not parsed.netloc.endswith(':')
-		)
-		if not valid or parsed.port == 0:
+		parsed = urlsplit(origin)
+		loopback = parsed.hostname == 'localhost'
+		if parsed.hostname:
+			try:
+				loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+			except ValueError:
+				pass
+		if (
+			parsed.scheme not in {'https', 'http'}
+			or (parsed.scheme == 'http' and not loopback)
+			or not _valid_host(parsed.hostname)
+			or parsed.username is not None
+			or parsed.password is not None
+			or parsed.path not in {'', '/'}
+			or parsed.query
+			or parsed.fragment
+			or any(char.isspace() for char in origin)
+			or '\\' in origin
+			or parsed.netloc.endswith(':')
+			or parsed.port == 0
+		):
 			raise ValueError
 	except ValueError:
-		raise ConfigError(
-			'Provider domain must be a pure HTTPS origin without credentials, paths or query parameters'
-		) from None
+		raise ConfigError('WebUI URL must be an HTTPS origin, or an HTTP loopback origin') from None
 	hostname = parsed.hostname or ''
 	hostname = f'[{hostname}]' if ':' in hostname else hostname.encode('idna').decode('ascii')
 	port = f':{parsed.port}' if parsed.port is not None else ''
 	return f'{parsed.scheme}://{hostname}{port}'
 
 
-def _path(value, *, optional: bool = False) -> str | None:
-	if value is None and optional:
-		return None
-	path = _text(value, 'Provider path', maximum=2048)
-	decoded = unquote(path)
-	if (
-		not path.startswith('/')
-		or path.startswith('//')
-		or '\\' in decoded
-		or '?' in path
-		or '#' in path
-		or decoded.startswith('//')
-		or any(part in {'.', '..'} for part in decoded.split('/'))
-		or any(ord(char) < 32 or ord(char) == 127 for char in decoded)
-	):
-		raise ConfigError('Provider paths must be absolute paths within their configured origin')
-	return path
-
-
-def _default_providers() -> dict[str, ProviderConfig]:
-	return {
-		'anyrouter': ProviderConfig(
-			name='anyrouter',
-			domain='https://anyrouter.top',
-			bypass_method='waf_cookies',
-			waf_cookie_names=['acw_tc', 'cdn_sec_tc', 'acw_sc__v2'],
-			persist_profile=True,
-		),
-		'agentrouter': ProviderConfig(
-			name='agentrouter',
-			domain='https://agentrouter.org',
-			sign_in_path=None,
-			bypass_method='waf_cookies',
-			waf_cookie_names=['acw_tc'],
-			use_proxy=True,
-		),
-	}
-
-
-def build_app_config(config: dict) -> AppConfig:
-	"""Build runtime dataclasses from already validated configuration, without environment reads."""
-	providers = _default_providers()
-	for name, settings in config['providers'].items():
-		providers[name] = ProviderConfig.from_dict(name, settings, defaults=providers.get(name))
-	return AppConfig(
-		providers=providers,
-		identities={name: IdentityConfig(**settings) for name, settings in config['identities'].items()},
-	)
-
-
-def _validate_providers(value) -> dict:
-	if not isinstance(value, dict) or len(value) > 100:
-		raise ConfigError('Providers must be an object with at most 100 entries')
-	providers = {}
-	for name, settings in value.items():
-		_alias(name, 'Provider alias')
-		provider = _object(settings, _PROVIDER_FIELDS, 'Provider')
-		provider['domain'] = _origin(provider.get('domain'))
-		for key in {'login_path', 'sign_in_path', 'user_info_path', 'status_path', 'auth_state_path'} & provider.keys():
-			provider[key] = _path(provider[key], optional=key == 'sign_in_path')
-		for key in {'use_proxy', 'persist_profile'} & provider.keys():
-			provider[key] = _boolean(provider[key], 'Provider flag')
-		if 'api_user_key' in provider:
-			header = _text(provider['api_user_key'], 'API user header', maximum=128)
-			if re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", header) is None:
-				raise ConfigError('API user header must be a valid HTTP header name')
-		if provider.get('bypass_method') is not None and provider['bypass_method'] != 'waf_cookies':
-			raise ConfigError('Provider bypass method must be waf_cookies or null')
-		if provider.get('waf_cookie_names') is not None:
-			cookies = provider['waf_cookie_names']
-			if not isinstance(cookies, list) or len(cookies) > 100:
-				raise ConfigError('WAF cookie names must be an array with at most 100 entries')
-			provider['waf_cookie_names'] = list(
-				dict.fromkeys(_text(name, 'WAF cookie name', maximum=256) for name in cookies)
+def _cookies(value) -> str:
+	if isinstance(value, dict):
+		if len(value) > 200:
+			raise ConfigError('Account cookies have too many entries')
+		parts = list(value.items())
+	else:
+		header = _text(value, 'Account cookies', maximum=65536, empty=True)
+		if not header.strip():
+			return ''
+		parts = []
+		for part in header.split(';'):
+			if not part.strip():
+				continue
+			name, separator, val = part.strip().partition('=')
+			if not separator:
+				raise ConfigError('Account cookies must contain named cookie values')
+			parts.append((name.strip(), val.strip()))
+		if len(parts) > 200:
+			raise ConfigError('Account cookies have too many entries')
+	result = []
+	seen = set()
+	for name, val in parts:
+		name = _text(name, 'Cookie name', maximum=256)
+		val = _text(val, 'Cookie value', maximum=16384, empty=True)
+		if _COOKIE_NAME.fullmatch(name) is None or name in seen:
+			raise ConfigError('Cookie names must be unique valid HTTP tokens')
+		if any(
+			not (
+				ord(char) == 33
+				or 35 <= ord(char) <= 43
+				or 45 <= ord(char) <= 58
+				or 60 <= ord(char) <= 91
+				or 93 <= ord(char) <= 126
 			)
-		if 'oauth_client_ids' in provider:
-			clients = _object(provider['oauth_client_ids'], {'github', 'linuxdo'}, 'OAuth client IDs')
-			provider['oauth_client_ids'] = {
-				kind: _text(client_id, 'OAuth client ID', maximum=512) for kind, client_id in clients.items()
-			}
-		providers[name] = provider
-	return providers
+			for char in val
+		):
+			raise ConfigError('Cookie values contain unsupported characters')
+		seen.add(name)
+		result.append(f'{name}={val}')
+	header = '; '.join(result)
+	if len(header) > 65536:
+		raise ConfigError('Account cookies exceed the maximum supported size')
+	return header
 
 
-def _validate_accounts(value, identities: dict, providers: dict[str, ProviderConfig], proxy_url: str) -> list:
+def _api_user(value) -> str:
+	if type(value) is int:
+		value = str(value)
+	user = _text(value, 'API user ID', maximum=128, empty=True, strip=True)
+	if user and (not user.isascii() or not user.isdecimal() or int(user) <= 0):
+		raise ConfigError('API user ID must be a positive integer')
+	return str(int(user)) if user else ''
+
+
+def _validate_accounts(value, proxy_url: str) -> list:
 	if not isinstance(value, list) or len(value) > 100:
 		raise ConfigError('Accounts must be an array with at most 100 entries')
 	accounts = []
 	seen = set()
-	identity_proxies: dict[str, str | None] = {}
 	for settings in value:
 		account = _object(settings, _ACCOUNT_FIELDS, 'Account')
 		account_id = _alias(account.get('id'), 'Account ID')
@@ -316,98 +300,60 @@ def _validate_accounts(value, identities: dict, providers: dict[str, ProviderCon
 			raise ConfigError('Account IDs must be unique')
 		seen.add(account_id)
 		account['id'] = account_id
-		account['provider'] = _alias(account.get('provider', 'anyrouter'), 'Account provider')
-		provider = providers.get(account['provider'])
-		if provider is None:
-			raise ConfigError('Account refers to an unknown provider')
-		for key in {'name', 'email', 'password', 'expected_username'} & account.keys():
-			account[key] = _optional_text(account[key], 'Account field')
-		if 'name' in account and not account['name']:
-			raise ConfigError('Account name must not be empty')
-		if 'api_user' in account and account['api_user'] is not None:
-			if type(account['api_user']) is int:
-				account['api_user'] = str(account['api_user'])
-			account['api_user'] = _text(account['api_user'], 'Expected API user', maximum=256)
-		cookies = account.get('cookies')
-		if isinstance(cookies, dict):
-			if len(cookies) > 200:
-				raise ConfigError('Account cookies have too many entries')
-			account['cookies'] = {
-				_text(name, 'Cookie name', maximum=256): _text(val, 'Cookie value', maximum=16384, empty=True)
-				for name, val in cookies.items()
-			}
-		elif cookies is not None:
-			account['cookies'] = _text(cookies, 'Account cookies', maximum=65536, empty=True)
-			if cookies and not any('=' in part and part.split('=', 1)[0].strip() for part in cookies.split(';')):
-				raise ConfigError('Account cookies must contain named cookie values')
+		account['name'] = _text(account.get('name', account_id), 'Account name', maximum=256)
+		provider = account.get('provider')
+		if not isinstance(provider, str) or provider not in _FIXED_ORIGINS:
+			raise ConfigError('Only AnyRouter and AgentRouter are supported')
+		auth_type = account.get('auth_type')
+		allowed = {'cookie', 'password'} if provider == 'anyrouter' else {'system_token'}
+		if not isinstance(auth_type, str) or auth_type not in allowed:
+			raise ConfigError('Account authentication is not supported by this provider')
+		account['enabled'] = _boolean(account.get('enabled', True), 'Account enabled')
+		for field in {'username', 'password', 'system_access_token', 'expected_username'} & account.keys():
+			account[field] = _text(account[field], 'Account field', maximum=8192, empty=True)
+		if 'api_user' in account:
+			account['api_user'] = _api_user(account['api_user'])
+		if 'cookies' in account:
+			account['cookies'] = _cookies(account['cookies'])
+		if account.get('system_access_token'):
+			token = account['system_access_token']
+			if not token.isascii() or any(char.isspace() for char in token):
+				raise ConfigError('System access token must be an ASCII token without whitespace')
+		mode_fields = {
+			'cookie': {'cookies'},
+			'password': {'username', 'password'},
+			'system_token': {'system_access_token'},
+		}
+		if any(
+			account.get(field)
+			for field in {'cookies', 'username', 'password', 'system_access_token'} - mode_fields[auth_type]
+		):
+			raise ConfigError('Account cannot combine different authentication credentials')
 		if 'proxy' in account:
 			account['proxy'] = _proxy(account['proxy'], 'Account proxy')
-		proxy_setting = account.get('proxy')
-		auth = account.get('auth')
-		if auth is not None:
-			auth = _object(auth, {'type', 'identity'}, 'Account OAuth')
-			if not isinstance(auth.get('type'), str) or auth['type'] not in {'linuxdo', 'github'}:
-				raise ConfigError('Account OAuth type must be linuxdo or github')
-			alias = _alias(auth.get('identity'), 'OAuth identity')
-			identity = identities.get(alias)
-			if identity is None or identity['type'] != auth['type']:
-				raise ConfigError('Account OAuth identity is missing or has a different type')
-			if not account.get('api_user') and not account.get('expected_username'):
-				raise ConfigError('OAuth requires api_user or expected_username for account binding')
-			if account.get('email') or account.get('password') or account.get('cookies'):
-				raise ConfigError('OAuth cannot be combined with cookies or password credentials')
-			if identity.get('proxy') is not None:
-				proxy_setting = identity['proxy']
-			account['auth'] = auth
-		else:
-			has_login = bool(account.get('email') and account.get('password'))
-			if not has_login and not account.get('cookies'):
-				raise ConfigError('Account requires cookies or both email and password')
-			if not has_login and not account.get('api_user'):
-				raise ConfigError('Cookie authentication requires api_user for account binding')
-		proxy = _resolve_proxy(proxy_setting, provider.use_proxy, proxy_url)
-		if auth:
-			alias = auth['identity']
-			if account.get('proxy') is not None:
-				if _resolve_proxy(account['proxy'], provider.use_proxy, proxy_url) != proxy:
-					raise ConfigError('Account and identity proxy settings conflict')
-			if alias in identity_proxies and identity_proxies[alias] != proxy:
-				raise ConfigError('Accounts sharing an identity must use the same effective proxy')
-			identity_proxies[alias] = proxy
+		if account['enabled'] and account.get('proxy') == 'default' and not proxy_url:
+			raise ConfigError('A default proxy is required by an account but no proxy URL is configured')
+		if account['enabled']:
+			if auth_type == 'password':
+				if not account.get('username') or not account.get('password'):
+					raise ConfigError('Password authentication requires username and password')
+			elif not account.get('api_user') or not account.get(
+				'cookies' if auth_type == 'cookie' else 'system_access_token'
+			):
+				raise ConfigError('Cookie and system token authentication require credentials and API user ID')
 		accounts.append(account)
 	return accounts
-
-
-def _resolve_proxy(value: str | None, use_proxy: bool, proxy_url: str) -> str | None:
-	if value == 'direct' or (value is None and not use_proxy):
-		return None
-	if value is None or value == 'default':
-		if not proxy_url:
-			raise ConfigError('A default proxy is required by an account but no proxy URL is configured')
-		return proxy_url
-	return value
 
 
 def validate_config(config: dict) -> dict:
 	"""Return a normalized independent document, or a credential-free ConfigError."""
 	data = default_config()
 	data.update(_object(config, _TOP_LEVEL_FIELDS, 'Configuration'))
-	data['providers'] = _validate_providers(data['providers'])
-	if not isinstance(data['identities'], dict) or len(data['identities']) > 100:
-		raise ConfigError('Identities must be an object with at most 100 entries')
-	identities = {}
-	for alias, settings in data['identities'].items():
-		_alias(alias, 'Identity alias')
-		identity = _object(settings, {'type', 'proxy'}, 'Identity')
-		if not isinstance(identity.get('type'), str) or identity['type'] not in {'linuxdo', 'github'}:
-			raise ConfigError('Identity type must be linuxdo or github')
-		if 'proxy' in identity:
-			identity['proxy'] = _proxy(identity['proxy'], 'Identity proxy')
-		identities[alias] = identity
-	data['identities'] = identities
+	if type(data['schema_version']) is not int or data['schema_version'] != 2:
+		raise ConfigError('Only configuration schema version 2 is supported')
 	data['proxy_url'] = '' if data['proxy_url'] == '' else _proxy(data['proxy_url'], 'Default proxy', optional=False)
-	app_config = build_app_config(data)
-	data['accounts'] = _validate_accounts(data['accounts'], identities, app_config.providers, data['proxy_url'])
+	data['accounts'] = _validate_accounts(data['accounts'], data['proxy_url'])
+	data['webui_url'] = _webui_origin(data['webui_url'])
 	notifications = _object(data['notifications'], NOTIFICATION_ENV_NAMES, 'Notifications')
 	for key, value in notifications.items():
 		notifications[key] = _text(value, 'Notification setting', maximum=8192, empty=True)
@@ -427,21 +373,13 @@ def validate_config(config: dict) -> dict:
 	schedule.update(_object(data['schedule'], set(schedule), 'Schedule'))
 	schedule['enabled'] = _boolean(schedule['enabled'], 'Schedule enabled')
 	schedule['interval_minutes'] = _integer(schedule['interval_minutes'], 'Schedule interval', 30, 10080)
-	if schedule['enabled'] and not data['accounts']:
-		raise ConfigError('An enabled schedule requires at least one account')
+	if schedule['enabled'] and not any(account['enabled'] for account in data['accounts']):
+		raise ConfigError('An enabled schedule requires at least one enabled account')
 	data['schedule'] = schedule
-	browser = default_config()['browser']
-	browser.update(_object(data['browser'], set(browser), 'Browser'))
-	if not isinstance(browser['engine'], str) or browser['engine'] not in {'cloakbrowser', 'chrome'}:
-		raise ConfigError('INVALID_BROWSER_ENGINE')
-	for key in ('headless', 'humanize'):
-		browser[key] = _boolean(browser[key], 'Browser flag')
-	browser['wait_timeout_ms'] = _integer(browser['wait_timeout_ms'], 'Browser wait timeout', 1000, 120000)
-	browser['manual_timeout_seconds'] = _integer(browser['manual_timeout_seconds'], 'Manual timeout', 30, 1800)
-	browser['manual_total_timeout_seconds'] = _integer(
-		browser['manual_total_timeout_seconds'], 'Total manual timeout', 30, 3600
-	)
-	data['browser'] = browser
+	http = default_config()['http']
+	http.update(_object(data['http'], set(http), 'HTTP settings'))
+	http['timeout_seconds'] = _integer(http['timeout_seconds'], 'HTTP timeout', 5, 120)
+	data['http'] = http
 	if len(json.dumps(data, ensure_ascii=False).encode()) > _MAX_CONFIG_BYTES:
 		raise ConfigError('Configuration exceeds the maximum supported size')
 	return data
@@ -452,14 +390,11 @@ def redact_config(config: dict) -> dict:
 	if data.get('proxy_url'):
 		data['proxy_url'] = SECRET_KEEP
 	for account in data.get('accounts', []):
-		for name in ('password', 'cookies'):
+		for name in _ACCOUNT_SECRETS:
 			if account.get(name):
 				account[name] = SECRET_KEEP
 		if account.get('proxy') not in {None, '', 'direct', 'default'}:
 			account['proxy'] = SECRET_KEEP
-	for identity in data.get('identities', {}).values():
-		if identity.get('proxy') not in {None, '', 'direct', 'default'}:
-			identity['proxy'] = SECRET_KEEP
 	for name in SECRET_NOTIFICATION_ENV_NAMES:
 		if data.get('notifications', {}).get(name):
 			data['notifications'][name] = SECRET_KEEP
@@ -481,16 +416,135 @@ def _restore_secrets(config: dict, old: dict) -> dict:
 		for account in data['accounts']:
 			if isinstance(account, dict):
 				previous = old_accounts.get(account.get('id')) if isinstance(account.get('id'), str) else None
-				for name in ('password', 'cookies', 'proxy'):
+				_restore_secret(account, previous or {}, 'proxy')
+				if previous and (account.get('provider'), account.get('auth_type')) != (
+					previous.get('provider'),
+					previous.get('auth_type'),
+				):
+					previous = None
+				for name in _ACCOUNT_SECRETS:
 					_restore_secret(account, previous or {}, name)
-	if isinstance(data.get('identities'), dict):
-		for alias, identity in data['identities'].items():
-			if isinstance(identity, dict):
-				_restore_secret(identity, old['identities'].get(alias, {}), 'proxy')
 	if isinstance(data.get('notifications'), dict):
 		for name in SECRET_NOTIFICATION_ENV_NAMES:
 			_restore_secret(data['notifications'], old['notifications'], name)
 	return data
+
+
+def _migrate_legacy(document: dict, revision: int) -> tuple[dict, dict]:
+	"""Convert supported accounts only; the caller archives the entire original ciphertext."""
+	if not isinstance(document, dict) or 'schema_version' in document:
+		raise ConfigError('Stored configuration has an unsupported schema version')
+	source_accounts = document.get('accounts', [])
+	if not isinstance(source_accounts, list) or len(source_accounts) > 100:
+		raise ConfigError('Stored accounts have an invalid format')
+	data = default_config()
+	data['proxy_url'] = document.get('proxy_url', '')
+	data['notifications'] = copy.deepcopy(document.get('notifications', {}))
+	source_schedule = document.get('schedule', {})
+	if not isinstance(source_schedule, dict):
+		raise ConfigError('Stored schedule has an invalid format')
+	interval = source_schedule.get('interval_minutes', 360)
+	data['schedule']['interval_minutes'] = _integer(interval, 'Schedule interval', 30, 10080)
+	providers = document.get('providers', {})
+	if not isinstance(providers, dict):
+		raise ConfigError('Stored providers have an invalid format')
+	omitted = 0
+	seen = set()
+	for old in source_accounts:
+		if not isinstance(old, dict):
+			raise ConfigError('Stored account has an invalid format')
+		provider = old.get('provider', 'anyrouter')
+		override = providers.get(provider, {}) if isinstance(provider, str) else {}
+		origin = (
+			override.get('domain', _FIXED_ORIGINS.get(provider, ''))
+			if isinstance(override, dict) and isinstance(provider, str)
+			else None
+		)
+		if (
+			not isinstance(provider, str)
+			or provider not in _FIXED_ORIGINS
+			or not isinstance(override, dict)
+			or not isinstance(origin, str)
+			or origin.rstrip('/') != _FIXED_ORIGINS.get(provider)
+		):
+			omitted += 1
+			continue
+		try:
+			account_id = _alias(old.get('id'), 'Account ID')
+			name = _text(old.get('name') or account_id, 'Account name', maximum=256)
+		except ConfigError:
+			omitted += 1
+			continue
+		if account_id in seen:
+			omitted += 1
+			continue
+		seen.add(account_id)
+		account: dict = {
+			'id': account_id,
+			'name': name,
+			'provider': provider,
+			'enabled': old.get('enabled', True) is True,
+			'auth_type': 'system_token' if provider == 'agentrouter' else 'cookie',
+		}
+		for field in ('api_user', 'expected_username', 'proxy'):
+			if old.get(field) is not None:
+				account[field] = copy.deepcopy(old[field])
+		if provider == 'agentrouter':
+			account['system_access_token'] = old.get('system_access_token', '')
+		elif old.get('auth'):
+			# OAuth snapshots belong to the old browser flow and must never become HTTP cookies.
+			account.update(enabled=False, cookies='')
+		elif old.get('email') or old.get('username') or old.get('password'):
+			account.update(
+				auth_type='password',
+				username=old.get('username') or old.get('email') or '',
+				password=old.get('password', ''),
+			)
+		else:
+			account['cookies'] = copy.deepcopy(old.get('cookies', ''))
+		try:
+			account = _validate_accounts([account], data['proxy_url'])[0]
+		except ConfigError:
+			# Retain the account and safe identity hints, but require setup before any request.
+			account['enabled'] = False
+			for field in (
+				'api_user',
+				'expected_username',
+				'proxy',
+				'username',
+				'password',
+				'cookies',
+				'system_access_token',
+			):
+				if field not in account:
+					continue
+				try:
+					if field == 'api_user':
+						account[field] = _api_user(account[field])
+					elif field == 'proxy':
+						account[field] = _proxy(account[field], 'Account proxy')
+					elif field == 'cookies':
+						account[field] = _cookies(account[field])
+					else:
+						account[field] = _text(account[field], 'Account field', empty=True)
+				except ConfigError:
+					account.pop(field)
+			if account.get('system_access_token') and (
+				not account['system_access_token'].isascii()
+				or any(char.isspace() for char in account['system_access_token'])
+			):
+				account.pop('system_access_token')
+			account = _validate_accounts([account], data['proxy_url'])[0]
+		data['accounts'].append(account)
+	data = validate_config(data)
+	return data, {
+		'from_schema': 1,
+		'source_revision': revision,
+		'converted_accounts': len(data['accounts']),
+		'disabled_accounts': sum(not account['enabled'] for account in data['accounts']),
+		'omitted_accounts': omitted,
+		'schedule_disabled': True,
+	}
 
 
 class ConfigStore:
@@ -521,6 +575,10 @@ class ConfigStore:
 				'id INTEGER PRIMARY KEY CHECK (id = 1), '
 				'revision INTEGER NOT NULL CHECK (revision > 0), document BLOB NOT NULL)'
 			)
+			self._connection.execute(
+				'CREATE TABLE IF NOT EXISTS config_archive ('
+				'source_revision INTEGER PRIMARY KEY, document BLOB NOT NULL, migration TEXT NOT NULL)'
+			)
 		except BaseException:
 			self._connection.close()
 			raise
@@ -545,13 +603,69 @@ class ConfigStore:
 			) from None
 		try:
 			document = json.loads(plaintext)
+			if isinstance(document, dict) and 'schema_version' not in document:
+				if revision >= 2**63 - 1:
+					raise ConfigError('Configuration revision cannot be migrated')
+				document, information = _migrate_legacy(document, revision)
+				self._connection.execute(
+					'INSERT INTO config_archive (source_revision, document, migration) VALUES (?, ?, ?)',
+					(revision, encrypted, json.dumps(information, separators=(',', ':'))),
+				)
+				revision += 1
+				self._write(document, revision)
 			return validate_config(document), revision
 		except (ValueError, TypeError, RecursionError):
 			raise ConfigError('Stored configuration is invalid; restore a trusted backup') from None
 
 	def load(self) -> tuple[dict, int]:
 		with self._lock:
-			return self._load_row()
+			self._connection.execute('BEGIN IMMEDIATE')
+			try:
+				result = self._load_row()
+				self._connection.execute('COMMIT')
+				return result
+			except BaseException:
+				self._connection.execute('ROLLBACK')
+				raise
+
+	def migration_info(self) -> dict | None:
+		"""Return credential-free migration counts, or None for a fresh schema 2 database."""
+		with self._lock:
+			self.load()
+			row = self._connection.execute(
+				'SELECT migration FROM config_archive ORDER BY source_revision DESC LIMIT 1'
+			).fetchone()
+			if row is None:
+				return None
+			try:
+				information = json.loads(row[0])
+				fields = (
+					'from_schema',
+					'source_revision',
+					'converted_accounts',
+					'disabled_accounts',
+					'omitted_accounts',
+				)
+				if (
+					not isinstance(information, dict)
+					or set(information) != {*fields, 'schedule_disabled'}
+					or any(type(information[field]) is not int or information[field] < 0 for field in fields)
+					or information['schedule_disabled'] is not True
+				):
+					raise ValueError
+			except (TypeError, ValueError, RecursionError):
+				raise ConfigError('Stored migration information is invalid') from None
+			return information
+
+	def _write(self, document: dict, revision: int) -> None:
+		nonce = os.urandom(12)
+		plaintext = json.dumps(document, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+		encrypted = nonce + self._cipher.encrypt(nonce, plaintext, _AAD + str(revision).encode('ascii'))
+		self._connection.execute(
+			'INSERT INTO config (id, revision, document) VALUES (1, ?, ?) '
+			'ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, document=excluded.document',
+			(revision, encrypted),
+		)
 
 	def public(self) -> dict:
 		config, revision = self.load()
@@ -568,14 +682,7 @@ class ConfigStore:
 					raise ConflictError('Configuration changed; reload it before saving again')
 				document = validate_config(_restore_secrets(config, old))
 				next_revision = revision + 1
-				nonce = os.urandom(12)
-				plaintext = json.dumps(document, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-				encrypted = nonce + self._cipher.encrypt(nonce, plaintext, _AAD + str(next_revision).encode('ascii'))
-				self._connection.execute(
-					'INSERT INTO config (id, revision, document) VALUES (1, ?, ?) '
-					'ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, document=excluded.document',
-					(next_revision, encrypted),
-				)
+				self._write(document, next_revision)
 				self._connection.execute('COMMIT')
 			except BaseException:
 				self._connection.execute('ROLLBACK')

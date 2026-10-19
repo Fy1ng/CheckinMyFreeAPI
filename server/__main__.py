@@ -2,7 +2,6 @@
 
 import argparse
 import getpass
-import json
 import os
 import secrets
 import sqlite3
@@ -10,47 +9,10 @@ from pathlib import Path
 
 from aiohttp import web
 
-from server.config_store import ConfigStore, default_config
-
-
-def import_environment(path: Path) -> dict:
-	from dotenv import dotenv_values
-
-	from server.config_store import NOTIFICATION_ENV_NAMES, validate_config
-
-	values = dotenv_values(path)
-	config = default_config()
-	config.update(
-		accounts=json.loads(values.get('ANYROUTER_ACCOUNTS') or '[]'),
-		identities=json.loads(values.get('CHECKIN_IDENTITIES') or '{}'),
-		providers=json.loads(values.get('PROVIDERS') or '{}'),
-		proxy_url=values.get('CHECKIN_PROXY_URL') or '',
-	)
-	for index, account in enumerate(config['accounts']):
-		account.setdefault('id', f'legacy-account-{index + 1}')
-	config['notifications'] = {name: values[name] for name in NOTIFICATION_ENV_NAMES if values.get(name)}
-	if values.get('CHECKIN_BROWSER_ENGINE') is not None:
-		config['browser']['engine'] = values['CHECKIN_BROWSER_ENGINE']
-	for field, variable in (('headless', 'CHECKIN_HEADLESS'), ('humanize', 'CHECKIN_HUMANIZE')):
-		if values.get(variable) is not None:
-			value = str(values[variable]).strip().lower()
-			if value not in {'true', '1', 'yes', 'on', 'false', '0', 'no', 'off'}:
-				raise ValueError('浏览器布尔配置格式错误')
-			config['browser'][field] = value in {'true', '1', 'yes', 'on'}
-	for field, variable in (
-		('wait_timeout_ms', 'CHECKIN_WAIT_TIMEOUT_MS'),
-		('manual_timeout_seconds', 'CHECKIN_MANUAL_TIMEOUT_SECONDS'),
-		('manual_total_timeout_seconds', 'CHECKIN_MANUAL_TOTAL_TIMEOUT_SECONDS'),
-	):
-		if values.get(variable):
-			config['browser'][field] = int(str(values[variable]))
-	return validate_config(config)
-
 
 def main() -> None:
 	parser = argparse.ArgumentParser(description='启动本机配置和调度 WebUI')
-	parser.add_argument('--import-env', type=Path, help='显式导入旧 .env 配置后启动, 已有配置不会覆盖')
-	args = parser.parse_args()
+	parser.parse_args()
 	data = Path(os.getenv('CHECKIN_WEB_DATA_DIR', 'server-data'))
 	key_path = Path(os.getenv('CHECKIN_WEB_KEY_FILE', 'server-keys/master.key'))
 	if data.is_symlink() or key_path.is_symlink():
@@ -79,16 +41,6 @@ def main() -> None:
 		password = getpass.getpass('首次设置 WebUI 密码 (至少 16 字符): ')
 		if password != getpass.getpass('再次输入 WebUI 密码: '):
 			raise SystemExit('两次密码不一致')
-	if args.import_env:
-		config = import_environment(args.import_env)
-		store = ConfigStore(db_path, key)
-		try:
-			_, revision = store.load()
-			if revision:
-				raise SystemExit('已有配置, 请通过 WebUI 编辑, 导入不会覆盖')
-			store.save(config, revision)
-		finally:
-			store.close()
 	host = os.getenv('CHECKIN_WEB_HOST', '127.0.0.1')
 	# Compose exposes the explicit container-wide bind only on the host's loopback.
 	if host not in {'127.0.0.1', '::1', '0.0.0.0'}:  # nosec B104

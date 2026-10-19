@@ -4,7 +4,6 @@ param(
     [Parameter(Mandatory = $true)][string]$TestRoot,
     [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
     [ValidateRange(1024, 65535)][int]$Port = 18765,
-    [switch]$UseSystemChrome,
     [switch]$CheckOnly
 )
 
@@ -56,10 +55,6 @@ $env:CHECKIN_WEB_PORT = [string]$Port
 $env:CHECKIN_WEB_DATA_DIR = Join-Path $testDirectory 'data'
 $env:CHECKIN_WEB_KEY_FILE = $keyFile
 $env:CHECKIN_WEB_PASSWORD_FILE = $passwordFile
-$env:CHECKIN_AUTH_ROOT = Join-Path $testDirectory 'data\auth-live'
-$env:CLOAKBROWSER_AUTO_UPDATE = 'false'
-$bundledBrowser = Join-Path $testDirectory 'browser-cache\chromium-146.0.7680.177.5\chrome.exe'
-if (Test-Path -LiteralPath $bundledBrowser) { $env:CLOAKBROWSER_BINARY_PATH = $bundledBrowser }
 $launcher = Start-Process -FilePath $python -ArgumentList '-m', 'server' -WorkingDirectory $repositoryDirectory `
     -WindowStyle Hidden -RedirectStandardOutput (Join-Path $testDirectory 'stdout.log') `
     -RedirectStandardError (Join-Path $testDirectory 'stderr.log') -PassThru
@@ -73,25 +68,8 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
     } catch { Start-Sleep -Milliseconds 200 }
 }
 if (-not $ready) { throw 'The updated WebUI did not become ready. Check stderr.log in the local test directory.' }
-if ($UseSystemChrome) {
-    $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-    $login = Invoke-RestMethod -Uri "$origin/api/login" -Method Post -Headers @{Origin = $origin} `
-        -ContentType 'application/json' -Body (@{password = $password} | ConvertTo-Json) -WebSession $session
-    $current = Invoke-RestMethod -Uri "$origin/api/config" -WebSession $session
-    $previousEngine = $current.config.browser.engine
-    $before = $current.config | ConvertTo-Json -Depth 40 -Compress
-    $current.config.browser.engine = 'chrome'
-    $saved = Invoke-RestMethod -Uri "$origin/api/config" -Method Put `
-        -Headers @{Origin = $origin; 'X-CSRF-Token' = $login.csrf} -ContentType 'application/json' `
-        -Body (@{config = $current.config; revision = $current.revision} | ConvertTo-Json -Depth 40 -Compress) -WebSession $session
-    $saved.config.browser.engine = $previousEngine
-    if (($saved.config | ConvertTo-Json -Depth 40 -Compress) -ne $before) {
-        throw 'Unexpected configuration difference. Review the saved configuration before running a task.'
-    }
-}
 if ($cacheHash -and (Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash -ne $cacheHash) {
     throw 'The previous browser snapshot changed. Review it before running a task.'
 }
 Write-Output "Updated local WebUI: $origin"
-if ($UseSystemChrome) { Write-Output 'System Chrome is selected. Existing browser state was preserved.' }
-Write-Output 'Refresh the WebUI and log in again. No identity login or check-in task was started.'
+Write-Output 'HTTP-only v1 is ready. Refresh the WebUI and review migrated accounts. No check-in task was started.'

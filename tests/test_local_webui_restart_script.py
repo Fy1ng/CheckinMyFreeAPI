@@ -92,7 +92,7 @@ $success = $false
 $failure = $null
 try {
     $null = & $Helper -TestRoot $fixture.testRoot -RepositoryRoot $fixture.repository `
-        -UseSystemChrome -CheckOnly:$CheckOnly
+        -CheckOnly:$CheckOnly
     $success = $true
 } catch { $failure = $_.Exception.Message + ' at ' + $_.InvocationInfo.PositionMessage }
 $environmentAfter = @{}
@@ -229,11 +229,7 @@ def test_idle_owned_restart_only_stops_listener_and_preserves_settings_and_snaps
 	assert [event['kind'] for event in events].index('stop') < [event['kind'] for event in events].index('start')
 	requests = _assert_no_task_endpoints(result)
 	puts = [event for event in requests if event['method'].lower() == 'put']
-	assert len(puts) == 1
-	assert puts[0]['path'] == '/api/config'
-	assert puts[0]['body']['revision'] == 12
-	expected = {**config, 'browser': {'engine': 'chrome'}}
-	assert puts[0]['body']['config'] == expected
-	assert result['stored'] == expected
+	assert puts == []
+	assert result['stored'] == config
 	assert (test_root / 'process-id').read_text().strip() == '5200'
 	assert all(path.read_bytes() == value for path, value in files.items() if path.name != 'process-id')

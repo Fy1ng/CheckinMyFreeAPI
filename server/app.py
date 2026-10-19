@@ -1,4 +1,4 @@
-"""Loopback WebUI with password sessions, CSRF checks and protected browser access."""
+"""Loopback HTTP-only WebUI with password sessions and CSRF checks."""
 
 from __future__ import annotations
 
@@ -12,22 +12,26 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
+from aiohttp import web
 
 from server.config_store import ConfigError, ConfigStore, ConflictError
-from server.identity_state import IdentityStateReader
-from server.jobs import BusyError, JobManager
-from utils.secure_state import StateError
+from server.jobs import BusyError, JobManager, acquire_file_lock
 
 STATIC_ROOT = Path(__file__).parent / 'static'
 
 
 class WebService:
 	def __init__(self, data_dir: Path, key: bytes, password: str | None, *, scheduler: bool = True):
-		self.store = ConfigStore(data_dir / 'webui.sqlite3', key)
-		self.store.load()
-		self.jobs = JobManager(self.store, data_dir, key)
-		self.identity_states = IdentityStateReader(data_dir, key)
+		lease = acquire_file_lock(data_dir / 'service.lock')
+		try:
+			self.store = ConfigStore(data_dir / 'webui.sqlite3', key)
+			self.store.load()
+			self.jobs = JobManager(self.store, data_dir, key, instance_lock=lease)
+		except BaseException:
+			if hasattr(self, 'store'):
+				self.store.close()
+			lease.close()
+			raise
 		self.db = sqlite3.connect(data_dir / 'webui.sqlite3')
 		self.db.execute(
 			'CREATE TABLE IF NOT EXISTS web_auth (id INTEGER PRIMARY KEY CHECK(id=1), salt BLOB NOT NULL, digest BLOB NOT NULL)'
@@ -44,8 +48,6 @@ class WebService:
 		self.salt, self.digest = row
 		self.sessions: dict[str, dict] = {}
 		self.attempts: list[float] = []
-		self.client: ClientSession | None = None
-		self.sockets: dict[str, set] = {}
 		self.scheduler_enabled = scheduler
 
 	def session(self, request: web.Request) -> dict | None:
@@ -71,7 +73,7 @@ class WebService:
 			public = request.path in {'/', '/app.js', '/style.css', '/api/login', '/api/session', '/healthz'}
 			if not public and session is None:
 				return web.json_response({'error': '请先登录'}, status=401)
-			if mutating and request.path != '/api/login' and not request.path.startswith('/manual/'):
+			if mutating and request.path != '/api/login':
 				if session is None or not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session['csrf']):
 					return web.json_response({'error': '页面凭据已失效, 请重新登录'}, status=403)
 			return await handler(request)
@@ -130,8 +132,6 @@ class WebService:
 
 	async def revoke(self, token: str) -> None:
 		self.sessions.pop(token, None)
-		for connection in tuple(self.sockets.pop(token, set())):
-			await connection.close(code=1001)
 
 	async def logout(self, request):
 		await self.revoke(request.cookies.get('checkin_web_session', ''))
@@ -140,7 +140,9 @@ class WebService:
 		return response
 
 	async def get_config(self, request):
-		return web.json_response(self.store.public())
+		result = self.store.public()
+		result['migration'] = self.store.migration_info()
+		return web.json_response(result)
 
 	async def save_config(self, request):
 		body = await request.json()
@@ -163,31 +165,16 @@ class WebService:
 	async def stop_run(self, request):
 		return web.json_response({'stopping': await self.jobs.stop()})
 
-	async def login_identity(self, request):
+	async def resolve_attention(self, request):
 		body = await request.json()
 		if (
 			not isinstance(body, dict)
 			or type(body.get('revision')) is not int
-			or not isinstance(body.get('identity'), str)
-			or not body['identity'].strip()
+			or not isinstance(body.get('account_id'), str)
 		):
 			raise ValueError
-		return web.json_response(
-			{'run': await self.jobs.start_identity(body['identity'], body['revision'])}, status=202
-		)
-
-	async def identities(self, request):
-		from utils.oauth import AuthError
-
-		config, _ = self.store.load()
-		try:
-			return web.json_response({'identities': await asyncio.to_thread(self.identity_states.read, config)})
-		except AuthError as error:
-			return web.json_response({'error': error.reason}, status=503)
-		except (StateError, OSError):
-			return web.json_response(
-				{'error': '无法读取身份登录状态, 请检查密钥和加密快照, 不会覆盖已有登录态'}, status=503
-			)
+		self.jobs.resolve_attention(body['account_id'], body['revision'])
+		return web.json_response({'resolved': True})
 
 	async def status(self, request):
 		return web.json_response(self.jobs.status())
@@ -202,90 +189,7 @@ class WebService:
 	async def health(self, request):
 		return web.json_response({'ok': True})
 
-	async def manual(self, request):
-		manual = self.jobs.manual
-		if (
-			self.jobs.stopping
-			or not manual
-			or manual.get('transport') == 'desktop'
-			or str(self.jobs.active_id) != request.match_info['run_id']
-		):
-			return web.Response(status=410, text='人工登录窗口已关闭')
-		origin = manual.get('url', '')
-		parsed = urlsplit(origin)
-		if parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or not parsed.port:
-			return web.Response(status=503, text='人工登录入口不可用')
-		tail = request.match_info['tail']
-		if tail.startswith('/') or '\\' in tail or '..' in tail.split('/'):
-			return web.Response(status=404)
-		if tail in {'logout', 'login'}:
-			return web.HTTPSeeOther('/')
-		upstream = origin + '/' + tail
-		if request.query_string:
-			upstream += '?' + request.query_string
-		headers = {'Origin': origin, 'Cookie': 'checkin_session=' + manual['session']}
-		assert self.client is not None
-		if request.headers.get('Upgrade', '').lower() == 'websocket':
-			async with self.client.ws_connect(upstream, headers=headers, max_msg_size=4 * 1024 * 1024) as remote:
-				connection = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024, heartbeat=20)
-				await connection.prepare(request)
-				token = request.cookies['checkin_web_session']
-				self.sockets.setdefault(token, set()).add(connection)
-
-				async def pipe(source, target):
-					async for message in source:
-						if message.type == WSMsgType.BINARY:
-							await target.send_bytes(message.data)
-						elif message.type == WSMsgType.TEXT:
-							await target.send_str(message.data)
-						else:
-							break
-
-				async def valid():
-					ended = asyncio.Event()
-					while (
-						self.session(request)
-						and self.jobs.manual
-						and self.jobs.manual.get('session') == manual['session']
-						and not self.jobs.stopping
-					):
-						try:
-							await asyncio.wait_for(ended.wait(), timeout=0.5)
-						except TimeoutError:
-							pass
-
-				tasks = [
-					asyncio.create_task(pipe(remote, connection)),
-					asyncio.create_task(pipe(connection, remote)),
-					asyncio.create_task(valid()),
-				]
-				try:
-					await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-				finally:
-					for task in tasks:
-						task.cancel()
-					await asyncio.gather(*tasks, return_exceptions=True)
-					self.sockets.get(token, set()).discard(connection)
-					await connection.close()
-				return connection
-		body = await request.read()
-		if request.content_type:
-			headers['Content-Type'] = request.content_type
-		async with self.client.request(
-			request.method, upstream, headers=headers, data=body, allow_redirects=False
-		) as response:
-			content = await response.read()
-			content_type = response.headers.get('Content-Type', 'application/octet-stream')
-			prefix = f'/manual/{self.jobs.active_id}'
-			if tail in {'', 'viewer.js'} and ('text/html' in content_type or 'javascript' in content_type):
-				text = content.decode()
-				for root in ('/viewer.js', '/assets/', '/websockify', '/resume', '/logout', '/login'):
-					text = text.replace(root, prefix + root)
-				content = text.encode()
-			return web.Response(status=response.status, body=content, headers={'Content-Type': content_type})
-
 	async def lifecycle(self, app):
-		self.client = ClientSession(timeout=ClientTimeout(total=30), trust_env=False)
 		if self.scheduler_enabled:
 			await self.jobs.open()
 		try:
@@ -294,7 +198,6 @@ class WebService:
 			for token in tuple(self.sessions):
 				await self.revoke(token)
 			await self.jobs.close()
-			await self.client.close()
 			self.store.close()
 			self.db.close()
 
@@ -319,9 +222,7 @@ def create_app(data_dir: Path, key: bytes, password: str | None = None, *, sched
 	app.router.add_put('/api/config', service.save_config)
 	app.router.add_get('/api/status', service.status)
 	app.router.add_get('/api/runs', service.runs)
-	app.router.add_get('/api/identities', service.identities)
-	app.router.add_post('/api/identities/login', service.login_identity)
 	app.router.add_post('/api/runs', service.start_run)
 	app.router.add_post('/api/runs/stop', service.stop_run)
-	app.router.add_route('*', '/manual/{run_id}/{tail:.*}', service.manual)
+	app.router.add_post('/api/accounts/resolve', service.resolve_attention)
 	return app

@@ -1,359 +1,199 @@
-"""Worker adapter contracts using disposable data and fake authentication only."""
+"""HTTP worker execution, persistent pauses, and secret-free notifications."""
 
 import asyncio
 import base64
 import copy
-import hmac
 import json
 import os
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import pytest
 
-import server.worker as worker_module
-import utils.auth_runtime as auth_module
-import utils.logging_safety as logging_module
-import utils.notify as notify_module
-from server.config_store import build_app_config, default_config
-from utils.config import AccountConfig
-from utils.oauth import AuthError, ManualLoginRequired
+from server import worker
+from server.config_store import default_config
+from server.execution_state import ExecutionState
+from utils.http_checkin import account_binding
 
 
 @pytest.fixture
-def isolated_worker(monkeypatch, tmp_path):
-	# execute() is a subprocess entry point. Give direct unit calls a detached
-	# environment mapping, and leave the real test runner's process environment intact.
-	parent_environment = os.environ
-	parent_values = dict(parent_environment)
-	monkeypatch.setattr(os, 'environ', dict(parent_values))
-	monkeypatch.setattr(logging_module, 'install_redaction', lambda: None)
-	monkeypatch.setattr(auth_module, 'ManualTakeover', auth_module.ManualTakeover)
-	monkeypatch.setattr(
-		auth_module, 'launch_login_context', AsyncMock(side_effect=AssertionError('No real browser allowed'))
-	)
+def fixture(monkeypatch, tmp_path):
+	monkeypatch.setattr(os, 'environ', dict(os.environ))
+	monkeypatch.setattr('utils.logging_safety.install_redaction', lambda: None)
 	notify = Mock()
-	monkeypatch.setattr(notify_module, 'notify', SimpleNamespace(push_message=notify))
-	key = bytes(range(32))
+	monkeypatch.setattr('utils.notify.notify.push_message', notify)
 	config = default_config()
+	config['webui_url'] = 'https://console.example.test'
 	config['accounts'] = [
 		{
-			'id': 'password-account',
-			'name': 'Synthetic password account',
-			'email': 'synthetic@example.test',
-			'password': 'synthetic-account-password',
-			'proxy': 'direct',
-		},
-		{
-			'id': 'oauth-account',
+			'id': 'main',
 			'provider': 'agentrouter',
-			'api_user': '9',
-			'expected_username': 'synthetic-user',
-			'auth': {'type': 'github', 'identity': 'main'},
-		},
+			'auth_type': 'system_token',
+			'system_access_token': 'synthetic-private-token',
+			'api_user': '42',
+			'name': 'Fixture',
+		}
 	]
-	config['identities'] = {'main': {'type': 'github', 'proxy': 'direct'}}
-	config['providers'] = {'anyrouter': {'domain': 'https://synthetic.example.test'}}
-	config['proxy_url'] = 'http://proxy.example.test:8080'
-	config['notifications'] = {'EMAIL_PASS': 'synthetic-notification-password', 'EMAIL_TO': 'recipient@example.test'}
 	payload = {
 		'config': config,
-		'key': base64.b64encode(key).decode(),
 		'data_dir': str(tmp_path),
-		'event_file': str(tmp_path / 'run-1.json'),
-		'run_id': 1,
-		'manual_session': 'synthetic-manual-session-with-at-least-32-characters',
+		'event_file': str(tmp_path / 'run.json'),
+		'key': base64.b64encode(os.urandom(32)).decode(),
 	}
-	yield SimpleNamespace(
-		payload=payload,
-		key=key,
-		notify=notify,
-		parent_environment=parent_environment,
-		parent_values=parent_values,
-	)
-	assert dict(parent_environment) == parent_values
-
-
-def install_runtime(monkeypatch, runtime, captured=None):
-	def factory(accounts, config, **kwargs):
-		if captured is not None:
-			captured.update(accounts=accounts, config=config, environment=dict(os.environ), **kwargs)
-		return runtime
-
-	monkeypatch.setattr(auth_module.AuthenticationRuntime, 'from_environment', factory)
-
-
-@pytest.mark.asyncio
-async def test_worker_converts_config_and_derives_separate_login_key(isolated_worker, monkeypatch, tmp_path):
-	fixture = isolated_worker
-	fixture.payload['config']['notifications'].update(
-		FY1PUSH_SERVER='https://push.example.test',
-		FY1PUSH_TOKEN='synthetic-fy1push-sending-token',
-		FY1PUSH_CHANNEL='签到',
-	)
-	runtime = SimpleNamespace(
-		execute=AsyncMock(return_value=(True, None, {'quota': 12.5})),
-		close=Mock(),
-	)
-	captured: dict = {}
-	install_runtime(monkeypatch, runtime, captured)
-	before = copy.deepcopy(fixture.payload)
-	assert await worker_module.execute(fixture.payload) == 0
-	assert fixture.payload == before
-	accounts = captured['accounts']
-	assert all(isinstance(account, AccountConfig) for account in accounts)
-	assert accounts[0].password == 'synthetic-account-password'
-	assert accounts[1].auth == {'type': 'github', 'identity': 'main'}
-	assert accounts[1].api_user == '9'
-	assert captured['config'] == build_app_config(fixture.payload['config'])
-	environment = captured['environment']
-	expected_state_key = hmac.digest(fixture.key, b'checkin-server-login-state-v1', 'sha256')
-	assert base64.urlsafe_b64decode(environment['CHECKIN_STATE_KEY']) == expected_state_key
-	assert expected_state_key != fixture.key
-	assert json.loads(environment['ANYROUTER_ACCOUNTS']) == fixture.payload['config']['accounts']
-	assert json.loads(environment['CHECKIN_IDENTITIES']) == fixture.payload['config']['identities']
-	assert json.loads(environment['PROVIDERS']) == fixture.payload['config']['providers']
-	assert environment['CHECKIN_PROXY_URL'] == 'http://proxy.example.test:8080'
-	assert environment['EMAIL_PASS'] == 'synthetic-notification-password'
-	assert environment['EMAIL_TO'] == 'recipient@example.test'
-	assert environment['FY1PUSH_SERVER'] == 'https://push.example.test'
-	assert environment['FY1PUSH_TOKEN'] == 'synthetic-fy1push-sending-token'
-	assert environment['FY1PUSH_CHANNEL'] == '签到'
-	assert environment['CHECKIN_MANUAL_TRANSPORT'] == 'local'
-	assert environment['CHECKIN_MANUAL_SESSION'] == fixture.payload['manual_session']
-	assert environment['CHECKIN_HEADLESS'] == 'false'
-	assert environment['CHECKIN_HUMANIZE'] == 'true'
-	assert environment['CHECKIN_WAIT_TIMEOUT_MS'] == '60000'
-	assert environment['CHECKIN_AUTH_CACHE_FILE'] == str(tmp_path / 'auth-cache' / 'auth-state.enc')
-	assert environment['CHECKIN_STATE_SCOPE'] == 'checkin-server-v1'
-	assert fixture.parent_environment is not os.environ
-	assert dict(fixture.parent_environment) == fixture.parent_values
-	runtime.close.assert_called_once()
-	progress = json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))
-	assert progress['state'] == 'succeeded'
-	assert progress['manual'] is None
-	assert progress['summary']['success_count'] == 2
-	assert progress['summary']['accounts'][0]['balance'] == 12.5
-	assert 'synthetic-account-password' not in json.dumps(progress)
-	assert 'synthetic-notification-password' not in json.dumps(progress)
-	assert fixture.key.hex() not in json.dumps(progress)
-	assert runtime.execute.await_count == len(accounts)
-	assert all(call.kwargs == {'allow_manual': True} for call in runtime.execute.await_args_list)
-	fixture.notify.assert_called_once()
+	return payload, notify
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-	('failure', 'expected_error'),
+	'outcome,expected',
 	[
-		(AuthError('SYNTHETIC_MANUAL_FAILURE'), 'SYNTHETIC_MANUAL_FAILURE'),
-		(ManualLoginRequired(), 'MANUAL_LOGIN_REQUIRED'),
+		('success', 'succeeded'),
+		('needs_credentials', 'needs_attention'),
+		('blocked', 'needs_attention'),
+		('rate_limited', 'needs_attention'),
+		('uncertain', 'uncertain'),
+		('failed', 'failed'),
 	],
 )
-async def test_headed_accounts_keep_one_continuous_attempt_and_failure_does_not_block_others(
-	isolated_worker, monkeypatch, tmp_path, failure, expected_error
-):
-	fixture = isolated_worker
-	fixture.payload['config']['accounts'].append(
-		{'id': 'third', 'email': 'third@example.test', 'password': 'synthetic'}
+async def test_http_worker_result_categories_and_private_notifications(fixture, monkeypatch, outcome, expected):
+	payload, notify = fixture
+	calls = []
+
+	class Runtime:
+		def __init__(self, config, sessions):
+			pass
+
+		async def execute(self, account):
+			calls.append(account['id'])
+			return {
+				'id': account['id'],
+				'name': account['name'],
+				'provider': account['provider'],
+				'success': outcome == 'success',
+				'outcome': outcome,
+				'reason': 'synthetic_reason',
+			}
+
+	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
+	before = copy.deepcopy(payload)
+	assert await worker.execute(payload) == (0 if outcome == 'success' else 1)
+	assert payload == before
+	progress = json.loads(open(payload['event_file'], encoding='utf-8').read())
+	assert progress['state'] == expected
+	assert calls == ['main']
+	assert 'synthetic-private-token' not in json.dumps(progress)
+	assert 'synthetic-private-token' not in str(notify.call_args_list)
+	if outcome != 'success':
+		assert 'https://console.example.test/?account=main' in notify.call_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_accounts_stay_paused_and_uncertain_requires_explicit_resolution(fixture, monkeypatch):
+	payload, notify = fixture
+	calls = []
+
+	class Runtime:
+		def __init__(self, config, sessions):
+			pass
+
+		async def execute(self, account):
+			calls.append(account['id'])
+			return {
+				'id': 'main',
+				'name': 'Fixture',
+				'provider': 'agentrouter',
+				'success': False,
+				'outcome': 'uncertain',
+				'reason': 'request_result_unknown',
+			}
+
+	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
+	assert await worker.execute(payload) == 1
+	payload['trigger'] = 'scheduled'
+	assert await worker.execute(payload) == 1
+	payload['trigger'] = 'manual'
+	assert await worker.execute(payload) == 1
+	assert calls == ['main']
+	assert notify.call_count == 1
+	payload['config']['accounts'][0]['system_access_token'] = 'changed-token-still-requires-confirmation'
+	await worker.execute(payload)
+	assert calls == ['main']
+	state = ExecutionState(worker.Path(payload['data_dir']) / 'webui.sqlite3')
+	state.clear('main')
+	state.close()
+	await worker.execute(payload)
+	assert calls == ['main', 'main']
+
+
+@pytest.mark.asyncio
+async def test_credential_update_releases_old_pause(fixture, monkeypatch):
+	payload, _ = fixture
+	state = ExecutionState(worker.Path(payload['data_dir']) / 'webui.sqlite3')
+	state.record(
+		'main',
+		account_binding(payload['config']['accounts'][0], payload['config']),
+		{'outcome': 'blocked', 'reason': 'interactive_verification_required'},
 	)
-	order = []
+	state.close()
+	payload['config']['accounts'][0]['system_access_token'] = 'replacement-private-token'
+	payload['trigger'] = 'scheduled'
+	calls = []
 
-	async def execute(account, index, *, allow_manual):
-		order.append((index, allow_manual))
-		if index == 0:
-			raise failure
-		return True, None, {'quota': index}
+	class Runtime:
+		def __init__(self, config, sessions):
+			pass
 
-	runtime = SimpleNamespace(execute=execute, close=Mock())
-	install_runtime(monkeypatch, runtime)
-	assert await worker_module.execute(fixture.payload) == 1
-	assert order == [(0, True), (1, True), (2, True)]
-	progress = json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))
-	assert progress['summary']['success_count'] == 2
-	assert [result['success'] for result in progress['summary']['accounts']] == [False, True, True]
-	assert progress['summary']['accounts'][0]['error'] == expected_error
-	assert progress['manual'] is None
-	runtime.close.assert_called_once()
+		async def execute(self, account):
+			calls.append(account['id'])
+			return {
+				'id': 'main',
+				'name': 'Fixture',
+				'provider': 'agentrouter',
+				'success': True,
+				'outcome': 'success',
+				'reason': 'user_info_requested_reward_unverified',
+			}
 
-
-@pytest.mark.asyncio
-async def test_headless_attempt_reports_manual_requirement_without_reopening_browser(
-	isolated_worker, monkeypatch, tmp_path
-):
-	fixture = isolated_worker
-	fixture.payload['config']['browser']['headless'] = True
-	order = []
-
-	async def execute(account, index, *, allow_manual):
-		order.append((index, allow_manual))
-		if index == 0:
-			raise ManualLoginRequired()
-		return True, None, {'quota': 7}
-
-	runtime = SimpleNamespace(execute=execute, close=Mock())
-	install_runtime(monkeypatch, runtime)
-	assert await worker_module.execute(fixture.payload) == 1
-	assert order == [(0, False), (1, False)]
-	progress = json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))
-	assert progress['summary']['accounts'][0]['error'] == 'MANUAL_LOGIN_REQUIRES_HEADED_BROWSER'
-	assert progress['summary']['accounts'][1]['success'] is True
-	assert progress['manual'] is None
-	runtime.close.assert_called_once()
+	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
+	assert await worker.execute(payload) == 0
+	assert calls == ['main']
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('transport', ['remote', 'desktop'])
-async def test_manual_entry_is_published_only_during_takeover(isolated_worker, monkeypatch, tmp_path, transport):
-	fixture = isolated_worker
-	inside = []
-	exited = []
+async def test_cancellation_records_uncertainty_and_does_not_retry(fixture, monkeypatch):
+	payload, _ = fixture
 
-	class FakeTakeover:
-		def __init__(self, timeout):
-			self.timeout = timeout
-			self.transport = transport
-			self.url = 'http://127.0.0.1:1234' if transport == 'remote' else ''
+	class Runtime:
+		def __init__(self, config, sessions):
+			pass
 
-		async def __aenter__(self):
-			return self
-
-		async def __aexit__(self, *args):
-			exited.append(True)
-
-	monkeypatch.setattr(worker_module, 'ManualTakeover', FakeTakeover)
-	captured: dict = {}
-	order = []
-
-	async def execute(account, index, *, allow_manual):
-		order.append((index, allow_manual))
-		assert allow_manual
-		async with auth_module.ManualTakeover(30) as takeover:
-			progress = json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))
-			inside.append(progress['manual'])
-			await captured['notify_ready'](takeover.url, account.name, takeover.timeout)
-		assert json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))['manual'] is None
-		return True, None, None
-
-	install_runtime(monkeypatch, SimpleNamespace(execute=execute, close=Mock()), captured)
-	assert await worker_module.execute(fixture.payload) == 0
-	assert order == [(0, True), (1, True)]
-	assert len(inside) == len(exited) == 2
-	assert all(manual['transport'] == transport and manual['deadline'] > 0 for manual in inside)
-	if transport == 'desktop':
-		assert all(set(manual) == {'transport', 'deadline'} for manual in inside)
-		assert fixture.payload['manual_session'] not in json.dumps(inside)
-	else:
-		assert all(manual['session'] == fixture.payload['manual_session'] for manual in inside)
-		assert all(manual['url'] == 'http://127.0.0.1:1234' for manual in inside)
-	manual_messages = [call.args[1] for call in fixture.notify.call_args_list if call.args[0] == '签到需要人工登录']
-	assert len(manual_messages) == 2
-	assert all(('本机已打开的浏览器' if transport == 'desktop' else 'WebUI') in msg for msg in manual_messages)
-	assert all(fixture.payload['manual_session'] not in msg and 'http://' not in msg for msg in manual_messages)
-	assert json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))['manual'] is None
-
-
-@pytest.mark.asyncio
-async def test_desktop_takeover_clears_event_on_cancellation_and_closes_runtime(isolated_worker, monkeypatch, tmp_path):
-	class FakeTakeover:
-		def __init__(self, timeout):
-			self.timeout = timeout
-			self.transport = 'desktop'
-			self.url = ''
-
-		async def __aenter__(self):
-			return self
-
-		async def __aexit__(self, *args):
-			return None
-
-	monkeypatch.setattr(worker_module, 'ManualTakeover', FakeTakeover)
-	monkeypatch.setattr(asyncio.get_running_loop(), 'add_signal_handler', Mock())
-
-	async def execute(account, index, *, allow_manual):
-		async with auth_module.ManualTakeover(30):
-			progress = json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))
-			assert progress['manual']['transport'] == 'desktop'
+		async def execute(self, account):
 			raise asyncio.CancelledError
 
-	runtime = SimpleNamespace(execute=execute, close=Mock())
-	install_runtime(monkeypatch, runtime)
-	assert await worker_module.main(isolated_worker.payload) == 130
-	assert json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))['manual'] is None
-	runtime.close.assert_called_once()
-	isolated_worker.notify.assert_not_called()
+	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
+	with pytest.raises(asyncio.CancelledError):
+		await worker.execute(payload)
+	state = ExecutionState(worker.Path(payload['data_dir']) / 'webui.sqlite3')
+	saved = state.get('main', account_binding(payload['config']['accounts'][0], payload['config']))
+	state.close()
+	assert saved is not None and saved['outcome'] == 'uncertain'
 
 
 @pytest.mark.asyncio
-async def test_generic_account_error_does_not_leak_exception_or_block_other_accounts(
-	isolated_worker, monkeypatch, tmp_path
-):
-	async def execute(account, index, *, allow_manual):
-		if index == 0:
-			raise RuntimeError('synthetic password and private callback token')
-		return True, None, {'quota': 7}
+async def test_unexpected_mid_account_error_pauses_instead_of_silently_replaying(fixture, monkeypatch):
+	payload, _ = fixture
+	calls = []
 
-	runtime = SimpleNamespace(execute=execute, close=Mock())
-	install_runtime(monkeypatch, runtime)
-	assert await worker_module.execute(isolated_worker.payload) == 1
-	progress = json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))
-	assert progress['summary']['accounts'][0]['error'] == 'RuntimeError'
-	assert progress['summary']['accounts'][1]['success'] is True
-	assert 'private callback token' not in json.dumps(progress)
-	runtime.close.assert_called_once()
+	class Runtime:
+		def __init__(self, config, sessions):
+			pass
 
+		async def execute(self, account):
+			calls.append(account['id'])
+			raise RuntimeError('synthetic-private-exception')
 
-@pytest.mark.asyncio
-async def test_cancellation_closes_runtime_and_main_returns_cancel_status(isolated_worker, monkeypatch):
-	monkeypatch.setattr(asyncio.get_running_loop(), 'add_signal_handler', Mock())
-	runtime = SimpleNamespace(execute=AsyncMock(side_effect=asyncio.CancelledError), close=Mock())
-	install_runtime(monkeypatch, runtime)
-	assert await worker_module.main(isolated_worker.payload) == 130
-	runtime.close.assert_called_once()
-	isolated_worker.notify.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_runtime_startup_failure_is_sanitized_by_main(isolated_worker, monkeypatch, tmp_path):
-	monkeypatch.setattr(asyncio.get_running_loop(), 'add_signal_handler', Mock())
-
-	def fail(accounts, config, **kwargs):
-		raise RuntimeError('synthetic password and token must stay private')
-
-	monkeypatch.setattr(auth_module.AuthenticationRuntime, 'from_environment', fail)
-	assert await worker_module.main(isolated_worker.payload) == 1
-	progress = json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))
-	assert progress['state'] == 'failed'
-	assert progress['manual'] is None
-	assert 'RuntimeError' in progress['error']
-	assert 'synthetic password' not in progress['error']
-	isolated_worker.notify.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_unchanged_success_skips_notification_and_changed_result_notifies(isolated_worker, monkeypatch):
-	fixture = isolated_worker
-	quota = 1
-
-	async def execute(account, index, *, allow_manual):
-		return True, None, {'quota': quota}
-
-	install_runtime(monkeypatch, SimpleNamespace(execute=execute, close=Mock()))
-	assert await worker_module.execute(fixture.payload) == 0
-	assert await worker_module.execute(fixture.payload) == 0
-	assert fixture.notify.call_count == 1
-	quota = 2
-	assert await worker_module.execute(fixture.payload) == 0
-	assert fixture.notify.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_notification_failure_does_not_invalidate_successful_checkin(isolated_worker, monkeypatch, tmp_path):
-	runtime = SimpleNamespace(execute=AsyncMock(return_value=(True, None, None)), close=Mock())
-	install_runtime(monkeypatch, runtime)
-	isolated_worker.notify.side_effect = RuntimeError('synthetic notification password')
-	assert await worker_module.execute(isolated_worker.payload) == 0
-	progress = json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))
-	assert progress['state'] == 'succeeded'
-	assert progress['summary']['notification_error'] is True
-	assert 'synthetic notification password' not in json.dumps(progress)
+	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
+	assert await worker.execute(payload) == 1
+	payload['trigger'] = 'scheduled'
+	assert await worker.execute(payload) == 1
+	assert calls == ['main']
+	assert 'synthetic-private-exception' not in open(payload['event_file'], encoding='utf-8').read()

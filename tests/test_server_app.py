@@ -1,9 +1,8 @@
-import asyncio
 import os
 
 import pytest
 import pytest_asyncio
-from aiohttp import CookieJar, WSServerHandshakeError, web
+from aiohttp import CookieJar
 from aiohttp.test_utils import TestClient, TestServer
 
 from server.app import SERVICE, create_app
@@ -75,69 +74,60 @@ async def test_login_cookie_and_limits(web_client):
 
 
 @pytest.mark.asyncio
-async def test_manual_proxy_requires_current_run_and_keeps_gateway_token_private(web_client):
-	service, client = web_client
-	await login(client)
-	assert (await client.get('/manual/1/')).status == 410
-	service.jobs.active_id = 1
-	service.jobs.manual = {'transport': 'desktop'}
-	assert (await client.get('/manual/1/')).status == 410
-	service.jobs.active_id = None
-	service.jobs.manual = None
-
-	async def viewer(request):
-		assert request.headers['Cookie'] == 'checkin_session=synthetic-gateway-session'
-		assert request.headers['Origin'].startswith('http://127.0.0.1:')
-		return web.Response(text='<script src="/viewer.js"></script>', content_type='text/html')
-
-	upstream = web.Application()
-	upstream.router.add_get('/', viewer)
-	async with TestServer(upstream) as gateway:
-		service.jobs.active_id = 1
-		service.jobs.manual = {'url': str(gateway.make_url('')).rstrip('/'), 'session': 'synthetic-gateway-session'}
-		assert (await client.get('/manual/2/')).status == 410
-		response = await client.get('/manual/1/')
-		assert response.status == 200
-		assert '/manual/1/viewer.js' in await response.text()
-		assert 'synthetic-gateway-session' not in str(response.headers)
-		service.jobs.stopping = True
-		assert (await client.get('/manual/1/')).status == 410
-		service.jobs.active_id = None
+async def test_removed_browser_identity_and_custom_provider_routes_are_unavailable(web_client):
+	_, client = web_client
+	headers = await login(client)
+	assert (await client.get('/api/identities')).status == 404
+	assert (await client.post('/api/identities/login', json={}, headers=headers)).status == 404
+	assert (await client.get('/manual/1/')).status == 404
 
 
 @pytest.mark.asyncio
-async def test_manual_websocket_is_authenticated_and_logout_closes_it(web_client):
+async def test_pause_resolution_requires_auth_csrf_revision_and_saved_account(web_client):
 	service, client = web_client
-	with pytest.raises(WSServerHandshakeError):
-		await client.ws_connect('/manual/1/websockify', headers={'Origin': str(client.make_url('')).rstrip('/')})
 	headers = await login(client)
-	closed = asyncio.Event()
+	config = default_config()
+	config['accounts'] = [
+		{
+			'id': 'fixture',
+			'provider': 'agentrouter',
+			'auth_type': 'system_token',
+			'system_access_token': 'synthetic-token',
+			'api_user': '42',
+		}
+	]
+	service.store.save(config, 0)
+	assert (await client.post('/api/accounts/resolve', json={'revision': 1, 'account_id': 'fixture'})).status == 403
+	assert (
+		await client.post('/api/accounts/resolve', json={'revision': 0, 'account_id': 'fixture'}, headers=headers)
+	).status == 409
+	assert (
+		await client.post('/api/accounts/resolve', json={'revision': 1, 'account_id': 'fixture'}, headers=headers)
+	).status == 200
 
-	async def websocket(request):
-		connection = web.WebSocketResponse()
-		await connection.prepare(request)
-		try:
-			async for message in connection:
-				await connection.send_bytes(message.data)
-		finally:
-			closed.set()
-		return connection
 
-	upstream = web.Application()
-	upstream.router.add_get('/websockify', websocket)
-	async with TestServer(upstream) as gateway:
-		service.jobs.active_id = 1
-		service.jobs.manual = {'url': str(gateway.make_url('')).rstrip('/'), 'session': 'synthetic-session'}
-		with pytest.raises(WSServerHandshakeError):
-			await client.ws_connect('/manual/1/websockify', headers={'Origin': 'https://attacker.test'})
-		connection = await client.ws_connect('/manual/1/websockify', headers={'Origin': headers['Origin']})
-		await connection.send_bytes(b'fixture-vnc')
-		assert (await connection.receive(timeout=2)).data == b'fixture-vnc'
-		# Refreshing progress must not disconnect a live browser session.
-		service.jobs.manual = dict(service.jobs.manual)
-		await asyncio.sleep(0.6)
-		await connection.send_bytes(b'still-open')
-		assert (await connection.receive(timeout=2)).data == b'still-open'
-		await client.post('/api/logout', json={}, headers=headers)
-		await asyncio.wait_for(closed.wait(), timeout=2)
-		service.jobs.active_id = None
+def test_busy_instance_cannot_migrate_legacy_database(tmp_path):
+	import json
+	import sqlite3
+
+	from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+	from server.jobs import BusyError, acquire_file_lock
+
+	key, nonce = os.urandom(32), os.urandom(12)
+	document = nonce + AESGCM(key).encrypt(
+		nonce, json.dumps({'accounts': []}).encode(), b'anyrouter.server.configuration.v1:1'
+	)
+	db = sqlite3.connect(tmp_path / 'webui.sqlite3')
+	db.execute('CREATE TABLE config (id INTEGER PRIMARY KEY,revision INTEGER NOT NULL,document BLOB NOT NULL)')
+	db.execute('INSERT INTO config VALUES (1,1,?)', (document,))
+	db.commit()
+	lease = acquire_file_lock(tmp_path / 'service.lock')
+	try:
+		with pytest.raises(BusyError):
+			create_app(tmp_path, key, PASSWORD, scheduler=False)
+		assert db.execute('SELECT revision,document FROM config').fetchone() == (1, document)
+		assert not db.execute("SELECT name FROM sqlite_master WHERE name='config_archive'").fetchall()
+	finally:
+		lease.close()
+		db.close()

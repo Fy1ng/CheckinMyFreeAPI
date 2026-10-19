@@ -4,7 +4,6 @@ services:
     init: true
     restart: unless-stopped
     stop_grace_period: 30s
-    shm_size: 1gb
     ports:
       - "127.0.0.1:8765:8765"
     environment:
@@ -13,9 +12,6 @@ services:
       CHECKIN_WEB_DATA_DIR: /data
       CHECKIN_WEB_KEY_FILE: /keys/master.key
       CHECKIN_WEB_PASSWORD_FILE: /run/secrets/web-password
-      CHECKIN_AUTH_ROOT: /tmp/checkin-auth
-      CHECKIN_HEADLESS: "false"
-      CLOAKBROWSER_AUTO_UPDATE: "false"
     volumes:
       - checkin-data:/data
       - type: bind
@@ -30,8 +26,6 @@ services:
         read_only: true
         bind:
           create_host_path: false
-    tmpfs:
-      - /tmp/checkin-auth:rw,noexec,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700
 
 volumes:
   checkin-data:

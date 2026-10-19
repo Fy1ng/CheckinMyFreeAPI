@@ -85,7 +85,15 @@ def configured_store(tmp_path):
 	key = os.urandom(32)
 	store = ConfigStore(tmp_path / 'webui.sqlite3', key)
 	config = default_config()
-	config['accounts'] = [{'id': 'first', 'email': 'synthetic@example.test', 'password': 'synthetic-account-password'}]
+	config['accounts'] = [
+		{
+			'id': 'first',
+			'provider': 'anyrouter',
+			'auth_type': 'password',
+			'username': 'synthetic-user',
+			'password': 'synthetic-account-password',
+		}
+	]
 	store.save(config, 0)
 	yield store, key
 	store.close()
@@ -155,7 +163,8 @@ async def test_stale_revision_rejected_and_snapshot_sent_privately(
 		assert payload['config']['accounts'][0]['password'] == 'synthetic-account-password'
 		assert store.load()[1] == 2
 		assert base64.b64decode(payload['key']) == key
-		assert len(payload['manual_session']) >= 32
+		assert payload['trigger'] == 'manual'
+		assert 'manual_session' not in payload
 		assert process.stdin.closed
 		args, options = calls[0]
 		assert args[1:] == ('-m', 'server.worker')
@@ -164,7 +173,6 @@ async def test_stale_revision_rejected_and_snapshot_sent_privately(
 		assert options['stderr'] is asyncio.subprocess.DEVNULL
 		assert 'synthetic-account-password' not in json.dumps(args)
 		assert base64.b64encode(key).decode() not in json.dumps(args)
-		assert payload['manual_session'] not in json.dumps(args)
 		for name in ('CHECKIN_SERVER_PASSWORD', 'CHECKIN_PROXY_URL', 'EMAIL_PASS', 'HTTP_PROXY', 'HTTPS_PROXY'):
 			assert name not in options['env']
 		assert dict(os.environ) == parent_environment
@@ -188,12 +196,12 @@ async def test_stop_revokes_manual_access_and_finalizes_cancelled(configured_sto
 			encoding='utf-8',
 		)
 		manager._read_progress(event_file, run['id'])
-		assert manager.history()[0]['state'] == 'awaiting_login'
-		assert manager.status()['run']['manual_url'] == f'/manual/{run["id"]}/'
+		assert manager.history()[0]['state'] == 'running'
+		assert 'manual_url' not in manager.status()['run']
 		assert 'synthetic-session' not in json.dumps(manager.status())
 		assert await manager.stop() is True
 		assert manager.manual is None
-		assert manager.status()['run']['manual_url'] is None
+		assert 'manual_url' not in manager.status()['run']
 		assert manager.task is not None
 		await manager.task
 		assert manager.history()[0]['state'] == 'cancelled'
@@ -207,30 +215,20 @@ async def test_stop_revokes_manual_access_and_finalizes_cancelled(configured_sto
 
 
 @pytest.mark.asyncio
-async def test_desktop_wait_exposes_remaining_time_without_remote_url(configured_store, tmp_path, fake_worker):
+async def test_interrupted_account_is_paused_until_explicit_resolution(configured_store, tmp_path, fake_worker):
 	store, key = configured_store
 	manager = JobManager(store, tmp_path, key)
 	process, launched, _ = fake_worker
 	try:
 		run = await manager.start(1)
 		await launched.wait()
-		event_file = tmp_path / f'run-{run["id"]}.json'
-		event_file.write_text(
-			json.dumps({'state': 'running', 'manual': {'transport': 'desktop', 'deadline': time.monotonic() + 60}}),
-			encoding='utf-8',
-		)
-		manager._read_progress(event_file, run['id'])
-		status = manager.status()
-		assert status['run']['state'] == 'awaiting_login'
-		assert status['run']['manual_url'] is None
-		assert status['run']['manual_transport'] == 'desktop'
-		assert 0 < status['run']['manual_remaining_seconds'] <= 60
-		assert manager.manual is not None
-		manager.manual['deadline'] = time.monotonic() - 1
-		assert manager.status()['run']['manual_transport'] is None
-		process.finish(1)
+		(tmp_path / f'run-{run["id"]}.json').write_text(json.dumps({'state': 'running', 'active_account': 'first'}))
+		assert await manager.stop() is True
 		assert manager.task is not None
 		await manager.task
+		assert manager.status()['attention']['first']['outcome'] == 'uncertain'
+		manager.resolve_attention('first', 1)
+		assert manager.status()['attention'] == {}
 	finally:
 		await manager.close()
 
@@ -335,6 +333,25 @@ async def test_competing_instance_cannot_rewrite_live_run_as_interrupted(configu
 		await restarted.close()
 
 
+@pytest.mark.asyncio
+async def test_restart_pauses_inflight_account_before_scheduler_can_repeat(configured_store, tmp_path):
+	store, key = configured_store
+	manager = JobManager(store, tmp_path, key)
+	manager.db.execute(
+		"INSERT INTO runs(state,started_at,revision,kind) VALUES ('running',?,1,'checkin')", (time.time(),)
+	)
+	run_id = manager.db.execute('SELECT max(id) FROM runs').fetchone()[0]
+	manager.db.commit()
+	(tmp_path / f'run-{run_id}.json').write_text(json.dumps({'active_account': 'first'}))
+	await manager.close()
+	restarted = JobManager(store, tmp_path, key)
+	try:
+		assert restarted.status()['attention']['first']['outcome'] == 'uncertain'
+		assert restarted.history()[0]['state'] == 'interrupted'
+	finally:
+		await restarted.close()
+
+
 def one_scheduler_tick(monkeypatch):
 	calls = 0
 
@@ -403,7 +420,7 @@ async def test_due_schedule_advances_before_busy_failure(configured_store, tmp_p
 	try:
 		with pytest.raises(asyncio.CancelledError):
 			await manager.scheduler()
-		start.assert_awaited_once_with(current_revision)
+		start.assert_awaited_once_with(current_revision, trigger='scheduled')
 		assert manager.db.execute('SELECT next_at FROM scheduler WHERE id=1').fetchone()[0] > time.time()
 	finally:
 		await manager.close()

@@ -1,8 +1,6 @@
 import io
 from pathlib import Path
-from unittest.mock import AsyncMock
 
-import pytest
 import yaml
 
 from utils.logging_safety import RedactingStream, redact, sensitive_values
@@ -48,12 +46,24 @@ def test_actions_never_run_real_checkin_or_receive_login_configuration():
 		assert 'secrets.CHECKIN_STATE_KEY' not in text
 
 
-@pytest.mark.asyncio
-async def test_secure_mode_never_saves_login_screenshot_even_in_debug(monkeypatch):
-	from utils.browser import save_login_screenshot
+def test_production_dependency_and_entry_points_are_browser_free():
+	import ast
+	import tomllib
 
-	monkeypatch.setenv('DEBUG_MODE', 'true')
-	monkeypatch.setenv('CHECKIN_SECURE_MODE', 'true')
-	page = AsyncMock()
-	assert await save_login_screenshot(page, 'provider', 'alias', 'login') is None
-	page.screenshot.assert_not_awaited()
+	root = Path(__file__).resolve().parent.parent
+	config = tomllib.loads((root / 'pyproject.toml').read_text(encoding='utf-8'))
+	assert not any('cloakbrowser' in item or 'playwright' in item for item in config['project']['dependencies'])
+	for folder in ('server', 'utils'):
+		for path in (root / folder).glob('*.py'):
+			tree = ast.parse(path.read_text(encoding='utf-8'))
+			for node in ast.walk(tree):
+				modules = (
+					[item.name for item in node.names]
+					if isinstance(node, ast.Import)
+					else [node.module or '']
+					if isinstance(node, ast.ImportFrom)
+					else []
+				)
+				assert not any(module.startswith(('playwright', 'cloakbrowser', 'selenium')) for module in modules)
+	docker = (root / 'Dockerfile').read_text(encoding='utf-8').lower()
+	assert all(term not in docker for term in ('chromium', 'xvfb', 'novnc', 'x11vnc', 'cloakbrowser'))

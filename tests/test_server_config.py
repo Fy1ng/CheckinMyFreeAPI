@@ -1,12 +1,14 @@
-"""Local-only configuration validation and encrypted persistence checks."""
+"""HTTP-only schema validation, migration, and encrypted persistence checks."""
 
 import ast
 import copy
+import json
 import os
 import sqlite3
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from server.config_store import (
 	NOTIFICATION_ENV_NAMES,
@@ -14,7 +16,6 @@ from server.config_store import (
 	ConfigError,
 	ConfigStore,
 	ConflictError,
-	build_app_config,
 	default_config,
 	redact_config,
 	validate_config,
@@ -22,92 +23,90 @@ from server.config_store import (
 
 
 def password_account(account_id='first', password='synthetic-password-one'):
-	return {'id': account_id, 'name': account_id, 'email': f'{account_id}@example.test', 'password': password}
+	return {
+		'id': account_id,
+		'provider': 'anyrouter',
+		'auth_type': 'password',
+		'username': f'{account_id}@example.test',
+		'password': password,
+	}
+
+
+def cookie_account(account_id='cookie'):
+	return {
+		'id': account_id,
+		'provider': 'anyrouter',
+		'auth_type': 'cookie',
+		'cookies': {'session': 'synthetic-cookie'},
+		'api_user': '7',
+	}
+
+
+def token_account(account_id='token'):
+	return {
+		'id': account_id,
+		'provider': 'agentrouter',
+		'auth_type': 'system_token',
+		'system_access_token': 'synthetic-system-token',
+		'api_user': '8',
+	}
 
 
 def populated_config():
 	config = default_config()
-	config['accounts'] = [password_account(), password_account('second', 'synthetic-password-two')]
-	config['accounts'][0]['cookies'] = {'session': 'synthetic-cookie'}
+	config['accounts'] = [password_account(), cookie_account(), token_account()]
 	config['accounts'][0]['proxy'] = 'http://user:synthetic-proxy-password@proxy.example.test:8080'
-	config['identities'] = {
-		'primary': {'type': 'linuxdo', 'proxy': 'http://identity:synthetic-id-password@proxy.test:88'}
-	}
 	config['proxy_url'] = 'https://global:synthetic-global-password@proxy.example.test:444'
 	config['notifications'] = {'EMAIL_PASS': 'synthetic-notify-password', 'EMAIL_TO': 'recipient@example.test'}
 	return config
 
 
+def legacy_database(path, key, document, revision=4):
+	nonce = os.urandom(12)
+	encrypted = nonce + AESGCM(key).encrypt(
+		nonce, json.dumps(document).encode(), b'anyrouter.server.configuration.v1:' + str(revision).encode()
+	)
+	with sqlite3.connect(path) as db:
+		db.execute('CREATE TABLE config (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, document BLOB NOT NULL)')
+		db.execute('INSERT INTO config VALUES (1, ?, ?)', (revision, encrypted))
+	return encrypted
+
+
 def test_default_is_independent_and_does_not_read_environment(monkeypatch):
 	monkeypatch.setenv('CHECKIN_PROXY_URL', 'broken')
 	monkeypatch.setenv('PROVIDERS', 'broken')
-	monkeypatch.setenv('CHECKIN_IDENTITIES', 'broken')
 	before = dict(os.environ)
 	first = default_config()
-	first['browser']['headless'] = True
-	assert default_config()['browser']['headless'] is False
+	first['http']['timeout_seconds'] = 60
+	assert default_config() == {
+		'schema_version': 2,
+		'accounts': [],
+		'proxy_url': '',
+		'notifications': {},
+		'schedule': {'enabled': False, 'interval_minutes': 360},
+		'http': {'timeout_seconds': 30},
+		'webui_url': '',
+	}
 	assert validate_config({}) == default_config()
-	assert build_app_config(default_config()).providers['agentrouter'].use_proxy is True
 	assert dict(os.environ) == before
 
 
-@pytest.mark.parametrize('engine', [None, 'cloakbrowser', 'chrome'])
-def test_browser_engine_legacy_default_and_validated_roundtrip(tmp_path, engine):
-	config = default_config()
-	if engine is None:
-		del config['browser']['engine']
-	else:
-		config['browser']['engine'] = engine
-	before = copy.deepcopy(config)
-	expected_engine = engine or 'cloakbrowser'
-	assert validate_config(config)['browser']['engine'] == expected_engine
-	assert config == before
-	path, key = tmp_path / 'config.db', os.urandom(32)
-	store = ConfigStore(path, key)
-	try:
-		public = store.save(config, 0)
-		assert public['config']['browser']['engine'] == expected_engine
-		assert public['config']['browser']['humanize'] is True
-	finally:
-		store.close()
-	reopened = ConfigStore(path, key)
-	try:
-		assert reopened.load() == (validate_config(config), 1)
-	finally:
-		reopened.close()
-
-
-@pytest.mark.parametrize('engine', [None, False, 1, [], {}, '', 'Chrome', ' chrome', 'synthetic-secret'])
-def test_invalid_browser_engine_is_rejected_without_changing_saved_configuration(tmp_path, engine):
-	store = ConfigStore(tmp_path / 'config.db', os.urandom(32))
-	try:
-		store.save(default_config(), 0)
-		config = default_config()
-		config['browser']['engine'] = engine
-		with pytest.raises(ConfigError, match='^INVALID_BROWSER_ENGINE$'):
-			store.save(config, 1)
-		assert store.load() == (default_config(), 1)
-	finally:
-		store.close()
-
-
 def test_encrypted_database_has_no_plaintext_and_reopens(tmp_path):
-	path = tmp_path / 'private' / 'config.sqlite3'
-	key = os.urandom(32)
+	path, key = tmp_path / 'private' / 'config.sqlite3', os.urandom(32)
 	store = ConfigStore(path, key)
 	assert store.load() == (default_config(), 0)
+	assert store.migration_info() is None
 	config = populated_config()
 	result = store.save(config, 0)
-	assert result['revision'] == 1
-	assert result['config'] == redact_config(validate_config(config))
+	assert result == {'revision': 1, 'config': redact_config(validate_config(config))}
 	store.close()
 	for file in path.parent.iterdir():
 		data = file.read_bytes()
 		for secret in (
 			b'synthetic-password-one',
 			b'synthetic-cookie',
+			b'synthetic-system-token',
 			b'synthetic-proxy-password',
-			b'synthetic-id-password',
 			b'synthetic-global-password',
 			b'synthetic-notify-password',
 		):
@@ -123,64 +122,58 @@ def test_encrypted_database_has_no_plaintext_and_reopens(tmp_path):
 def test_compare_and_swap_across_two_connections(tmp_path):
 	path, key = tmp_path / 'config.db', os.urandom(32)
 	first, second = ConfigStore(path, key), ConfigStore(path, key)
-	first.save(default_config(), 0)
-	with pytest.raises(ConflictError, match='changed'):
-		second.save(default_config(), 0)
-	assert second.load()[1] == 1
-	second.save(default_config(), 1)
-	assert first.load()[1] == 2
-	first.close()
-	second.close()
+	try:
+		first.save(default_config(), 0)
+		with pytest.raises(ConflictError, match='changed'):
+			second.save(default_config(), 0)
+		assert second.load()[1] == 1
+		second.save(default_config(), 1)
+		assert first.load()[1] == 2
+	finally:
+		first.close()
+		second.close()
 
 
-def test_secret_retention_is_bound_to_account_id_and_identity_alias(tmp_path):
+def test_secret_retention_is_bound_to_id_provider_and_authentication(tmp_path):
 	store = ConfigStore(tmp_path / 'config.db', os.urandom(32))
-	config = populated_config()
-	public = store.save(config, 0)
-	public['config']['accounts'].reverse()
-	public['config']['identities'] = {
-		'new': {'type': 'github', 'proxy': 'direct'},
-		'primary': public['config']['identities']['primary'],
-	}
-	store.save(public['config'], 1)
-	loaded, _ = store.load()
-	assert loaded['accounts'][0]['password'] == 'synthetic-password-two'
-	assert loaded['accounts'][1]['password'] == 'synthetic-password-one'
-	assert loaded['accounts'][1]['cookies'] == {'session': 'synthetic-cookie'}
-	assert loaded['identities']['primary'] == config['identities']['primary']
-	assert loaded['notifications'] == config['notifications']
-	assert loaded['proxy_url'] == config['proxy_url']
-	changed = store.public()['config']
-	changed['accounts'][0]['id'] = 'renamed'
-	with pytest.raises(ConfigError, match='no stored value'):
-		store.save(changed, 2)
-	assert store.load()[1] == 2
-	changed = store.public()['config']
-	changed['identities']['renamed'] = changed['identities'].pop('primary')
-	with pytest.raises(ConfigError, match='no stored value'):
-		store.save(changed, 2)
-	store.close()
+	try:
+		config = populated_config()
+		public = store.save(config, 0)['config']
+		public['accounts'].reverse()
+		store.save(public, 1)
+		assert store.load()[0] == validate_config({**config, 'accounts': list(reversed(config['accounts']))})
+		changed = store.public()['config']
+		changed['accounts'][0]['id'] = 'renamed'
+		with pytest.raises(ConfigError, match='no stored value'):
+			store.save(changed, 2)
+		changed = store.public()['config']
+		changed['accounts'][0].update(provider='anyrouter', auth_type='cookie')
+		with pytest.raises(ConfigError, match='no stored value'):
+			store.save(changed, 2)
+		assert store.load()[1] == 2
+	finally:
+		store.close()
 
 
 def test_explicit_empty_and_omission_delete_secrets(tmp_path):
 	store = ConfigStore(tmp_path / 'config.db', os.urandom(32))
-	config = populated_config()
-	public = store.save(config, 0)['config']
-	public['accounts'][0].update(password='', email='', api_user='7', proxy='direct')
-	public['proxy_url'] = ''
-	public['identities'] = {}
-	public['notifications'] = {}
-	store.save(public, 1)
-	loaded, _ = store.load()
-	assert loaded['accounts'][0]['password'] == ''
-	assert loaded['accounts'][0]['cookies'] == {'session': 'synthetic-cookie'}
-	assert loaded['accounts'][0]['proxy'] == 'direct'
-	assert loaded['proxy_url'] == ''
-	assert loaded['notifications'] == {}
-	loaded['accounts'][0] = password_account(password='replacement')
-	store.save(loaded, 2)
-	assert 'cookies' not in store.load()[0]['accounts'][0]
-	store.close()
+	try:
+		public = store.save(populated_config(), 0)['config']
+		public['accounts'][0].update(password='', enabled=False, proxy='direct')
+		public['accounts'][2].update(system_access_token='', enabled=False)
+		public['proxy_url'] = ''
+		public['notifications'] = {}
+		store.save(public, 1)
+		loaded, _ = store.load()
+		assert loaded['accounts'][0]['password'] == ''
+		assert loaded['accounts'][2]['system_access_token'] == ''
+		assert loaded['proxy_url'] == ''
+		assert loaded['notifications'] == {}
+		loaded['accounts'][0].pop('password')
+		store.save(loaded, 2)
+		assert 'password' not in store.load()[0]['accounts'][0]
+	finally:
+		store.close()
 
 
 def test_wrong_key_and_tampered_revision_never_reset_database(tmp_path):
@@ -188,31 +181,31 @@ def test_wrong_key_and_tampered_revision_never_reset_database(tmp_path):
 	store = ConfigStore(path, key)
 	store.save(populated_config(), 0)
 	wrong = ConfigStore(path, os.urandom(32))
-	for operation in (wrong.load, lambda: wrong.save(default_config(), 1)):
+	try:
+		for operation in (wrong.load, lambda: wrong.save(default_config(), 1)):
+			with pytest.raises(ConfigError, match='cannot be decrypted'):
+				operation()
+		assert store.load()[1] == 1
+		with sqlite3.connect(path) as db:
+			db.execute('UPDATE config SET revision = 2')
 		with pytest.raises(ConfigError, match='cannot be decrypted'):
-			operation()
-	wrong.close()
-	assert store.load()[1] == 1
-	with sqlite3.connect(path) as db:
-		db.execute('UPDATE config SET revision = 2')
-	with pytest.raises(ConfigError, match='cannot be decrypted'):
-		store.load()
-	store.close()
+			store.load()
+	finally:
+		wrong.close()
+		store.close()
 
 
 def test_redaction_keeps_nonsecret_flags_and_does_not_mutate():
 	config = populated_config()
-	config['accounts'][1]['proxy'] = 'default'
-	config['identities']['secondary'] = {'type': 'github', 'proxy': 'direct'}
+	config['accounts'][1]['proxy'] = 'direct'
 	before = copy.deepcopy(config)
 	public = redact_config(config)
 	assert config == before
 	assert public['accounts'][0]['password'] == SECRET_KEEP
-	assert public['accounts'][0]['cookies'] == SECRET_KEEP
+	assert public['accounts'][1]['cookies'] == SECRET_KEEP
+	assert public['accounts'][2]['system_access_token'] == SECRET_KEEP
 	assert public['accounts'][0]['proxy'] == SECRET_KEEP
-	assert public['accounts'][1]['proxy'] == 'default'
-	assert public['identities']['primary']['proxy'] == SECRET_KEEP
-	assert public['identities']['secondary']['proxy'] == 'direct'
+	assert public['accounts'][1]['proxy'] == 'direct'
 	assert public['notifications']['EMAIL_PASS'] == SECRET_KEEP
 	assert public['notifications']['EMAIL_TO'] == 'recipient@example.test'
 
@@ -233,7 +226,7 @@ def test_notification_allowlist_matches_existing_notifier():
 	assert NOTIFICATION_ENV_NAMES == read_names
 
 
-def test_fy1push_token_is_encrypted_redacted_retained_and_explicitly_cleared(tmp_path):
+def test_fy1push_token_encrypted_redacted_retained_and_explicitly_cleared(tmp_path):
 	path = tmp_path / 'config.db'
 	store = ConfigStore(path, os.urandom(32))
 	try:
@@ -241,11 +234,10 @@ def test_fy1push_token_is_encrypted_redacted_retained_and_explicitly_cleared(tmp
 		config['notifications'] = {
 			'FY1PUSH_SERVER': 'https://push.example.test',
 			'FY1PUSH_TOKEN': 'synthetic-fy1push-secret',
-			'FY1PUSH_CHANNEL': '签到',
+			'FY1PUSH_CHANNEL': 'checkin',
 		}
 		public = store.save(config, 0)
 		assert public['config']['notifications']['FY1PUSH_TOKEN'] == SECRET_KEEP
-		assert public['config']['notifications']['FY1PUSH_SERVER'] == 'https://push.example.test'
 		assert b'synthetic-fy1push-secret' not in path.read_bytes()
 		store.save(public['config'], 1)
 		assert store.load()[0]['notifications']['FY1PUSH_TOKEN'] == 'synthetic-fy1push-secret'
@@ -282,40 +274,84 @@ def test_unknown_notification_environment_is_rejected(name):
 	assert 'synthetic-secret' not in str(error.value)
 
 
-def oauth_config():
+@pytest.mark.parametrize(
+	'provider,auth_type',
+	[
+		('anyrouter', 'system_token'),
+		('agentrouter', 'cookie'),
+		('agentrouter', 'password'),
+		('anyrouter', 'github'),
+		('anyrouter', 'linuxdo'),
+		('custom', 'cookie'),
+		('https://anyrouter.top', 'cookie'),
+	],
+)
+def test_provider_and_authentication_combinations_are_restricted(provider, auth_type):
 	config = default_config()
-	config['identities'] = {'main': {'type': 'github'}}
-	config['proxy_url'] = 'http://proxy.example.test:8080'
-	config['accounts'] = [
-		{
-			'id': provider,
-			'provider': provider,
-			'expected_username': 'synthetic',
-			'auth': {'type': 'github', 'identity': 'main'},
-		}
-		for provider in ('anyrouter', 'agentrouter')
-	]
-	return config
-
-
-def test_shared_identity_requires_consistent_effective_proxy():
-	config = oauth_config()
-	with pytest.raises(ConfigError, match='same effective proxy'):
-		validate_config(config)
-	config['identities']['main']['proxy'] = 'direct'
-	assert len(validate_config(config)['accounts']) == 2
-	config['accounts'][0]['proxy'] = 'default'
-	with pytest.raises(ConfigError, match='proxy settings conflict'):
+	config['accounts'] = [{'id': 'x', 'provider': provider, 'auth_type': auth_type, 'enabled': False}]
+	with pytest.raises(ConfigError):
 		validate_config(config)
 
 
-def test_shared_identity_explicit_proxy_is_independent_of_process_env(monkeypatch):
-	config = oauth_config()
-	config['identities']['main']['proxy'] = 'default'
-	monkeypatch.setenv('CHECKIN_PROXY_URL', 'http://different.example.test:9090')
-	before = dict(os.environ)
-	assert validate_config(config) == config
-	assert dict(os.environ) == before
+@pytest.mark.parametrize(
+	'field,value',
+	[('identities', {}), ('providers', {}), ('browser', {}), ('schema_version', 1), ('schema_version', True)],
+)
+def test_legacy_settings_are_rejected_in_new_documents(field, value):
+	config = default_config()
+	config[field] = value
+	with pytest.raises(ConfigError):
+		validate_config(config)
+
+
+@pytest.mark.parametrize('account', [cookie_account(), token_account(), password_account()])
+def test_enabled_account_requires_complete_credentials_and_disabled_can_be_incomplete(account):
+	config = default_config()
+	secret = {'cookie': 'cookies', 'system_token': 'system_access_token', 'password': 'password'}[account['auth_type']]
+	account.pop(secret)
+	config['accounts'] = [account]
+	with pytest.raises(ConfigError):
+		validate_config(config)
+	account['enabled'] = False
+	assert validate_config(config)['accounts'][0]['enabled'] is False
+
+
+@pytest.mark.parametrize(
+	'cookies',
+	[
+		'session=x\r\nInjected:y',
+		'session=x; malformed',
+		'session=x; session=y',
+		{'bad name': 'x'},
+		{'session': 'x;y'},
+		{'session': 'non ascii é'},
+		{'session': 1},
+		[],
+	],
+)
+def test_cookie_headers_reject_ambiguous_or_injected_data(cookies):
+	config = default_config()
+	config['accounts'] = [{**cookie_account(), 'cookies': cookies}]
+	with pytest.raises(ConfigError):
+		validate_config(config)
+
+
+def test_cookie_and_numeric_binding_are_normalized_without_mutating_input():
+	config = default_config()
+	config['accounts'] = [{**cookie_account(), 'api_user': 7, 'cookies': ' session=abc== ; other=x; '}]
+	before = copy.deepcopy(config)
+	assert validate_config(config)['accounts'][0]['cookies'] == 'session=abc==; other=x'
+	assert validate_config(config)['accounts'][0]['api_user'] == '7'
+	assert config == before
+
+
+@pytest.mark.parametrize('value', ['x\r\nAuthorization:x', 'Bearer token', ' token ', 'é', SECRET_KEEP, {}, None])
+def test_system_access_token_rejects_invalid_values_without_reflection(value):
+	config = default_config()
+	config['accounts'] = [{**token_account(), 'system_access_token': value}]
+	with pytest.raises(ConfigError) as error:
+		validate_config(config)
+	assert 'Authorization' not in str(error.value)
 
 
 @pytest.mark.parametrize(
@@ -323,49 +359,22 @@ def test_shared_identity_explicit_proxy_is_independent_of_process_env(monkeypatc
 	[
 		lambda config: config.update(unknown='secret-value'),
 		lambda config: config.update(accounts=[password_account(), password_account()]),
-		lambda config: config.update(accounts=[{'email': 'x', 'password': 'secret-value'}]),
+		lambda config: config.update(accounts=[{'id': 'x', 'email': 'x', 'password': 'secret-value'}]),
 		lambda config: config['schedule'].update(enabled=True),
 		lambda config: config['schedule'].update(interval_minutes=29),
-		lambda config: config['browser'].update(wait_timeout_ms=999),
-		lambda config: config['browser'].update(headless='false'),
+		lambda config: config['http'].update(timeout_seconds=0),
 		lambda config: config.update(proxy_url='http://user:secret-value@proxy.test:99999'),
 		lambda config: config.update(proxy_url='socks5://user:secret-value@proxy.test:88'),
-		lambda config: config.update(providers={'custom': {'domain': 'http://example.test'}}),
-		lambda config: config.update(providers={'custom': {'domain': 'https://secret-value@example.test'}}),
-		lambda config: config.update(providers={'custom': {'domain': 'https://example.test/path'}}),
-		lambda config: config.update(
-			providers={'custom': {'domain': 'https://example.test', 'login_path': '//evil.test'}}
-		),
-		lambda config: config.update(
-			providers={'custom': {'domain': 'https://example.test', 'login_path': '/%2e%2e/x'}}
-		),
-		lambda config: config.update(
-			providers={'custom': {'domain': 'https://example.test', 'api_user_key': 'X\r\nX'}}
-		),
+		lambda config: config.update(accounts=[{**cookie_account(), 'password': 'secret-value'}]),
+		lambda config: config.update(accounts=[{**token_account(), 'api_user': 'x\r\nx'}]),
 	],
 )
-def test_invalid_values_are_rejected_without_reflecting_credentials(change):
+def test_invalid_values_rejected_without_reflecting_credentials(change):
 	config = default_config()
 	change(config)
 	with pytest.raises(ConfigError) as error:
 		validate_config(config)
 	assert 'secret-value' not in str(error.value)
-
-
-def test_provider_overrides_and_numeric_binding_normalize():
-	config = default_config()
-	config['providers'] = {
-		'anyrouter': {'domain': 'https://custom.example.test/', 'sign_in_path': None, 'use_proxy': False},
-		'custom': {'domain': 'https://new.example.test', 'login_path': '/signin'},
-	}
-	config['accounts'] = [{'id': 'cookie-account', 'api_user': 7, 'cookies': 'session=synthetic'}]
-	normalized = validate_config(config)
-	assert normalized['providers']['anyrouter']['domain'] == 'https://custom.example.test'
-	assert normalized['accounts'][0]['api_user'] == '7'
-	app = build_app_config(normalized)
-	assert app.providers['anyrouter'].persist_profile is True
-	assert app.providers['anyrouter'].sign_in_path is None
-	assert app.providers['custom'].login_path == '/signin'
 
 
 @pytest.mark.parametrize('value', [None, [], {}, False, 0, 1])
@@ -376,49 +385,172 @@ def test_invalid_global_proxy_types_are_not_silently_treated_as_empty(value):
 		validate_config(config)
 
 
-@pytest.mark.parametrize('value', [None, [], {}, False, 0, 1])
-def test_invalid_identity_and_oauth_types_raise_config_error(value):
-	config = default_config()
-	config['identities']['main'] = {'type': value}
-	with pytest.raises(ConfigError):
-		validate_config(config)
-	config = oauth_config()
-	config['accounts'][0]['auth']['type'] = value
-	with pytest.raises(ConfigError):
-		validate_config(config)
+@pytest.mark.parametrize(
+	'value', ['https://webui.example.test/', 'http://127.0.0.1:18765', 'http://[::1]:18765', 'http://localhost:18765']
+)
+def test_webui_url_allows_https_and_loopback(value):
+	config = {**default_config(), 'webui_url': value}
+	assert validate_config(config)['webui_url'] == value.rstrip('/')
 
 
 @pytest.mark.parametrize(
-	'domain',
-	['https://example.test:', 'https://bad%20host.test', 'https://bad_host.test', 'https://-bad.example.test'],
+	'value',
+	[
+		'http://server.example.test',
+		'https://user:secret@webui.test',
+		'https://webui.test/path',
+		'https://webui.test/?secret=x',
+		'javascript:alert(1)',
+		None,
+	],
 )
-def test_invalid_origin_host_is_rejected(domain):
-	config = default_config()
-	config['providers']['custom'] = {'domain': domain}
+def test_webui_url_rejects_insecure_or_credential_urls(value):
 	with pytest.raises(ConfigError):
-		validate_config(config)
+		validate_config({**default_config(), 'webui_url': value})
 
 
-def test_unicode_origin_and_scheme_are_normalized():
-	config = default_config()
-	config['providers']['custom'] = {'domain': 'HTTPS://例子.example:8443/'}
-	assert validate_config(config)['providers']['custom']['domain'] == 'https://xn--fsqu00a.example:8443'
+def test_migration_archives_original_ciphertext_and_disables_unsupported_accounts(tmp_path):
+	path, key = tmp_path / 'config.db', os.urandom(32)
+	legacy = {
+		'accounts': [
+			{'id': 'password', 'email': 'name@example.test', 'password': 'synthetic-old-password'},
+			{'id': 'cookie', 'cookies': {'session': 'synthetic-old-cookie'}, 'api_user': 7},
+			{'id': 'oauth', 'provider': 'anyrouter', 'auth': {'type': 'github', 'identity': 'main'}, 'api_user': '8'},
+			{'id': 'agent', 'provider': 'agentrouter', 'cookies': 'session=old', 'api_user': '9'},
+			{'id': 'custom', 'provider': 'custom', 'cookies': 'session=old', 'api_user': '10'},
+		],
+		'identities': {'main': {'type': 'github'}},
+		'providers': {},
+		'proxy_url': '',
+		'notifications': {'FY1PUSH_TOKEN': 'synthetic-old-notify'},
+		'browser': {'engine': 'chrome'},
+		'schedule': {'enabled': True, 'interval_minutes': 60},
+	}
+	original = legacy_database(path, key, legacy)
+	store = ConfigStore(path, key)
+	try:
+		config, revision = store.load()
+		assert revision == 5 and config['schema_version'] == 2
+		assert config['schedule'] == {'enabled': False, 'interval_minutes': 60}
+		by_id = {account['id']: account for account in config['accounts']}
+		assert by_id['password']['username'] == 'name@example.test'
+		assert by_id['password']['password'] == 'synthetic-old-password'
+		assert by_id['cookie']['cookies'] == 'session=synthetic-old-cookie'
+		assert by_id['password']['enabled'] and by_id['cookie']['enabled']
+		assert by_id['oauth']['auth_type'] == 'cookie' and not by_id['oauth']['enabled']
+		assert not by_id['oauth']['cookies']
+		assert by_id['agent']['auth_type'] == 'system_token' and not by_id['agent']['enabled']
+		assert 'cookies' not in by_id['agent']
+		assert 'custom' not in by_id
+		assert store.migration_info() == {
+			'from_schema': 1,
+			'source_revision': 4,
+			'converted_accounts': 4,
+			'disabled_accounts': 2,
+			'omitted_accounts': 1,
+			'schedule_disabled': True,
+		}
+		assert 'synthetic-' not in json.dumps(store.migration_info())
+		with sqlite3.connect(path) as db:
+			assert db.execute('SELECT source_revision, document FROM config_archive').fetchall() == [(4, original)]
+		assert store.load() == (config, 5)
+	finally:
+		store.close()
+	reopened = ConfigStore(path, key)
+	try:
+		assert reopened.load() == (config, 5)
+		assert reopened.save(reopened.public()['config'], 5)['revision'] == 6
+		with sqlite3.connect(path) as db:
+			assert db.execute('SELECT count(*) FROM config_archive').fetchone() == (1,)
+	finally:
+		reopened.close()
+
+
+def test_migration_never_relabels_custom_origin_as_fixed_provider(tmp_path):
+	path, key = tmp_path / 'config.db', os.urandom(32)
+	legacy_database(
+		path,
+		key,
+		{
+			'accounts': [
+				{'id': 'overridden', 'provider': 'anyrouter', 'cookies': 'session=synthetic', 'api_user': '7'}
+			],
+			'providers': {'anyrouter': {'domain': 'https://custom.example.test'}},
+		},
+	)
+	store = ConfigStore(path, key)
+	try:
+		assert store.load()[0]['accounts'] == []
+		information = store.migration_info()
+		assert information is not None and information['omitted_accounts'] == 1
+	finally:
+		store.close()
+
+
+def test_failed_migration_is_atomic_and_preserves_original(tmp_path):
+	path, key = tmp_path / 'config.db', os.urandom(32)
+	original = legacy_database(path, key, {'accounts': [], 'notifications': {'PATH': 'synthetic-secret'}})
+	store = ConfigStore(path, key)
+	try:
+		with pytest.raises(ConfigError):
+			store.load()
+		with sqlite3.connect(path) as db:
+			assert db.execute('SELECT revision, document FROM config').fetchone() == (4, original)
+			assert db.execute('SELECT count(*) FROM config_archive').fetchone() == (0,)
+	finally:
+		store.close()
+
+
+def test_migration_archive_and_rewrite_share_one_transaction(tmp_path, monkeypatch):
+	path, key = tmp_path / 'config.db', os.urandom(32)
+	original = legacy_database(path, key, {'accounts': []})
+	store = ConfigStore(path, key)
+	try:
+
+		def fail_write(document, revision):
+			raise sqlite3.OperationalError('synthetic write failure')
+
+		monkeypatch.setattr(store, '_write', fail_write)
+		with pytest.raises(sqlite3.OperationalError, match='synthetic write failure'):
+			store.load()
+		with sqlite3.connect(path) as db:
+			assert db.execute('SELECT revision, document FROM config').fetchone() == (4, original)
+			assert db.execute('SELECT count(*) FROM config_archive').fetchone() == (0,)
+	finally:
+		store.close()
+
+
+def test_two_connections_migrate_only_once(tmp_path):
+	path, key = tmp_path / 'config.db', os.urandom(32)
+	legacy_database(path, key, {'accounts': []})
+	first, second = ConfigStore(path, key), ConfigStore(path, key)
+	try:
+		assert first.load() == second.load() == (default_config(), 5)
+		with sqlite3.connect(path) as db:
+			assert db.execute('SELECT count(*) FROM config_archive').fetchone() == (1,)
+	finally:
+		first.close()
+		second.close()
 
 
 def test_failed_validation_rolls_back_and_preserves_previous_config(tmp_path):
 	store = ConfigStore(tmp_path / 'config.db', os.urandom(32))
-	store.save(populated_config(), 0)
-	before = store.load()
-	with pytest.raises(ConfigError):
-		store.save({'schedule': {'enabled': True}}, 1)
-	assert store.load() == before
-	assert store.save(before[0], 1)['revision'] == 2
-	store.close()
+	try:
+		store.save(populated_config(), 0)
+		before = store.load()
+		with pytest.raises(ConfigError):
+			store.save({'schedule': {'enabled': True}}, 1)
+		assert store.load() == before
+		assert store.save(before[0], 1)['revision'] == 2
+	finally:
+		store.close()
 
 
 @pytest.mark.parametrize('revision', [-1, True, '0', 2**63])
 def test_invalid_revision_is_rejected(tmp_path, revision):
 	store = ConfigStore(tmp_path / 'config.db', os.urandom(32))
-	with pytest.raises(ConfigError, match='revision'):
-		store.save(default_config(), revision)
-	store.close()
+	try:
+		with pytest.raises(ConfigError, match='revision'):
+			store.save(default_config(), revision)
+	finally:
+		store.close()
