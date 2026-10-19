@@ -398,9 +398,12 @@
     const steps = Array.isArray(account.steps) ? account.steps.filter((step) => step && typeof step === 'object') : [];
     steps.forEach((step, index) => {
       const item = view.steps.children[index] || el('li');
-      const status = ({ running: '执行中', completed: '完成', failed: '失败' })[step.state] || step.state || '';
+      const next = steps[index + 1];
+      const legacyChallenge = step.state === 'failed' && ['password_login', 'verify_identity', 'verify_result'].includes(step.stage) && next?.stage === 'acw_verification' && step.method && step.method === next.method && step.path && step.path === next.path;
+      const stepState = legacyChallenge ? 'verification_required' : step.state;
+      const status = ({ running: '执行中', completed: '完成', verification_required: '需要访问验证', failed: '失败' })[stepState] || stepState || '';
       setText(item, `${stageLabel(step.stage)}: ${status}${step.at ? ` / ${formatTime(step.at)}` : ''}${requestDetail(step) ? ` / ${requestDetail(step)}` : ''}`);
-      item.className = step.state === 'failed' ? 'step-failed' : '';
+      item.className = stepState === 'failed' ? 'step-failed' : '';
       if (!item.parentNode) view.steps.append(item);
     });
     while (view.steps.children.length > steps.length) view.steps.lastChild.remove();

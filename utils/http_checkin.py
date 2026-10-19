@@ -285,7 +285,7 @@ class HttpCheckinRuntime:
 						if method == 'POST' or side_effect
 						else 'acw_challenge_unsupported',
 					) from None
-				self._update(state='failed')
+				self._update(state='verification_required')
 				self._stage('acw_verification')
 				self._update(
 					method=method,

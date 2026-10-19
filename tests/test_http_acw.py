@@ -52,6 +52,11 @@ async def test_password_login_negotiates_acw_and_persists_cookies_for_next_execu
 		'/api/user/self',
 	]
 	assert any(event['stage'] == 'acw_verification' for event in events)
+	assert [step['state'] for step in result['steps'] if step['stage'] == 'password_login'] == [
+		'verification_required',
+		'completed',
+	]
+	assert not any(step['state'] == 'failed' for step in result['steps'])
 	assert any(step.get('request_attempt') == 2 for step in result['steps'])
 	assert {cookie['name'] for cookie in store.writes[0][2]['cookies']} >= {'session', 'acw_sc__v2', 'cdn_sec_tc'}
 	assert (await runner.execute(password()))['success'] is True
@@ -77,6 +82,26 @@ async def test_cookie_auth_refreshes_acw_on_read_without_repeating_checkin():
 	result = await runner.execute(account(cookies=COOKIE + '; acw_sc__v2=old-waf'))
 	assert result['success'] is True and len(store.writes) == 1
 	assert [request.method for request in requests] == ['GET', 'GET', 'POST', 'GET']
+
+
+async def test_wrong_password_after_acw_is_still_a_login_failure():
+	attempts = 0
+
+	def handler(request):
+		nonlocal attempts
+		attempts += 1
+		if attempts == 1:
+			return acw_response()
+		return httpx.Response(401, json={'success': False, 'message': 'incorrect password'})
+
+	runner, store, requests, _, _ = runtime(handler)
+	result = await runner.execute(password())
+	assert result['success'] is False and result['reason'] == 'credentials_rejected'
+	assert [step['state'] for step in result['steps'] if step['stage'] == 'password_login'] == [
+		'verification_required',
+		'failed',
+	]
+	assert len(requests) == 2 and not store.writes
 
 
 async def test_acw_challenge_has_three_request_limit_and_never_saves_failed_session():

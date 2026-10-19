@@ -528,6 +528,58 @@ async def test_acw_progress_attempts_and_stop_reason_are_readable_without_cookie
 		await expect(details).to_contain_text('请求 3 / 3')
 		await expect(details).to_contain_text('acw 验证 3 次')
 		await expect(details).not_to_contain_text('synthetic-sensitive-cookie')
+		await expect(details.locator('.step-failed')).to_have_count(1)
+
+
+@pytest.mark.parametrize('challenge_state', ['verification_required', 'failed'])
+@pytest.mark.asyncio
+async def test_acw_intermediate_status_is_clear_for_new_and_existing_records(tmp_path, challenge_state):
+	request = {'method': 'POST', 'path': '/api/user/login', 'http_status': 200}
+	run = {
+		'id': 39,
+		'state': 'needs_attention',
+		'summary': {
+			'accounts': [
+				{
+					'id': 'recovered',
+					'name': '恢复成功',
+					'success': True,
+					'outcome': 'success',
+					'reason': 'checkin_verified',
+					'steps': [
+						{**request, 'stage': 'password_login', 'state': challenge_state},
+						{**request, 'stage': 'acw_verification', 'state': 'completed'},
+						{**request, 'stage': 'password_login', 'state': 'completed'},
+					],
+				},
+				{
+					'id': 'wrong-password',
+					'name': '密码错误',
+					'success': False,
+					'outcome': 'needs_credentials',
+					'reason': 'credentials_rejected',
+					'steps': [
+						{**request, 'stage': 'password_login', 'state': 'failed'},
+					],
+				},
+			]
+		},
+	}
+
+	async def intercept(route, origin):
+		if route.request.url == origin + '/api/runs' and route.request.method == 'GET':
+			await route.fulfill(json={'runs': [run]})
+			return True
+		return False
+
+	async with local_ui(tmp_path, intercept) as (page, _, _):
+		details = page.locator('[data-run-id="39"] .run-details')
+		await details.locator('summary').click()
+		recovered, rejected = details.locator('.run-account').nth(0), details.locator('.run-account').nth(1)
+		await expect(recovered.locator('.run-steps li').nth(0)).to_contain_text('账号密码登录: 需要访问验证')
+		await expect(recovered.locator('.step-failed')).to_have_count(0)
+		await expect(rejected.locator('.run-steps')).to_contain_text('账号密码登录: 失败')
+		await expect(rejected.locator('.step-failed')).to_have_count(1)
 
 
 @pytest.mark.asyncio
