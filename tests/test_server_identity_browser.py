@@ -132,12 +132,17 @@ async def test_saved_cards_fold_and_oauth_selection_preserves_drafts(tmp_path):
 		await expect(new_account.get_by_label('登录身份', exact=False)).to_have_value('saved-ld')
 		await expect(page.locator('#identity-count')).to_have_text('1')
 		await new_account.get_by_label('认证方式').select_option('github')
-		await expect(new_account.get_by_label('登录身份', exact=False)).to_have_value('github-1')
-		await expect(page.locator('#identity-count')).to_have_text('2')
-		await expect(page.locator('#global-message')).to_contain_text('草稿中新建')
+		await expect(new_account.get_by_label('登录身份', exact=False)).to_have_value('')
+		await expect(new_account.locator('.card-summary')).to_contain_text('保存时自动新建身份')
+		await expect(page.locator('#identity-count')).to_have_text('1')
 		await new_account.get_by_label('认证方式').select_option('password')
 		await new_account.get_by_label('认证方式').select_option('github')
-		await expect(page.locator('#identity-count')).to_have_text('2')
+		await expect(page.locator('#identity-count')).to_have_text('1')
+		await page.locator('[data-tab="identities"]').click()
+		await page.get_by_role('button', name='+ 添加身份', exact=True).click()
+		await page.locator('.config-card').last.get_by_label('身份平台').select_option('github')
+		await page.locator('[data-tab="accounts"]').click()
+		await new_account.get_by_label('登录身份', exact=False).select_option('identity-1')
 		await new_account.get_by_role('button', name='编辑此身份', exact=True).click()
 		identity = page.locator('.config-card').last
 		await identity.get_by_label('身份别名', exact=False).fill('draft-github')
@@ -157,18 +162,41 @@ async def test_saved_cards_fold_and_oauth_selection_preserves_drafts(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_default_oauth_creates_one_identity_and_login_needs_no_account(tmp_path):
+async def test_oauth_creates_identity_only_on_save_and_login_needs_no_account(tmp_path):
 	app = create_app(tmp_path, os.urandom(32), 'synthetic-webui-password', scheduler=False)
 	service = app[SERVICE]
 	async with local_browser(app) as (page, requests, states):
 		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
-		await expect(page.get_by_label('登录身份', exact=False)).to_have_value('linuxdo-1')
-		await expect(page.locator('#identity-count')).to_have_text('1')
+		await expect(page.get_by_label('登录身份', exact=False)).to_have_value('')
+		await expect(page.locator('#identity-count')).to_have_text('0')
 		await page.get_by_role('button', name='移除account-1', exact=True).click()
-		await page.locator('[data-tab="identities"]').click()
-		await expect(page.get_by_role('button', name='先保存再登录', exact=True)).to_be_disabled()
+		await expect(page.locator('#identity-count')).to_have_text('0')
+		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+		for auth_type in ['github', 'password', 'github', 'linuxdo']:
+			await page.get_by_label('认证方式').select_option(auth_type)
+			await expect(page.locator('#identity-count')).to_have_text('0')
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#global-message')).to_contain_text('需要填写目标站点用户名或用户 ID')
+		await expect(page.locator('#identity-count')).to_have_text('0')
+		assert service.store.load()[1] == 0
+		await page.get_by_label('目标站点用户名', exact=False).fill('fixture-user')
+		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+		await page.locator('.config-card').last.get_by_label('目标站点用户名', exact=False).fill('fixture-user')
 		await page.get_by_role('button', name='保存配置', exact=True).click()
 		await expect(page.locator('#config-revision')).to_have_text('已保存版本 1')
+		await expect(page.locator('#identity-count')).to_have_text('1')
+		config, _ = service.store.load()
+		assert config['identities'] == {'linuxdo-1': {'type': 'linuxdo', 'proxy': 'direct'}}
+		assert [account['auth']['identity'] for account in config['accounts']] == ['linuxdo-1', 'linuxdo-1']
+		assert requests == []
+		assert service.jobs.history() == []
+		await page.get_by_role('button', name='移除account-1', exact=True).click()
+		await page.get_by_role('button', name='移除account-2', exact=True).click()
+		await page.locator('[data-tab="identities"]').click()
+		await page.locator('.card-toggle').click()
+		await expect(page.get_by_role('button', name='先保存再登录', exact=True)).to_be_disabled()
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#config-revision')).to_have_text('已保存版本 2')
 		await expect(page.get_by_role('button', name='登录 / 重新登录', exact=True)).to_be_enabled()
 		states['linuxdo-1'] = {'state': 'verified', 'username': 'fixture-user', 'verified_at': '2026-10-19T10:00:00Z'}
 		await page.get_by_role('button', name='重新读取登录状态', exact=True).click()
@@ -186,8 +214,100 @@ async def test_default_oauth_creates_one_identity_and_login_needs_no_account(tmp
 		await expect(page.locator('#task-hint')).to_contain_text('本机已打开的 Chromium')
 		await expect(page.locator('#stop-button')).to_be_enabled()
 		await expect(page.get_by_role('button', name='登录 / 重新登录', exact=True)).to_be_disabled()
-		assert requests == [{'revision': 1, 'identity': 'linuxdo-1'}]
+		assert requests == [{'revision': 2, 'identity': 'linuxdo-1'}]
 		assert service.store.load()[0]['accounts'] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['rejected', 'conflict', 'uncertain'])
+async def test_oauth_save_failure_does_not_create_draft_identity(tmp_path, failure):
+	app = create_app(tmp_path, os.urandom(32), 'synthetic-webui-password', scheduler=False)
+	service = app[SERVICE]
+	async with local_browser(app) as (page, requests, _):
+		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+		await page.get_by_label('认证方式').select_option('github')
+		await page.get_by_label('目标站点用户名', exact=False).fill('fixture-user')
+		if failure == 'conflict':
+			config, revision = service.store.load()
+			service.store.save(config, revision)
+		else:
+
+			async def fail_save(route):
+				if route.request.method != 'PUT':
+					await route.fallback()
+				elif failure == 'uncertain':
+					await route.abort('failed')
+				else:
+					await route.fulfill(status=400, json={'error': 'synthetic save rejection'})
+
+			await page.route('**/api/config', fail_save)
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		message = {
+			'rejected': 'synthetic save rejection',
+			'conflict': '保存冲突',
+			'uncertain': '请求已发出, 但未能确认结果',
+		}[failure]
+		await expect(page.locator('#global-message')).to_contain_text(message)
+		await expect(page.locator('#identity-count')).to_have_text('0')
+		await expect(page.get_by_label('登录身份', exact=False)).to_have_value('')
+		await expect(page.get_by_label('目标站点用户名', exact=False)).to_have_value('fixture-user')
+		config, _ = service.store.load()
+		assert config['identities'] == {}
+		assert config['accounts'] == []
+		assert requests == []
+		assert service.jobs.history() == []
+		if failure == 'uncertain':
+			await expect(page.get_by_role('button', name='保存配置', exact=True)).to_be_disabled()
+		else:
+			if failure == 'conflict':
+				await page.get_by_label('认证方式').select_option('password')
+				await expect(page.locator('#identity-count')).to_have_text('0')
+			else:
+				await page.unroute('**/api/config', fail_save)
+				await page.get_by_role('button', name='保存配置', exact=True).click()
+				await expect(page.locator('#config-revision')).to_have_text('已保存版本 1')
+				config, _ = service.store.load()
+				assert config['identities'] == {'github-1': {'type': 'github', 'proxy': 'direct'}}
+				assert config['accounts'][0]['auth']['identity'] == 'github-1'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('invalid_reference', [None, 'deleted', 'wrong-type'])
+async def test_oauth_save_requires_matching_existing_identity(tmp_path, invalid_reference):
+	app = create_app(tmp_path, os.urandom(32), 'synthetic-webui-password', scheduler=False)
+	service = app[SERVICE]
+	config, revision = service.store.load()
+	config['identities'] = {'ld-a': {'type': 'linuxdo'}, 'ld-b': {'type': 'linuxdo'}}
+	service.store.save(config, revision)
+	async with local_browser(app) as (page, requests, _):
+		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+		await page.get_by_label('目标站点用户名', exact=False).fill('fixture-user')
+		await expect(page.get_by_label('登录身份', exact=False)).to_have_value('')
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#global-message')).to_contain_text('需要选择类型匹配的登录身份')
+		await expect(page.locator('#identity-count')).to_have_text('2')
+		assert service.store.load()[1] == 1
+		await page.get_by_label('登录身份', exact=False).select_option('ld-a')
+		if invalid_reference:
+			await page.locator('[data-tab="identities"]').click()
+			identity = page.locator('.config-card').first
+			if invalid_reference == 'deleted':
+				await identity.get_by_role('button', name='移除ld-a', exact=True).click()
+			else:
+				await identity.locator('.card-toggle').click()
+				await identity.get_by_label('身份平台').select_option('github')
+			await page.locator('[data-tab="accounts"]').click()
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		if invalid_reference:
+			await expect(page.locator('#global-message')).to_contain_text('需要选择类型匹配的登录身份')
+			await expect(page.get_by_label('登录身份', exact=False)).to_have_value('ld-a')
+			assert service.store.load()[1] == 1
+		else:
+			await expect(page.locator('#config-revision')).to_have_text('已保存版本 2')
+			config, _ = service.store.load()
+			assert set(config['identities']) == {'ld-a', 'ld-b'}
+			assert config['accounts'][0]['auth']['identity'] == 'ld-a'
+		assert requests == []
 
 
 @pytest.mark.asyncio

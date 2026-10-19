@@ -607,33 +607,26 @@
     card?.querySelector('input')?.focus();
   }
 
-  function ensureOAuthIdentity(account) {
+  function selectExistingOAuthIdentity(account) {
     if (!account.auth || !['linuxdo', 'github'].includes(account.auth.type)) return;
-    const type = account.auth.type;
-    const matches = Object.keys(state.config.identities).filter((alias) => state.config.identities[alias].type === type);
-    if (matches.includes(account.auth.identity)) return;
+    if (account.auth.identity) return;
+    const matches = Object.keys(state.config.identities).filter((alias) => state.config.identities[alias].type === account.auth.type);
     account.auth.identity = matches.length === 1 ? matches[0] : '';
-    if (matches.length) return;
-    const alias = uniqueKey(type, Object.keys(state.config.identities));
-    state.config.identities[alias] = { type, proxy: 'direct' };
-    account.auth.identity = alias;
-    state.expanded.set(`identity:${alias}`, true);
-    notice(`已在草稿中新建并关联 ${type === 'linuxdo' ? 'LinuxDo' : 'GitHub'} 身份 ${alias}. 保存后生效, 本次没有登录.`, '', { label: '编辑此身份', handler: () => editIdentity(alias) });
   }
 
   function renderAccounts(container) {
     container.append(heading('签到账号', '一个账号对应一个目标站点. OAuth 登录只选择身份别名, 不填写第三方平台密码.', '+ 添加账号', () => {
       const account = { id: uniqueKey('account', state.config.accounts.map((item) => item.id)), name: '', provider: 'anyrouter', auth: { type: 'linuxdo', identity: '' } };
       state.config.accounts.push(account);
-      ensureOAuthIdentity(account);
+      selectExistingOAuthIdentity(account);
       markDirty(); renderForm();
     }));
     const cards = el('div', 'cards');
-    if (!state.config.accounts.length) empty(cards, '添加第一个账号', '选择 OAuth 时, 如果尚无对应平台的身份, 会自动在草稿中新建并关联.');
+    if (!state.config.accounts.length) empty(cards, '添加第一个账号', '选择 OAuth 后, 如果尚无对应平台的身份, 保存配置时会自动新建并关联.');
     state.config.accounts.forEach((account, index) => {
       const { outer, grid, content } = card(() => account.name || account.id || '新账号', index, () => { state.expanded.delete(`account:${account.id}`); state.config.accounts.splice(index, 1); markDirty(); renderForm(); }, {
         key: () => `account:${account.id}`, saved: state.savedIds.has(account.id),
-        summary: () => `${({ anyrouter: 'AnyRouter', agentrouter: 'AgentRouter' })[account.provider] || account.provider || '未选择站点'} / ${account.auth ? `${account.auth.type === 'linuxdo' ? 'LinuxDo' : 'GitHub'}: ${account.auth.identity || '未选择身份'}` : account.cookies !== undefined ? 'Cookie' : '站点邮箱密码'}`,
+        summary: () => `${({ anyrouter: 'AnyRouter', agentrouter: 'AgentRouter' })[account.provider] || account.provider || '未选择站点'} / ${account.auth ? `${account.auth.type === 'linuxdo' ? 'LinuxDo' : 'GitHub'}: ${account.auth.identity || (Object.values(state.config.identities).some((identity) => identity.type === account.auth.type) ? '未选择身份' : '保存时自动新建身份')}` : account.cookies !== undefined ? 'Cookie' : '站点邮箱密码'}`,
       });
       const providers = [...new Set(['anyrouter', 'agentrouter', ...Object.keys(state.config.providers), ...(account.provider ? [account.provider] : [])])];
       grid.append(
@@ -648,14 +641,14 @@
         else if (value === 'cookie') account.cookies = '';
         else { account.email = ''; account.password = ''; }
         account._uiAuth = value;
-        ensureOAuthIdentity(account);
+        selectExistingOAuthIdentity(account);
         renderForm();
       }));
       const activeType = account._uiAuth || type;
       if (['linuxdo', 'github'].includes(activeType)) {
         const identities = Object.entries(state.config.identities).filter(([, value]) => value.type === activeType).map(([alias]) => [alias, alias]);
         if (account.auth.identity && !identities.some(([key]) => key === account.auth.identity)) identities.push([account.auth.identity, `${account.auth.identity} (身份不存在或类型不匹配)`]);
-        grid.append(selectField('登录身份', account.auth.identity, [['', '请选择身份'], ...identities], (value) => { account.auth.identity = value; }, { hint: identities.length ? '同一身份可关联多个站点账号.' : `尚无 ${activeType === 'linuxdo' ? 'LinuxDo' : 'GitHub'} 身份. 请先在登录身份中添加.` }));
+        grid.append(selectField('登录身份', account.auth.identity, [['', identities.length ? '请选择身份' : '保存时自动新建身份'], ...identities], (value) => { account.auth.identity = value; renderForm(); }, { hint: identities.length ? '同一身份可关联多个站点账号.' : `尚无 ${activeType === 'linuxdo' ? 'LinuxDo' : 'GitHub'} 身份. 保存配置时会自动新建并关联, 切换选项不会创建身份.` }));
         if (account.auth.identity && Object.hasOwn(state.config.identities, account.auth.identity)) {
           grid.append(button('编辑此身份', 'text-button identity-edit', () => editIdentity(account.auth.identity)));
         }
@@ -855,8 +848,7 @@
     updateControls();
   }
 
-  function validateDraft() {
-    const config = state.config;
+  function validateDraft(config) {
     const ids = new Set();
     for (const account of config.accounts) {
       if (typeof account.id !== 'string' || !account.id || account.id.length > 128 || account.id.trim() !== account.id) return '账号稳定 ID 不能为空, 不能包含首尾空白, 且不能超过 128 个字符.';
@@ -887,9 +879,18 @@
     return '';
   }
 
-  function cleanConfig() {
+  function prepareConfigForSave() {
     const config = copy(state.config);
     config.accounts.forEach((account) => {
+      if (account.auth && ['linuxdo', 'github'].includes(account.auth.type) && !account.auth.identity) {
+        const type = account.auth.type;
+        const matches = Object.keys(config.identities).filter((alias) => config.identities[alias].type === type);
+        if (!matches.length) {
+          const alias = uniqueKey(type, Object.keys(config.identities));
+          config.identities[alias] = { type, proxy: 'direct' };
+          account.auth.identity = alias;
+        } else if (matches.length === 1) account.auth.identity = matches[0];
+      }
       delete account._uiAuth;
       for (const key of ['name', 'api_user', 'proxy']) if (account[key] === '') delete account[key];
     });
@@ -904,11 +905,13 @@
   async function saveConfig(event) {
     event.preventDefault();
     if (!state.config || !state.dirty || state.busy || state.uncertain) return;
-    const problem = validateDraft();
+    const config = prepareConfigForSave();
+    const problem = validateDraft(config);
     if (problem) { notice(problem, 'error'); return; }
+    const created = Object.keys(config.identities).filter((alias) => !Object.hasOwn(state.config.identities, alias));
     setBusy(true);
     try {
-      const data = await api('/api/config', { method: 'PUT', body: { config: cleanConfig(), revision: state.revision } });
+      const data = await api('/api/config', { method: 'PUT', body: { config, revision: state.revision } });
       state.config = normalizeConfig(data.config);
       state.revision = data.revision;
       state.savedIds = new Set(state.config.accounts.map((account) => account.id));
@@ -916,7 +919,7 @@
       state.savedProviders = new Set(Object.keys(state.config.providers));
       state.dirty = false;
       renderForm();
-      notice('配置已保存. 本次保存没有执行签到.');
+      notice(`配置已保存.${created.length ? ` 已新建并关联登录身份: ${created.join(', ')}.` : ''} 本次保存没有执行签到.`);
       await Promise.allSettled([loadStatus(), loadIdentities()]);
     } catch (error) {
       if (!(error instanceof ApiError) || error.status >= 500 || error.status === 0 || (error.status >= 200 && error.status < 300)) setUncertain('config', errorText(error));
