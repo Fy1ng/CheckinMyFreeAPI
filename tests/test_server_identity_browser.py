@@ -311,6 +311,114 @@ async def test_oauth_save_requires_matching_existing_identity(tmp_path, invalid_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('platform', ['linuxdo', 'github'])
+@pytest.mark.parametrize('existing_count', [1, 2])
+async def test_oauth_can_create_independent_identities_when_matching_identity_exists(
+	tmp_path, platform, existing_count
+):
+	app = create_app(tmp_path, os.urandom(32), 'synthetic-webui-password', scheduler=False)
+	service = app[SERVICE]
+	config, revision = service.store.load()
+	existing_alias = f'{platform}-1'
+	config['identities'] = {existing_alias: {'type': platform, 'proxy': 'direct'}}
+	if existing_count == 2:
+		config['identities']['new-identity-1'] = {'type': platform, 'proxy': 'direct'}
+	config['accounts'] = [
+		{
+			'id': 'existing',
+			'provider': 'anyrouter',
+			'auth': {'type': platform, 'identity': existing_alias},
+			'expected_username': 'existing-user',
+		}
+	]
+	service.store.save(config, revision)
+	async with local_browser(app) as (page, requests, _):
+		for _ in range(2):
+			await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+			account = page.locator('.config-card').last
+			if platform != 'linuxdo':
+				await account.get_by_label('认证方式').select_option(platform)
+			await expect(account.get_by_label('登录身份', exact=False)).to_have_value(
+				existing_alias if existing_count == 1 else ''
+			)
+			await account.get_by_label('登录身份', exact=False).select_option(label='新建独立身份 (保存时创建)')
+			await expect(account.locator('.card-summary')).to_contain_text('保存时新建独立身份')
+			await expect(account.get_by_role('button', name='编辑此身份', exact=True)).to_have_count(0)
+			await expect(page.locator('#identity-count')).to_have_text(str(existing_count))
+			await account.get_by_label('目标站点用户名', exact=False).fill('new-user')
+		await page.locator('[data-tab="identities"]').click()
+		await expect(page.locator('.config-card')).to_have_count(existing_count)
+		await page.locator('[data-tab="accounts"]').click()
+		await expect(account.get_by_label('登录身份', exact=False).locator('option:checked')).to_have_text(
+			'新建独立身份 (保存时创建)'
+		)
+
+		async def reject_save(route):
+			payload = json.loads(route.request.post_data)['config']
+			assert all('_uiNewIdentity' not in account and '_uiAuth' not in account for account in payload['accounts'])
+			await route.fulfill(status=400, json={'error': 'synthetic save rejection'})
+
+		await page.route('**/api/config', reject_save)
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#global-message')).to_contain_text('synthetic save rejection')
+		await expect(page.locator('#identity-count')).to_have_text(str(existing_count))
+		await expect(account.get_by_label('登录身份', exact=False).locator('option:checked')).to_have_text(
+			'新建独立身份 (保存时创建)'
+		)
+		assert service.store.load()[0] == config
+		await page.unroute('**/api/config', reject_save)
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#config-revision')).to_have_text('已保存版本 2')
+		await expect(page.locator('#identity-count')).to_have_text(str(existing_count + 2))
+		saved, _ = service.store.load()
+		assert saved['accounts'][0] == config['accounts'][0]
+		assert [account['auth']['identity'] for account in saved['accounts'][1:]] == [f'{platform}-2', f'{platform}-3']
+		assert saved['identities'] == {
+			**config['identities'],
+			f'{platform}-2': {'type': platform, 'proxy': 'direct'},
+			f'{platform}-3': {'type': platform, 'proxy': 'direct'},
+		}
+		assert requests == []
+		assert service.jobs.history() == []
+
+
+@pytest.mark.asyncio
+async def test_pending_new_identity_can_be_cancelled_or_switched_without_creating_identity(tmp_path):
+	app = create_app(tmp_path, os.urandom(32), 'synthetic-webui-password', scheduler=False)
+	service = app[SERVICE]
+	config, revision = service.store.load()
+	config['identities'] = {'linuxdo-1': {'type': 'linuxdo'}, 'github-1': {'type': 'github'}}
+	service.store.save(config, revision)
+	async with local_browser(app) as (page, requests, _):
+		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+		for platform in ['github', 'password', 'linuxdo']:
+			await page.get_by_label('登录身份', exact=False).select_option(label='新建独立身份 (保存时创建)')
+			await page.get_by_label('认证方式').select_option(platform)
+			if platform == 'password':
+				await page.get_by_label('认证方式').select_option('github')
+				platform = 'github'
+			await expect(page.get_by_label('登录身份', exact=False)).to_have_value(f'{platform}-1')
+			await expect(page.locator('#identity-count')).to_have_text('2')
+		await page.get_by_label('登录身份', exact=False).select_option(label='新建独立身份 (保存时创建)')
+		await page.get_by_label('登录身份', exact=False).select_option('linuxdo-1')
+		await page.get_by_label('目标站点用户名', exact=False).fill('existing-user')
+		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+		await (
+			page.locator('.config-card')
+			.last.get_by_label('登录身份', exact=False)
+			.select_option(label='新建独立身份 (保存时创建)')
+		)
+		await page.get_by_role('button', name='移除account-2', exact=True).click()
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#config-revision')).to_have_text('已保存版本 2')
+		saved, _ = service.store.load()
+		assert saved['identities'] == config['identities']
+		assert len(saved['accounts']) == 1
+		assert saved['accounts'][0]['auth'] == {'type': 'linuxdo', 'identity': 'linuxdo-1'}
+		assert requests == []
+
+
+@pytest.mark.asyncio
 async def test_identity_state_failure_allows_edit_and_unknown_login_is_not_repeated(tmp_path):
 	app = create_app(tmp_path, os.urandom(32), 'synthetic-webui-password', scheduler=False)
 	async with local_browser(app, identity_error=True, uncertain_login=True) as (page, requests, _):

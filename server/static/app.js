@@ -609,7 +609,7 @@
 
   function selectExistingOAuthIdentity(account) {
     if (!account.auth || !['linuxdo', 'github'].includes(account.auth.type)) return;
-    if (account.auth.identity) return;
+    if (account.auth.identity || account._uiNewIdentity) return;
     const matches = Object.keys(state.config.identities).filter((alias) => state.config.identities[alias].type === account.auth.type);
     account.auth.identity = matches.length === 1 ? matches[0] : '';
   }
@@ -626,7 +626,7 @@
     state.config.accounts.forEach((account, index) => {
       const { outer, grid, content } = card(() => account.name || account.id || '新账号', index, () => { state.expanded.delete(`account:${account.id}`); state.config.accounts.splice(index, 1); markDirty(); renderForm(); }, {
         key: () => `account:${account.id}`, saved: state.savedIds.has(account.id),
-        summary: () => `${({ anyrouter: 'AnyRouter', agentrouter: 'AgentRouter' })[account.provider] || account.provider || '未选择站点'} / ${account.auth ? `${account.auth.type === 'linuxdo' ? 'LinuxDo' : 'GitHub'}: ${account.auth.identity || (Object.values(state.config.identities).some((identity) => identity.type === account.auth.type) ? '未选择身份' : '保存时自动新建身份')}` : account.cookies !== undefined ? 'Cookie' : '站点邮箱密码'}`,
+        summary: () => `${({ anyrouter: 'AnyRouter', agentrouter: 'AgentRouter' })[account.provider] || account.provider || '未选择站点'} / ${account.auth ? `${account.auth.type === 'linuxdo' ? 'LinuxDo' : 'GitHub'}: ${account._uiNewIdentity ? '保存时新建独立身份' : account.auth.identity || (Object.values(state.config.identities).some((identity) => identity.type === account.auth.type) ? '未选择身份' : '保存时自动新建身份')}` : account.cookies !== undefined ? 'Cookie' : '站点邮箱密码'}`,
       });
       const providers = [...new Set(['anyrouter', 'agentrouter', ...Object.keys(state.config.providers), ...(account.provider ? [account.provider] : [])])];
       grid.append(
@@ -636,7 +636,7 @@
       );
       const type = account._uiAuth || account.auth?.type || (account.cookies ? 'cookie' : 'password');
       grid.append(selectField('认证方式', type, [['linuxdo', 'LinuxDo OAuth'], ['github', 'GitHub OAuth'], ['password', '站点邮箱密码'], ['cookie', '已有 Cookie']], (value) => {
-        delete account.auth; delete account.email; delete account.password; delete account.cookies;
+        delete account.auth; delete account.email; delete account.password; delete account.cookies; delete account._uiNewIdentity;
         if (['linuxdo', 'github'].includes(value)) account.auth = { type: value, identity: '' };
         else if (value === 'cookie') account.cookies = '';
         else { account.email = ''; account.password = ''; }
@@ -648,7 +648,12 @@
       if (['linuxdo', 'github'].includes(activeType)) {
         const identities = Object.entries(state.config.identities).filter(([, value]) => value.type === activeType).map(([alias]) => [alias, alias]);
         if (account.auth.identity && !identities.some(([key]) => key === account.auth.identity)) identities.push([account.auth.identity, `${account.auth.identity} (身份不存在或类型不匹配)`]);
-        grid.append(selectField('登录身份', account.auth.identity, [['', identities.length ? '请选择身份' : '保存时自动新建身份'], ...identities], (value) => { account.auth.identity = value; renderForm(); }, { hint: identities.length ? '同一身份可关联多个站点账号.' : `尚无 ${activeType === 'linuxdo' ? 'LinuxDo' : 'GitHub'} 身份. 保存配置时会自动新建并关联, 切换选项不会创建身份.` }));
+        const newIdentityChoice = uniqueKey('new-identity', identities.map(([alias]) => alias));
+        grid.append(selectField('登录身份', account._uiNewIdentity ? newIdentityChoice : account.auth.identity, [['', identities.length ? '请选择身份' : '保存时自动新建身份'], ...identities, [newIdentityChoice, '新建独立身份 (保存时创建)']], (value) => {
+          if (value === newIdentityChoice) { account._uiNewIdentity = true; account.auth.identity = ''; }
+          else { delete account._uiNewIdentity; account.auth.identity = value; }
+          renderForm();
+        }, { hint: identities.length ? '可复用已有身份, 或选择新建独立身份. 新身份在保存成功后创建.' : `尚无 ${activeType === 'linuxdo' ? 'LinuxDo' : 'GitHub'} 身份. 保存配置时会自动新建并关联, 切换选项不会创建身份.` }));
         if (account.auth.identity && Object.hasOwn(state.config.identities, account.auth.identity)) {
           grid.append(button('编辑此身份', 'text-button identity-edit', () => editIdentity(account.auth.identity)));
         }
@@ -882,16 +887,17 @@
   function prepareConfigForSave() {
     const config = copy(state.config);
     config.accounts.forEach((account) => {
-      if (account.auth && ['linuxdo', 'github'].includes(account.auth.type) && !account.auth.identity) {
+      if (account.auth && ['linuxdo', 'github'].includes(account.auth.type) && (account._uiNewIdentity || !account.auth.identity)) {
         const type = account.auth.type;
         const matches = Object.keys(config.identities).filter((alias) => config.identities[alias].type === type);
-        if (!matches.length) {
+        if (account._uiNewIdentity || !matches.length) {
           const alias = uniqueKey(type, Object.keys(config.identities));
           config.identities[alias] = { type, proxy: 'direct' };
           account.auth.identity = alias;
         } else if (matches.length === 1) account.auth.identity = matches[0];
       }
       delete account._uiAuth;
+      delete account._uiNewIdentity;
       for (const key of ['name', 'api_user', 'proxy']) if (account[key] === '') delete account[key];
     });
     Object.values(config.identities).forEach((identity) => { if (identity.proxy === '') delete identity.proxy; });
