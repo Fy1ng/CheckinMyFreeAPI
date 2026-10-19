@@ -266,6 +266,10 @@
       response_redirected: '接口返回跳转, 可能需要重新登录或人工验证',
       service_unavailable: '站点服务暂时不可用, 请稍后重试',
       interactive_verification_required: '站点要求验证. 请在本机处理或更新 Cookie, 本机通过验证不保证服务器可访问',
+      acw_challenge_unsupported: '站点返回无法识别的 acw 验证格式, 已停止请求. 请在本机处理后更新完整 Cookie',
+      acw_cookie_context_missing: '访问验证缺少可用 Cookie 上下文, 已停止请求. 请更新完整 Cookie',
+      acw_challenge_limit: 'acw 访问验证达到 3 次请求上限, 已停止请求. 请在本机处理后更新完整 Cookie',
+      acw_challenge_requires_confirmation: '请求返回 acw 验证页, 执行结果需要先到站点核对, 核对后再解除暂停',
       html_response_received: '接口返回网页, 请核对站点是否要求登录或验证',
       credentials_rejected: '凭据被站点拒绝, 请更新凭据后手动重试',
       access_blocked: '站点拒绝访问. 请核对站点限制, 不会自动反复尝试',
@@ -335,7 +339,7 @@
   }
 
   function stageLabel(stage) {
-    return ({ prepare: '准备账号', load_session: '读取会话', password_login: '账号密码登录', verify_identity: '核验账号', checkin: '发送签到请求', verify_result: '核验签到结果', save_session: '保存会话', finished: '账号处理结束', notify: '发送通知' })[stage] || stage || '等待执行';
+    return ({ prepare: '准备账号', load_session: '读取会话', password_login: '账号密码登录', acw_verification: '处理 acw 访问验证', verify_identity: '核验账号', checkin: '发送签到请求', verify_result: '核验签到结果', save_session: '保存会话', finished: '账号处理结束', notify: '发送通知' })[stage] || stage || '等待执行';
   }
 
   function requestDetail(item) {
@@ -346,6 +350,8 @@
     if (Number.isInteger(item.http_status)) parts.push(`HTTP ${item.http_status}`);
     if (['TimeoutException', 'ConnectTimeout', 'ReadTimeout', 'WriteTimeout', 'PoolTimeout', 'ConnectError', 'ProxyError', 'NetworkError', 'ReadError', 'WriteError', 'CloseError', 'ProtocolError', 'LocalProtocolError', 'RemoteProtocolError', 'RequestError', 'HTTPStatusError', 'UnsupportedProtocol', 'TooManyRedirects', 'DecodingError', 'ExecutionError'].includes(item.error_type)) parts.push(item.error_type);
     if (Number.isFinite(item.timeout_seconds)) parts.push(`超时设置 ${item.timeout_seconds} 秒`);
+    if (Number.isInteger(item.request_attempt) && item.request_attempt > 0 && item.request_attempt <= 3 && item.max_attempts === 3) parts.push(`请求 ${item.request_attempt} / ${item.max_attempts}`);
+    if (Number.isInteger(item.acw_challenges) && item.acw_challenges > 0 && item.acw_challenges <= 3) parts.push(`acw 验证 ${item.acw_challenges} 次`);
     return parts.join(' / ');
   }
 
@@ -763,7 +769,7 @@
       );
       if (account.auth_type === 'password') {
         grid.append(field('站点登录账号', account.username, (value) => { account.username = value; }, { autocomplete: 'off', hint: '填写 AnyRouter 的用户名或邮箱.' }));
-        grid.append(secretField('站点密码', account.password, (value) => { account.password = value; }, { hint: '验证码或访问验证会暂停账号并通知, 请在本机处理后更新凭据.' }));
+        grid.append(secretField('站点密码', account.password, (value) => { account.password = value; }, { hint: '已知 acw 访问验证可自动处理, 其他验证码或未知验证会暂停并通知, 请在本机处理后更新凭据.' }));
       } else if (account.auth_type === 'system_token') {
         grid.append(secretField('系统访问令牌', account.system_access_token, (value) => { account.system_access_token = value; }, { wide: true, hint: '填写站点控制台的系统访问令牌, 不是模型调用 API Key.' }));
       } else {

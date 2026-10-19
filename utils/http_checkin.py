@@ -19,7 +19,13 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from utils.acw_challenge import is_acw_challenge, solve_acw_sc_v2
+
 ORIGINS = {'anyrouter': 'https://anyrouter.top', 'agentrouter': 'https://agentrouter.org'}
+_ACW_MAX_REQUESTS = 3
+_ACW_USER_AGENT = (
+	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36'
+)
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9a-zA-Z-]+$")
 _AUTH_MESSAGES = (
 	'not logged in',
@@ -65,6 +71,12 @@ class _Failure(Exception):
 		self.reason = reason
 		self.details = details
 		super().__init__(reason)
+
+
+class _AcwChallenge(Exception):
+	def __init__(self, response: httpx.Response):
+		self.response = response
+		super().__init__('acw_challenge')
 
 
 def account_binding(account: dict, config: dict) -> str:
@@ -123,7 +135,7 @@ def _message(payload: dict) -> str:
 
 
 class HttpCheckinRuntime:
-	"""One execution, one HTTP client, no implicit retry or browser fallback."""
+	"""One client, bounded known ACW negotiation, no error retry or browser fallback."""
 
 	def __init__(
 		self, config: dict, sessions: object, *, client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient
@@ -159,6 +171,9 @@ class HttpCheckinRuntime:
 			timeout = self.config.get('http', {}).get('timeout_seconds', 30)
 			if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 1 <= timeout <= 300:
 				raise _Failure('failed', 'invalid_http_configuration')
+			headers = {'Accept': 'application/json'}
+			if provider == 'anyrouter':
+				headers['User-Agent'] = _ACW_USER_AGENT
 			async with self.client_factory(
 				base_url=origin,
 				timeout=timeout,
@@ -166,7 +181,7 @@ class HttpCheckinRuntime:
 				trust_env=False,
 				verify=True,
 				follow_redirects=False,
-				headers={'Accept': 'application/json'},
+				headers=headers,
 			) as client:
 				if provider == 'agentrouter':
 					details = await self._agent(client, account)
@@ -252,6 +267,54 @@ class HttpCheckinRuntime:
 	async def _request(
 		self, client: httpx.AsyncClient, method: str, path: str, *, side_effect: bool = False, **kwargs: Any
 	) -> dict:
+		stage = self._current['stage']
+		login = method == 'POST' and path == '/api/user/login'
+		allowed = (
+			client.base_url == httpx.URL(ORIGINS['anyrouter'])
+			and not side_effect
+			and ((method == 'GET' and path == '/api/user/self') or login)
+		)
+		for attempt in range(1, _ACW_MAX_REQUESTS + 1):
+			try:
+				return await self._request_once(client, method, path, side_effect=side_effect, **kwargs)
+			except _AcwChallenge as challenge:
+				if not allowed:
+					raise _Failure(
+						'uncertain' if method == 'POST' or side_effect else 'blocked',
+						'acw_challenge_requires_confirmation'
+						if method == 'POST' or side_effect
+						else 'acw_challenge_unsupported',
+					) from None
+				self._update(state='failed')
+				self._stage('acw_verification')
+				self._update(
+					method=method,
+					path=path,
+					http_status=challenge.response.status_code,
+					request_attempt=attempt,
+					max_attempts=_ACW_MAX_REQUESTS,
+					acw_challenges=attempt,
+				)
+				text = challenge.response.text
+				value = solve_acw_sc_v2(text) if len(text) <= 100000 else None
+				if value is None:
+					raise _Failure('blocked', 'acw_challenge_unsupported') from None
+				if attempt == _ACW_MAX_REQUESTS:
+					raise _Failure('blocked', 'acw_challenge_limit') from None
+				if not client.build_request(method, path).headers.get('cookie'):
+					raise _Failure('blocked', 'acw_cookie_context_missing') from None
+				for cookie in list(client.cookies.jar):
+					if cookie.name == 'acw_sc__v2' and cookie.domain in {'anyrouter.top', '.anyrouter.top'}:
+						client.cookies.jar.clear(cookie.domain, cookie.path, cookie.name)
+				self._cookies(client, {'acw_sc__v2': value}, 'anyrouter.top')
+				self._update(state='completed')
+				self._stage(stage)
+				self._update(request_attempt=attempt + 1, max_attempts=_ACW_MAX_REQUESTS, acw_challenges=attempt)
+		raise _Failure('blocked', 'acw_challenge_limit')
+
+	async def _request_once(
+		self, client: httpx.AsyncClient, method: str, path: str, *, side_effect: bool = False, **kwargs: Any
+	) -> dict:
 		mutation = method == 'POST' or side_effect
 		self._update(method=method, path=path, timeout_seconds=self.config.get('http', {}).get('timeout_seconds', 30))
 		try:
@@ -294,6 +357,8 @@ class HttpCheckinRuntime:
 		):
 			if any(marker in text for marker in _CHALLENGE_MESSAGES):
 				raise _Failure('blocked', 'interactive_verification_required')
+			if is_acw_challenge(response.text):
+				raise _AcwChallenge(response)
 			raise _Failure('blocked', 'html_response_received')
 		try:
 			payload = response.json()
@@ -459,7 +524,11 @@ class HttpCheckinRuntime:
 			client.cookies.clear()
 			self._stage('password_login')
 			login = await self._request(
-				client, 'POST', '/api/user/login', json={'username': username, 'password': password}
+				client,
+				'POST',
+				'/api/user/login',
+				json={'username': username, 'password': password},
+				headers={'X-Requested-With': 'XMLHttpRequest'},
 			)
 			if login.get('success') is not True:
 				raise _Failure('needs_credentials', 'password_login_rejected')

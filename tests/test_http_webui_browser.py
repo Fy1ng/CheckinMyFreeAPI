@@ -484,6 +484,53 @@ async def test_run_progress_diagnostics_and_open_details_survive_poll_and_read_f
 
 
 @pytest.mark.asyncio
+async def test_acw_progress_attempts_and_stop_reason_are_readable_without_cookie_values(tmp_path):
+	step = {
+		'stage': 'acw_verification',
+		'state': 'failed',
+		'request_attempt': 3,
+		'max_attempts': 3,
+		'acw_challenges': 3,
+		'method': 'POST',
+		'path': '/api/user/login',
+		'http_status': 200,
+		'cookie_value': 'synthetic-sensitive-cookie',
+	}
+	run = {
+		'id': 38,
+		'state': 'needs_attention',
+		'summary': {
+			'progress': {'total': 1, 'completed': 1, 'active_account': None},
+			'accounts': [
+				{
+					'id': 'saved',
+					'name': 'ACW fixture',
+					'outcome': 'blocked',
+					'reason': 'acw_challenge_limit',
+					'diagnostic': step,
+					'steps': [step],
+				}
+			],
+		},
+	}
+
+	async def intercept(route, origin):
+		if route.request.url == origin + '/api/runs' and route.request.method == 'GET':
+			await route.fulfill(json={'runs': [run]})
+			return True
+		return False
+
+	async with local_ui(tmp_path, intercept) as (page, _, _):
+		details = page.locator('[data-run-id="38"] .run-details')
+		await details.locator('summary').click()
+		await expect(details).to_contain_text('达到 3 次请求上限')
+		await expect(details).to_contain_text('处理 acw 访问验证')
+		await expect(details).to_contain_text('请求 3 / 3')
+		await expect(details).to_contain_text('acw 验证 3 次')
+		await expect(details).not_to_contain_text('synthetic-sensitive-cookie')
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('unknown_result', [False, True])
 async def test_uncertain_account_requires_explicit_confirmation_and_never_auto_runs(tmp_path, unknown_result):
 	attention = {'saved': {'outcome': 'uncertain', 'reason': 'request_result_unknown', 'retry_at': None}}
