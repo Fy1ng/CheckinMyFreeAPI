@@ -53,6 +53,78 @@ class FakeInput:
 		self.closed = True
 
 
+@pytest.mark.asyncio
+async def test_single_account_scope_filters_snapshot_without_changing_saved_config(
+	configured_store, tmp_path, fake_worker
+):
+	store, key = configured_store
+	config, revision = store.load()
+	config['accounts'] += [
+		{**config['accounts'][0], 'id': 'second', 'password': 'synthetic-second-password'},
+		{**config['accounts'][0], 'id': 'disabled', 'enabled': False},
+	]
+	store.save(config, revision)
+	manager = JobManager(store, tmp_path, key)
+	process, launched, _ = fake_worker
+	try:
+		for account_id in ('missing', 'disabled'):
+			with pytest.raises(BusyError):
+				await manager.start(2, account_id=account_id)
+		with pytest.raises(BusyError):
+			await manager.start(1, account_id='second')
+		assert manager.history() == []
+		run = await manager.start(2, account_id='second')
+		await launched.wait()
+		payload = json.loads(bytes(process.stdin.data))
+		assert payload['account_id'] == 'second'
+		assert [account['id'] for account in payload['config']['accounts']] == ['second']
+		assert 'synthetic-account-password' not in bytes(process.stdin.data).decode()
+		assert len(store.load()[0]['accounts']) == 3 and store.load()[1] == 2
+		assert run['summary']['account_id'] == 'second'
+		assert run['summary']['progress'] == {'total': 1, 'completed': 0, 'active_account': None}
+		with pytest.raises(BusyError):
+			await manager.start(2)
+		with pytest.raises(BusyError):
+			await manager.start(2, account_id='first')
+		assert len(manager.history()) == 1
+	finally:
+		await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_running_progress_survives_refresh_and_invalid_event(configured_store, tmp_path, fake_worker):
+	store, key = configured_store
+	manager = JobManager(store, tmp_path, key)
+	process, launched, _ = fake_worker
+	try:
+		run = await manager.start(1)
+		await launched.wait()
+		event_file = tmp_path / f'run-{run["id"]}.json'
+		summary = {
+			'accounts': [],
+			'progress': {
+				'total': 1,
+				'completed': 0,
+				'active_account': {'id': 'first', 'stage': 'checkin', 'method': 'POST', 'path': '/api/user/sign_in'},
+			},
+		}
+		event_file.write_text(json.dumps({'state': 'running', 'active_account': 'first', 'summary': summary}))
+		manager._read_progress(event_file, run['id'])
+		assert manager.status()['run']['summary'] == summary
+		assert manager.history()[0]['summary'] == summary
+		event_file.write_text('{incomplete')
+		manager._read_progress(event_file, run['id'])
+		assert manager.history()[0]['summary'] == summary
+		event_file.write_text(json.dumps({'state': 'failed', 'error': 'HTTP_WORKER_FAILED'}))
+		process.finish(1)
+		assert manager.task is not None
+		await manager.task
+		assert manager.history()[0]['summary'] == summary
+		assert manager.history()[0]['state'] == 'failed'
+	finally:
+		await manager.close()
+
+
 class FakeProcess:
 	def __init__(self, returncode=None):
 		self.stdin = FakeInput()

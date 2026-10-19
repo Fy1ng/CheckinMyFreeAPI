@@ -28,6 +28,14 @@ async def execute(payload: dict) -> int:
 	trigger = payload.get('trigger', 'manual')
 	if trigger not in {'manual', 'scheduled'}:
 		raise ValueError('Unsupported trigger')
+	account_id = payload.get('account_id')
+	accounts = config['accounts']
+	if account_id is not None:
+		if not isinstance(account_id, str) or trigger != 'manual':
+			raise ValueError('Invalid single-account task')
+		accounts = [account for account in accounts if account['id'] == account_id and account.get('enabled', True)]
+		if not accounts:
+			raise ValueError('Single-account task requires an enabled saved account')
 	data_dir = Path(payload['data_dir'])
 	event_file = Path(payload['event_file'])
 	key = base64.b64decode(payload['key'], validate=True)
@@ -40,19 +48,34 @@ async def execute(payload: dict) -> int:
 	sessions = HttpSessionStore(data_dir / 'webui.sqlite3', session_key)
 	attention = ExecutionState(data_dir / 'webui.sqlite3')
 	runtime = HttpCheckinRuntime(config, sessions)
-	results = []
+	results: list[dict] = []
+	total = sum(account.get('enabled', True) for account in accounts)
 
 	def publish(**updates):
 		atomic_write(event_file, json.dumps(updates, ensure_ascii=False).encode())
 
-	publish(state='running', active_account=None)
+	def snapshot(active=None):
+		return {
+			'accounts': results,
+			'account_id': account_id,
+			'success_count': sum(bool(result['success']) for result in results),
+			'total_count': total,
+			'progress': {
+				'total': total,
+				'completed': sum(result['reason'] != 'ACCOUNT_DISABLED' for result in results),
+				'active_account': active,
+			},
+		}
+
+	publish(state='running', active_account=None, summary=snapshot())
 	try:
-		for account in config['accounts']:
+		for account in accounts:
 			base = {name: account.get(name, '') for name in ('id', 'name', 'provider')}
 			binding = account_binding(account, config)
 			previous = attention.get(account['id'], binding)
 			if not account.get('enabled', True):
 				results.append({**base, 'success': False, 'outcome': 'skipped', 'reason': 'ACCOUNT_DISABLED'})
+				publish(state='running', active_account=None, summary=snapshot())
 				continue
 			retry_at = previous.get('retry_at') if previous else None
 			limited = previous and previous['outcome'] == 'rate_limited' and retry_at and retry_at > time.time()
@@ -68,12 +91,22 @@ async def execute(payload: dict) -> int:
 						'reason': 'ACCOUNT_PAUSED',
 						'pending_outcome': previous['outcome'],
 						'pending_reason': previous['reason'],
+						**({'retry_after_seconds': max(1, int((retry_at or 0) - time.time()) + 1)} if limited else {}),
 					}
 				)
+				publish(state='running', active_account=None, summary=snapshot())
 				continue
-			publish(state='running', active_account=account['id'], summary={'accounts': results})
+
+			latest_event: dict = {}
+
+			def report(event):
+				latest_event.clear()
+				latest_event.update(event)
+				publish(state='running', active_account=account['id'], summary=snapshot({**base, **event}))
+
+			report({'stage': 'prepare'})
 			try:
-				result = await runtime.execute(account)
+				result = await runtime.execute(account, on_progress=report)
 			except asyncio.CancelledError:
 				attention.record(
 					account['id'], binding, {'outcome': 'uncertain', 'reason': 'REQUEST_CANCELLED_RESULT_UNKNOWN'}
@@ -85,10 +118,12 @@ async def execute(payload: dict) -> int:
 					'success': False,
 					'outcome': 'uncertain',
 					'reason': 'HTTP_EXECUTION_FAILED_RESULT_UNKNOWN',
+					'diagnostic': {**latest_event, 'error_type': 'ExecutionError'},
+					'steps': [{**latest_event, 'state': 'failed', 'error_type': 'ExecutionError'}],
 				}
 			attention.record(account['id'], binding, result)
 			results.append(result)
-			publish(state='running', active_account=None, summary={'accounts': results})
+			publish(state='running', active_account=None, summary=snapshot())
 	finally:
 		sessions.close()
 		attention.close()
@@ -105,12 +140,7 @@ async def execute(payload: dict) -> int:
 		if outcomes & {'needs_credentials', 'blocked', 'rate_limited'}
 		else 'failed'
 	)
-	summary = {
-		'accounts': results,
-		'success_count': sum(bool(result['success']) for result in results),
-		'total_count': sum(result['reason'] != 'ACCOUNT_DISABLED' for result in results),
-		'trigger': trigger,
-	}
+	summary = {**snapshot(), 'trigger': trigger}
 	normalized = [
 		{
 			**result,
@@ -122,8 +152,12 @@ async def execute(payload: dict) -> int:
 	for result in normalized:
 		result.pop('pending_outcome', None)
 		result.pop('pending_reason', None)
+		# Timestamps and changing countdowns must not resend identical outcomes.
+		for field in ('steps', 'diagnostic', 'retry_after_seconds'):
+			result.pop(field, None)
 	fingerprint = hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()
-	previous_file = data_dir / 'http-result-fingerprint.txt'
+	scope = '-' + hashlib.sha256(account_id.encode()).hexdigest()[:16] if account_id is not None else ''
+	previous_file = data_dir / f'http-result-fingerprint{scope}.txt'
 	changed = not previous_file.exists() or previous_file.read_text().strip() != fingerprint
 	if changed:
 		lines = [f'成功 {summary["success_count"]}/{summary["total_count"]}. 请在 WebUI 查看执行记录.']
@@ -156,6 +190,7 @@ async def main(payload: dict) -> int:
 		return 130
 	except Exception:
 		active_account = None
+		previous = {}
 		try:
 			event_file = Path(payload['event_file'])
 			if event_file.stat().st_size <= 1024 * 1024:
@@ -166,7 +201,14 @@ async def main(payload: dict) -> int:
 			pass
 		atomic_write(
 			Path(payload['event_file']),
-			json.dumps({'state': 'failed', 'error': 'HTTP_WORKER_FAILED', 'active_account': active_account}).encode(),
+			json.dumps(
+				{
+					'state': 'failed',
+					'error': 'HTTP_WORKER_FAILED',
+					'active_account': active_account,
+					'summary': previous.get('summary') if isinstance(previous, dict) else None,
+				}
+			).encode(),
 		)
 		return 1
 

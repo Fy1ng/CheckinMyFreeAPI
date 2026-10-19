@@ -62,7 +62,7 @@ async def test_http_worker_result_categories_and_private_notifications(fixture, 
 		def __init__(self, config, sessions):
 			pass
 
-		async def execute(self, account):
+		async def execute(self, account, *, on_progress=None):
 			calls.append(account['id'])
 			return {
 				'id': account['id'],
@@ -95,7 +95,7 @@ async def test_scheduled_accounts_stay_paused_and_uncertain_requires_explicit_re
 		def __init__(self, config, sessions):
 			pass
 
-		async def execute(self, account):
+		async def execute(self, account, *, on_progress=None):
 			calls.append(account['id'])
 			return {
 				'id': 'main',
@@ -142,7 +142,7 @@ async def test_credential_update_releases_old_pause(fixture, monkeypatch):
 		def __init__(self, config, sessions):
 			pass
 
-		async def execute(self, account):
+		async def execute(self, account, *, on_progress=None):
 			calls.append(account['id'])
 			return {
 				'id': 'main',
@@ -166,7 +166,7 @@ async def test_cancellation_records_uncertainty_and_does_not_retry(fixture, monk
 		def __init__(self, config, sessions):
 			pass
 
-		async def execute(self, account):
+		async def execute(self, account, *, on_progress=None):
 			raise asyncio.CancelledError
 
 	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
@@ -187,7 +187,7 @@ async def test_unexpected_mid_account_error_pauses_instead_of_silently_replaying
 		def __init__(self, config, sessions):
 			pass
 
-		async def execute(self, account):
+		async def execute(self, account, *, on_progress=None):
 			calls.append(account['id'])
 			raise RuntimeError('synthetic-private-exception')
 
@@ -197,3 +197,68 @@ async def test_unexpected_mid_account_error_pauses_instead_of_silently_replaying
 	assert await worker.execute(payload) == 1
 	assert calls == ['main']
 	assert 'synthetic-private-exception' not in open(payload['event_file'], encoding='utf-8').read()
+
+
+@pytest.mark.asyncio
+async def test_worker_single_account_scope_reports_live_stages_and_stable_notifications(fixture, monkeypatch):
+	payload, notify = fixture
+	payload['config']['accounts'].append({**payload['config']['accounts'][0], 'id': 'other'})
+	payload['account_id'] = 'other'
+	calls, observed = [], []
+
+	class Runtime:
+		def __init__(self, config, sessions):
+			pass
+
+		async def execute(self, account, *, on_progress=None):
+			calls.append(account['id'])
+			event = {
+				'stage': 'verify_identity',
+				'state': 'running',
+				'at': str(len(calls)),
+				'method': 'GET',
+				'path': '/api/user/self',
+			}
+			on_progress(event)
+			observed.append(json.loads(open(payload['event_file'], encoding='utf-8').read()))
+			return {
+				'id': account['id'],
+				'name': account['name'],
+				'provider': account['provider'],
+				'success': True,
+				'outcome': 'success',
+				'reason': 'user_info_requested_reward_unverified',
+				'steps': [event],
+			}
+
+	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
+	assert await worker.execute(payload) == 0
+	assert calls == ['other']
+	assert observed[0]['summary']['progress']['active_account']['stage'] == 'verify_identity'
+	assert observed[0]['active_account'] == 'other'
+	assert observed[0]['summary']['progress']['completed'] == 0
+	assert observed[0]['summary']['progress']['total'] == 1
+	assert 'synthetic-private-token' not in json.dumps(observed)
+	final = json.loads(open(payload['event_file'], encoding='utf-8').read())
+	assert [result['id'] for result in final['summary']['accounts']] == ['other']
+	assert final['summary']['progress'] == {'total': 1, 'completed': 1, 'active_account': None}
+	assert notify.call_count == 1
+	assert await worker.execute(payload) == 0
+	assert notify.call_count == 1
+	payload.pop('account_id')
+	assert await worker.execute(payload) == 0
+	assert calls == ['other', 'other', 'main', 'other']
+	assert notify.call_count == 2
+	payload['account_id'] = 'other'
+	assert await worker.execute(payload) == 0
+	assert notify.call_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('scope', ['missing', 1])
+async def test_worker_rejects_invalid_single_account_before_any_execution(fixture, scope):
+	payload, notify = fixture
+	payload['account_id'] = scope
+	with pytest.raises(ValueError):
+		await worker.execute(payload)
+	notify.assert_not_called()

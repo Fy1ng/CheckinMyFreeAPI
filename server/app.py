@@ -158,9 +158,19 @@ class WebService:
 
 	async def start_run(self, request):
 		body = await request.json()
-		if not isinstance(body, dict) or type(body.get('revision')) is not int:
+		if (
+			not isinstance(body, dict)
+			or set(body) - {'revision', 'account_id'}
+			or type(body.get('revision')) is not int
+			or (
+				'account_id' in body
+				and (not isinstance(body['account_id'], str) or not body['account_id'] or len(body['account_id']) > 128)
+			)
+		):
 			raise ValueError
-		return web.json_response({'run': await self.jobs.start(body['revision'])}, status=202)
+		return web.json_response(
+			{'run': await self.jobs.start(body['revision'], account_id=body.get('account_id'))}, status=202
+		)
 
 	async def stop_run(self, request):
 		return web.json_response({'stopping': await self.jobs.stop()})

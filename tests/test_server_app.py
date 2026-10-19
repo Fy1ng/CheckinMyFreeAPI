@@ -1,4 +1,5 @@
 import os
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -71,6 +72,29 @@ async def test_login_cookie_and_limits(web_client):
 	assert 'SameSite=Strict' in response.headers['Set-Cookie']
 	assert PASSWORD not in await response.text()
 	assert PASSWORD.encode() not in (service.jobs.data_dir / 'webui.sqlite3').read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_start_run_single_account_contract_requires_valid_scope_and_csrf(web_client, monkeypatch):
+	service, client = web_client
+	headers = await login(client)
+	start = AsyncMock(return_value={'id': 7, 'state': 'running'})
+	monkeypatch.setattr(service.jobs, 'start', start)
+	assert (await client.post('/api/runs', json={'revision': 1, 'account_id': 'first'})).status == 403
+	invalid_scopes: tuple[object, ...] = (None, '', 1, True, [], {}, 'x' * 129)
+	for account_id in invalid_scopes:
+		assert (
+			await client.post('/api/runs', json={'revision': 1, 'account_id': account_id}, headers=headers)
+		).status == 400
+	assert (
+		await client.post('/api/runs', json={'revision': 1, 'account_ids': ['first']}, headers=headers)
+	).status == 400
+	start.assert_not_called()
+	response = await client.post('/api/runs', json={'revision': 1, 'account_id': 'first'}, headers=headers)
+	assert response.status == 202
+	start.assert_awaited_once_with(1, account_id='first')
+	assert (await client.post('/api/runs', json={'revision': 1}, headers=headers)).status == 202
+	start.assert_awaited_with(1, account_id=None)
 
 
 @pytest.mark.asyncio

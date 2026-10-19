@@ -2,29 +2,6 @@
 
 (() => {
   const SECRET = '__UNCHANGED_SECRET__';
-  const COOKIE_EXTRACTION_SCRIPT = `// 在已登录的 AnyRouter 页面执行. 只读取 Cookie, 不发送网络请求.
-(async () => {
-  if (location.origin !== 'https://anyrouter.top') {
-    console.warn('请在已登录的 https://anyrouter.top 页面执行此脚本.');
-    return;
-  }
-  const cookie = document.cookie;
-  if (!cookie.trim()) {
-    console.warn('未读取到 Cookie. HttpOnly Cookie 无法由脚本读取, 请从 Network 的请求头中手动复制完整 Cookie.');
-    return;
-  }
-  if (!cookie.split(';').some((part) => part.trim().startsWith('session=') && part.trim().slice(8).trim())) {
-    console.warn('未读取到登录 Cookie session, 不修改剪贴板. acw_sc__v2 只是访问验证 Cookie. session 若设置了 HttpOnly, 请在 Application -> Cookies -> https://anyrouter.top 复制 session 的 Value, 在 WebUI 填写 session=复制的值; 或从 Network 请求头复制包含 session 的完整 Cookie.');
-    return;
-  }
-  try {
-    if (typeof copy === 'function') copy(cookie);
-    else await navigator.clipboard.writeText(cookie);
-    console.info('Cookie 已复制, 请回到 WebUI 粘贴. 不包含 HttpOnly Cookie, 登录有效性仍需由站点核验.');
-  } catch (_) {
-    console.warn('无法写入剪贴板. 请从 Network 的请求头中手动复制完整 Cookie.');
-  }
-})();`;
   const $ = (id) => document.getElementById(id);
   const copy = (value) => JSON.parse(JSON.stringify(value));
   const state = {
@@ -32,7 +9,7 @@
     tab: 'accounts', busy: false, configLoading: false, statusLoading: false,
     runsLoading: false, status: null, statusFresh: false, uncertain: null, resolveAccount: null,
     savedIds: new Set(), migration: null, focusAccount: new URL(window.location.href).searchParams.get('account'),
-    pollTimer: null, polling: false, expanded: new Map(), cardHeaders: [],
+    pollTimer: null, polling: false, expanded: new Map(), cardHeaders: [], runViews: new Map(),
   };
 
   class ApiError extends Error {
@@ -98,6 +75,15 @@
     updateControls();
   }
 
+  function accountRunBlocked(accountId) {
+    const account = state.config?.accounts.find((entry) => entry.id === accountId);
+    const attention = state.status?.attention?.[accountId];
+    if (!account?.enabled || !state.savedIds.has(accountId) || attention?.outcome === 'uncertain') return true;
+    if (attention?.outcome !== 'rate_limited') return false;
+    const retryAt = typeof attention.retry_at === 'number' ? attention.retry_at * 1000 : attention.retry_at;
+    return !retryAt || !Number.isFinite(new Date(retryAt).getTime()) || new Date(retryAt).getTime() > Date.now();
+  }
+
   function updateControls() {
     const available = !!state.config && !state.configLoading && state.authenticated;
     const blocked = state.busy || !!state.uncertain;
@@ -106,6 +92,13 @@
     $('reload-config').disabled = !state.authenticated || state.busy || state.configLoading;
     $('reload-config').textContent = state.configLoading ? '读取中...' : '重新读取';
     $('start-button').disabled = !available || blocked || state.dirty || !state.statusFresh || !!state.status?.running;
+    document.querySelectorAll('[data-account-run]').forEach((item) => {
+      const account = state.config?.accounts.find((entry) => entry.id === item.dataset.accountRun);
+      const attention = state.status?.attention?.[item.dataset.accountRun];
+      item.setAttribute('aria-label', `签到账号 ${account?.name || account?.id || '新账号'}`);
+      item.disabled = !available || blocked || state.dirty || !state.statusFresh || !!state.status?.running || accountRunBlocked(item.dataset.accountRun);
+      item.title = !state.savedIds.has(account?.id) ? '请先保存此账号' : !account?.enabled ? '此账号已停用' : state.dirty ? '请先保存当前修改' : attention?.outcome === 'uncertain' ? '请先核对结果并解除暂停' : item.disabled ? '请等待当前操作完成并确认状态' : '仅签到此账号';
+    });
     $('stop-button').disabled = blocked || !state.statusFresh || !state.status?.running || state.status?.run?.state === 'stopping';
     $('logout-button').disabled = state.busy;
     $('dirty-status').textContent = !available ? '配置尚未就绪' : state.uncertain ? '请先确认上次操作结果' : state.dirty ? '有未保存的修改' : '所有修改已保存';
@@ -309,6 +302,7 @@
     currentBadge.id = 'task-badge';
     $('task-badge').replaceWith(currentBadge);
     $('task-description').textContent = run ? `任务 #${run.id}, ${formatTime(run.started_at)} 开始.${run.error ? ` ${explainError(run.error)}` : ''}${run.state === 'needs_attention' ? ' 部分账号已暂停, 请查看近期记录并更新凭据.' : ''}${run.state === 'uncertain' ? ' 请先在站点核对结果, 避免重复执行.' : ''}` : '还没有运行中的任务. 配置完成后即可开始.';
+    setText($('task-progress'), progressText(run?.summary?.progress, run?.state));
     $('next-run').textContent = data.next_run_at ? `下次计划: ${formatTime(data.next_run_at)}` : '定时任务未启用, 或尚未安排下一次运行.';
     updateControls();
   }
@@ -340,6 +334,121 @@
     }
   }
 
+  function stageLabel(stage) {
+    return ({ prepare: '准备账号', load_session: '读取会话', password_login: '账号密码登录', verify_identity: '核验账号', checkin: '发送签到请求', verify_result: '核验签到结果', save_session: '保存会话', finished: '账号处理结束', notify: '发送通知' })[stage] || stage || '等待执行';
+  }
+
+  function requestDetail(item) {
+    if (!item || typeof item !== 'object') return '';
+    const parts = [];
+    if (['GET', 'POST'].includes(item.method)) parts.push(item.method);
+    if (typeof item.path === 'string' && /^\/api\/[a-z0-9/_-]+$/i.test(item.path)) parts.push(item.path);
+    if (Number.isInteger(item.http_status)) parts.push(`HTTP ${item.http_status}`);
+    if (['TimeoutException', 'ConnectTimeout', 'ReadTimeout', 'WriteTimeout', 'PoolTimeout', 'ConnectError', 'ProxyError', 'NetworkError', 'ReadError', 'WriteError', 'CloseError', 'ProtocolError', 'LocalProtocolError', 'RemoteProtocolError', 'RequestError', 'HTTPStatusError', 'UnsupportedProtocol', 'TooManyRedirects', 'DecodingError', 'ExecutionError'].includes(item.error_type)) parts.push(item.error_type);
+    if (Number.isFinite(item.timeout_seconds)) parts.push(`超时设置 ${item.timeout_seconds} 秒`);
+    return parts.join(' / ');
+  }
+
+  function progressText(progress, runState) {
+    if (!progress || !Number.isInteger(progress.total) || !Number.isInteger(progress.completed)) return '';
+    const active = progress.active_account;
+    const running = ['running', 'stopping'].includes(runState);
+    return `已处理 ${progress.completed} / ${progress.total} 个账号${active ? `. ${running ? '当前' : '最后阶段'}: ${active.name || active.id || '账号'} / ${stageLabel(active.stage)}${requestDetail(active) ? ` / ${requestDetail(active)}` : ''}` : progress.completed < progress.total ? running ? '. 等待下一个账号' : '. 任务已结束, 部分账号未处理' : '. 账号处理完成'}`;
+  }
+
+  function setText(item, text) {
+    if (item.textContent !== text) item.textContent = text;
+    item.hidden = !text;
+  }
+
+  function reasonText(reason) {
+    if (!reason) return '';
+    const explanation = explainError(reason);
+    return explanation === reason ? /^[a-z][a-z0-9_]*$/i.test(reason) ? `代码: ${reason}` : String(reason) : `${explanation}. 代码: ${reason}`;
+  }
+
+  function createAccountResult() {
+    const root = el('section', 'run-account');
+    const title = el('p', 'run-account-title');
+    const reason = el('p', 'run-meta');
+    const verification = el('p', 'run-meta');
+    const diagnostic = el('p', 'run-meta run-diagnostic');
+    const retry = el('p', 'run-meta');
+    const steps = el('ol', 'run-steps');
+    root.append(title, reason, verification, diagnostic, retry, steps);
+    return { root, title, reason, verification, diagnostic, retry, steps };
+  }
+
+  function updateAccountResult(view, account) {
+    const outcome = account.pending_outcome || account.outcome || (account.success ? 'succeeded' : 'failed');
+    const reason = account.pending_reason || account.reason || account.error;
+    setText(view.title, `${account.name || account.id || '账号'}: ${account.pending_outcome ? '已暂停, ' : ''}${runLabel(outcome)}`);
+    setText(view.reason, reasonText(reason));
+    const verification = account.verification_reason ? `结果核验: ${reasonText(account.verification_reason)}` : account.provider === 'agentrouter' && account.success && reason !== 'user_info_requested_reward_unverified' ? '已完成用户信息请求, 奖励请以站点记录为准' : '';
+    setText(view.verification, verification);
+    const diagnostic = account.diagnostic;
+    setText(view.diagnostic, diagnostic ? `诊断: ${stageLabel(diagnostic.stage)}${requestDetail(diagnostic) ? ` / ${requestDetail(diagnostic)}` : ''}` : '');
+    setText(view.retry, Number.isFinite(account.retry_after_seconds) ? `至少等待 ${account.retry_after_seconds} 秒` : '');
+    const steps = Array.isArray(account.steps) ? account.steps.filter((step) => step && typeof step === 'object') : [];
+    steps.forEach((step, index) => {
+      const item = view.steps.children[index] || el('li');
+      const status = ({ running: '执行中', completed: '完成', failed: '失败' })[step.state] || step.state || '';
+      setText(item, `${stageLabel(step.stage)}: ${status}${step.at ? ` / ${formatTime(step.at)}` : ''}${requestDetail(step) ? ` / ${requestDetail(step)}` : ''}`);
+      item.className = step.state === 'failed' ? 'step-failed' : '';
+      if (!item.parentNode) view.steps.append(item);
+    });
+    while (view.steps.children.length > steps.length) view.steps.lastChild.remove();
+    view.steps.hidden = !steps.length;
+  }
+
+  function createRunView(run) {
+    const root = el('div', 'run-row');
+    root.dataset.runId = run.id;
+    const main = el('div', 'run-main');
+    const title = el('p', 'run-title', `任务 #${run.id}`);
+    const started = el('p', 'run-meta');
+    const finished = el('p', 'run-meta');
+    const error = el('p', 'run-meta run-diagnostic');
+    const counts = el('p', 'run-meta');
+    const progress = el('p', 'run-progress');
+    const notification = el('p', 'run-meta');
+    const details = el('details', 'run-details');
+    details.append(el('summary', '', '查看账号结果和步骤'));
+    const active = el('p', 'run-active run-meta');
+    details.append(active);
+    main.append(title, started, finished, error, counts, progress, notification, details);
+    const status = badge(run.state);
+    root.append(main, status);
+    return { root, started, finished, error, counts, progress, notification, details, active, status, accounts: new Map() };
+  }
+
+  function updateRunView(view, run) {
+    const summary = run.summary && typeof run.summary === 'object' ? run.summary : {};
+    setText(view.started, formatTime(run.started_at));
+    setText(view.finished, run.finished_at ? `结束: ${formatTime(run.finished_at)}` : '');
+    setText(view.error, reasonText(run.error));
+    setText(view.counts, typeof summary.success_count === 'number' && typeof summary.total_count === 'number' ? `成功 ${summary.success_count} / ${summary.total_count}` : '');
+    setText(view.progress, progressText(summary.progress, run.state));
+    setText(view.notification, summary.notification_error ? '通知发送异常. 请检查通知配置和服务日志.' : '');
+    setText(view.status, runLabel(run.state));
+    view.status.className = badge(run.state).className;
+    const active = summary.progress?.active_account;
+    setText(view.active, active ? `${['running', 'stopping'].includes(run.state) ? '正在处理' : '最后处理'} ${active.name || active.id || '账号'}: ${stageLabel(active.stage)}${active.at ? ` / ${formatTime(active.at)}` : ''}${requestDetail(active) ? ` / ${requestDetail(active)}` : ''}` : '');
+    const accounts = Array.isArray(summary.accounts) ? summary.accounts.filter((account) => account && typeof account === 'object') : [];
+    const keys = new Set();
+    accounts.forEach((account, index) => {
+      const key = String(account.id ?? index);
+      keys.add(key);
+      let result = view.accounts.get(key);
+      if (!result) { result = createAccountResult(); view.accounts.set(key, result); }
+      updateAccountResult(result, account);
+      const position = view.details.children[index + 2];
+      if (position !== result.root) view.details.insertBefore(result.root, position || null);
+    });
+    view.accounts.forEach((account, key) => { if (!keys.has(key)) { account.root.remove(); view.accounts.delete(key); } });
+    view.details.hidden = !accounts.length && !active;
+  }
+
   async function loadRuns() {
     if (state.runsLoading) return;
     state.runsLoading = true;
@@ -347,41 +456,25 @@
     try {
       const data = await api('/api/runs');
       const list = $('runs-list');
-      list.replaceChildren();
-      if (!data.runs.length) list.append(el('p', 'muted small', '暂无运行记录. 首次执行后会显示在这里.'));
-      data.runs.slice(0, 12).forEach((run) => {
-        const row = el('div', 'run-row');
-        const main = el('div', 'run-main');
-        main.append(el('p', 'run-title', `任务 #${run.id}`));
-        main.append(el('p', 'run-meta', formatTime(run.started_at)));
-        if (run.finished_at) main.append(el('p', 'run-meta', `结束: ${formatTime(run.finished_at)}`));
-        if (run.error) main.append(el('p', 'run-meta', explainError(run.error)));
-        if (run.summary && typeof run.summary === 'object') {
-          if (typeof run.summary.success_count === 'number' && typeof run.summary.total_count === 'number') {
-            main.append(el('p', 'run-meta', `成功 ${run.summary.success_count} / ${run.summary.total_count}`));
-          }
-          if (run.summary.notification_error) main.append(el('p', 'run-meta', '通知发送异常'));
-          if (Array.isArray(run.summary.accounts) && run.summary.accounts.length) {
-            const details = el('details', 'run-details');
-            details.append(el('summary', '', '查看账号结果'));
-            run.summary.accounts.forEach((account) => {
-              if (account && typeof account === 'object') {
-                const outcome = account.pending_outcome || account.outcome || (account.success ? 'succeeded' : 'failed');
-                const reason = account.pending_reason || account.reason || account.error;
-                const retry = Number.isFinite(account.retry_after_seconds) ? `, 至少等待 ${account.retry_after_seconds} 秒` : '';
-                details.append(el('p', 'run-meta', `${account.name || account.id || '账号'}: ${account.pending_outcome ? '已暂停, ' : ''}${runLabel(outcome)}${reason ? `, ${explainError(reason)}` : ''}${retry}${account.provider === 'agentrouter' && account.success && reason !== 'user_info_requested_reward_unverified' ? ', 已完成用户信息请求, 奖励请以站点记录为准' : ''}`));
-              }
-            });
-            main.append(details);
-          }
-        }
-        row.append(main, badge(run.state));
-        list.append(row);
+      const scrollTop = list.scrollTop;
+      const runs = data.runs.slice(0, 12);
+      const keys = new Set(runs.map((run) => String(run.id)));
+      if (!state.runViews.size) list.replaceChildren();
+      runs.forEach((run, index) => {
+        const key = String(run.id);
+        let view = state.runViews.get(key);
+        if (!view) { view = createRunView(run); state.runViews.set(key, view); }
+        updateRunView(view, run);
+        const position = list.children[index];
+        if (position !== view.root) list.insertBefore(view.root, position || null);
       });
+      state.runViews.forEach((view, key) => { if (!keys.has(key)) { view.root.remove(); state.runViews.delete(key); } });
+      if (!runs.length) list.replaceChildren(el('p', 'muted small', '暂无运行记录. 首次执行后会显示在这里.'));
+      list.scrollTop = scrollTop;
+      $('runs-error').hidden = true;
     } catch (error) {
-      const box = el('div', 'load-error');
-      box.append(el('span', '', errorText(error)), button('重试', 'text-button', loadRuns));
-      $('runs-list').replaceChildren(box);
+      $('runs-error').hidden = false;
+      $('runs-error').querySelector('span').textContent = `${errorText(error)}${state.runViews.size ? ' 已保留上次读取的记录, 内容可能已过期.' : ''}`;
     } finally {
       state.runsLoading = false;
       $('refresh-runs').disabled = false;
@@ -530,39 +623,6 @@
   }
   secretField.counter = 0;
 
-  function cookieExtractionHelp() {
-    const wrap = el('div', 'field');
-    const details = el('details', 'details-box');
-    details.append(el('summary', '', '查看提取脚本 / 手动复制'));
-    const scriptField = el('label', 'field');
-    const script = el('textarea');
-    script.readOnly = true;
-    script.spellcheck = false;
-    script.rows = 12;
-    script.value = COOKIE_EXTRACTION_SCRIPT;
-    scriptField.append(el('span', 'field-label', 'Cookie 提取脚本'), script);
-    details.append(scriptField);
-    const actions = el('div', 'secret-control');
-    actions.append(button('复制提取脚本', 'button secondary', async () => {
-      try {
-        await navigator.clipboard.writeText(COOKIE_EXTRACTION_SCRIPT);
-        notice('已复制提取脚本. 请在 AnyRouter 的 Console 执行, 确认提示 Cookie 已复制后再粘贴结果. 若提示缺少 session, 请按页面说明手动获取.');
-      } catch (_) {
-        details.open = true;
-        script.focus();
-        script.select();
-        notice('无法自动写入剪贴板. 已选中提取脚本, 请手动复制后在 AnyRouter 的 Console 中执行.', 'warning');
-      }
-    }));
-    wrap.append(
-      actions,
-      el('p', 'field-hint', '先登录 https://anyrouter.top, 按 F12 -> Application -> Cookies -> https://anyrouter.top, 找到 session 并复制其 Value, 在上方填写 session=复制的值. 也可从 Network 的 Request Headers 复制包含 session 的完整 Cookie 值.'),
-      el('p', 'field-hint', '脚本只能读取 document.cookie, 无法读取 HttpOnly Cookie. 可在 F12 的 Console 尝试执行脚本, 仅在读到非空 session 时复制. acw_sc__v2 只是访问验证 Cookie, 不能替代登录 Cookie.'),
-      details,
-    );
-    return wrap;
-  }
-
   function proxyField(label, object, key, hint) {
     const wrap = el('div', 'field');
     const title = el('span', 'field-label', label);
@@ -685,6 +745,11 @@
         summary: () => `${account.provider === 'agentrouter' ? 'agentrouter.org' : 'anyrouter.top'} / ${({ cookie: 'Cookie', password: '站点账号密码', system_token: '系统访问令牌' })[account.auth_type] || '待重新配置'} / ${account.enabled ? '已启用' : '已停用'}`,
       });
       outer.dataset.accountId = account.id;
+      const runAccount = button('签到此账号', 'button secondary account-run', () => taskAction(false, account.id));
+      runAccount.dataset.accountRun = account.id;
+      runAccount.setAttribute('aria-label', `签到账号 ${account.name || account.id || '新账号'}`);
+      const head = outer.querySelector('.card-heading');
+      head.insertBefore(runAccount, head.lastChild);
       grid.append(
         field('账号名称', account.name, (value) => { account.name = value; }, { placeholder: '例如: 主账号', optional: true }),
         selectField('目标站点', account.provider, [['anyrouter', 'AnyRouter - anyrouter.top'], ['agentrouter', 'AgentRouter - agentrouter.org']], (value) => {
@@ -703,7 +768,7 @@
         grid.append(secretField('系统访问令牌', account.system_access_token, (value) => { account.system_access_token = value; }, { wide: true, hint: '填写站点控制台的系统访问令牌, 不是模型调用 API Key.' }));
       } else {
         const cookie = secretField('Cookie', account.cookies, (value) => { account.cookies = value; }, { wide: true, placeholder: 'session=...; other=...', hint: '输入完整 Cookie header. 已保存值留空保留, 点击清除才删除.' });
-        cookie.append(cookieExtractionHelp());
+        cookie.append(el('p', 'field-hint', '先登录 https://anyrouter.top, 按 F12 -> Application -> Cookies -> https://anyrouter.top, 找到 session 并复制其 Value, 在上方手动粘贴 session=复制的值. 也可从 Network 的 Request Headers 复制包含 session 的完整 Cookie 值. acw_sc__v2 只是访问验证 Cookie, 不能替代登录 Cookie.'));
         grid.append(cookie);
       }
       grid.append(
@@ -878,16 +943,19 @@
     } finally { setBusy(false); }
   }
 
-  async function taskAction(stop) {
-    if (state.busy || state.uncertain || !state.statusFresh) return;
+  async function taskAction(stop, accountId = null) {
+    if (state.busy || state.uncertain || !state.statusFresh || !state.authenticated) return;
+    if (!stop && (!state.config || state.configLoading)) return;
     if (!stop && state.dirty) { notice('请先保存当前修改, 再启动任务.', 'warning'); return; }
     if (!stop && state.status?.running) return;
+    if (!stop && accountId && accountRunBlocked(accountId)) return;
     setBusy(true);
     try {
       const path = stop ? '/api/runs/stop' : '/api/runs';
       const body = stop ? {} : { revision: state.revision };
+      if (!stop && accountId) body.account_id = accountId;
       await api(path, { method: 'POST', body });
-      notice(stop ? '已请求停止任务. 请等待运行状态更新.' : '签到任务已启动. 结果不确定或仍在限流期限内的账号继续暂停, 请查看近期记录.');
+      notice(stop ? '已请求停止任务. 请等待运行状态更新.' : accountId ? '此账号的签到任务已启动. 可在当前任务和近期运行中查看进度及结果.' : '签到任务已启动. 结果不确定或仍在限流期限内的账号继续暂停, 请查看近期记录.');
       await Promise.allSettled([loadStatus(), loadRuns()]);
     } catch (error) {
       if (!(error instanceof ApiError) || error.status >= 500 || error.status === 0 || (error.status >= 200 && error.status < 300)) setUncertain(stop ? 'stop' : 'run', errorText(error));
@@ -936,6 +1004,7 @@
       state.config = null; state.revision = null; state.dirty = false; state.uncertain = null;
       $('form-content').replaceChildren();
       $('runs-list').replaceChildren();
+      state.runViews.clear();
       notice('');
       showLogin('');
     } catch (error) {
@@ -956,6 +1025,7 @@
   $('retry-config').addEventListener('click', () => loadConfig(false));
   $('retry-status').addEventListener('click', loadStatus);
   $('refresh-runs').addEventListener('click', loadRuns);
+  $('retry-runs').addEventListener('click', loadRuns);
   $('start-button').addEventListener('click', () => taskAction(false));
   $('stop-button').addEventListener('click', () => taskAction(true));
   window.addEventListener('beforeunload', (event) => { if (state.dirty) { event.preventDefault(); event.returnValue = ''; } });

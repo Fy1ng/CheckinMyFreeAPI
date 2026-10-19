@@ -55,63 +55,21 @@ async def local_ui(tmp_path, intercept=None):
 
 
 @pytest.mark.asyncio
-async def test_cookie_script_copy_is_local_and_only_available_for_cookie_auth(tmp_path):
+async def test_cookie_auth_only_accepts_manual_paste_and_keeps_login_guidance(tmp_path):
 	async with local_ui(tmp_path) as (page, service, requests):
 		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
-		await page.get_by_label('Cookie', exact=True).fill('session=synthetic-saved-secret')
+		await expect(page.get_by_label('Cookie', exact=True)).to_be_visible()
+		assert await page.get_by_role('button', name='复制提取脚本', exact=True).count() == 0
+		assert await page.get_by_label('Cookie 提取脚本', exact=True).count() == 0
+		await expect(page.locator('.field-hint').filter(has_text='Application -> Cookies')).to_contain_text(
+			'session=复制的值'
+		)
+		await page.get_by_label('Cookie', exact=True).fill('session=synthetic-manual-cookie')
 		await page.get_by_label(re.compile('^目标站点用户 ID')).fill('17')
 		await page.get_by_role('button', name='保存配置', exact=True).click()
 		await expect(page.locator('#dirty-status')).to_have_text('所有修改已保存')
-		await page.evaluate("""() => {
-			Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
-				writeText: async (value) => { window.copiedScript = value; }
-			} });
-		}""")
-		request_count = len(requests)
-		await page.get_by_role('button', name='复制提取脚本', exact=True).click()
-		await expect(page.locator('#global-message')).to_contain_text('已复制提取脚本')
-		script = await page.evaluate('window.copiedScript')
-		assert script == await page.get_by_label('Cookie 提取脚本', exact=True).input_value()
-		assert 'synthetic-saved-secret' not in script and SECRET_KEEP not in script
-		await expect(page.locator('#dirty-status')).to_have_text('所有修改已保存')
-		await expect(page.locator('#save-button')).to_be_disabled()
-		await page.get_by_label('Cookie', exact=True).fill('session=synthetic-draft-secret')
-		await page.get_by_role('button', name='复制提取脚本', exact=True).click()
-		assert await page.evaluate('window.copiedScript') == script
-		await expect(page.get_by_label('Cookie', exact=True)).to_have_value('session=synthetic-draft-secret')
-		assert not any(method != 'GET' for method, _ in requests[request_count:])
-		assert not service.jobs.history()
-		await expect(page.locator('.field-hint').filter(has_text='无法读取 HttpOnly Cookie')).to_be_visible()
-		await page.get_by_label('认证方式').select_option('password')
-		await expect(page.get_by_role('button', name='复制提取脚本', exact=True)).to_have_count(0)
-		await page.get_by_label(re.compile('^目标站点(?!用户)')).select_option('agentrouter')
-		await expect(page.get_by_role('button', name='复制提取脚本', exact=True)).to_have_count(0)
-
-
-@pytest.mark.parametrize('clipboard_available', [False, True])
-@pytest.mark.asyncio
-async def test_cookie_script_copy_failure_exposes_readonly_selected_script(tmp_path, clipboard_available):
-	async with local_ui(tmp_path) as (page, _, requests):
-		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
-		await page.evaluate(
-			"""(available) => {
-			Object.defineProperty(navigator, 'clipboard', { configurable: true, value: available
-				? { writeText: async () => { throw new Error('synthetic permission denial'); } }
-				: undefined });
-		}""",
-			clipboard_available,
-		)
-		request_count = len(requests)
-		await page.get_by_role('button', name='复制提取脚本', exact=True).click()
-		await expect(page.locator('#global-message')).to_contain_text('请手动复制')
-		script = page.get_by_label('Cookie 提取脚本', exact=True)
-		await expect(script).to_be_visible()
-		assert await script.evaluate(
-			'(el) => el.readOnly && el.selectionStart === 0 && el.selectionEnd === el.value.length'
-		)
-		assert not any(method != 'GET' for method, _ in requests[request_count:])
-		await page.set_viewport_size({'width': 390, 'height': 844})
-		assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+		assert service.store.load()[0]['accounts'][0]['cookies'] == 'session=synthetic-manual-cookie'
+		assert not any(method == 'POST' and path == '/api/runs' for method, path in requests)
 
 
 @pytest.mark.parametrize('cookie', ['acw_sc__v2=synthetic-waf', 'acw_sc__v2=synthetic-waf; session='])
@@ -128,116 +86,6 @@ async def test_cookie_draft_missing_session_is_actionable_and_never_saved(tmp_pa
 		await page.get_by_label('Cookie', exact=True).fill('session=synthetic-login; acw_sc__v2=synthetic-waf')
 		await page.get_by_role('button', name='保存配置', exact=True).click()
 		await expect(page.locator('#dirty-status')).to_have_text('所有修改已保存')
-
-
-@pytest.mark.asyncio
-async def test_cookie_extraction_script_on_isolated_target_origin(tmp_path):
-	async with local_ui(tmp_path) as (page, _, _):
-		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
-		script = await page.get_by_label('Cookie 提取脚本', exact=True).input_value()
-		context = await page.context.browser.new_context()
-		target_requests, logs = [], []
-
-		async def synthetic_site(route):
-			target_requests.append((route.request.method, route.request.url))
-			if route.request.url == 'https://anyrouter.top/':
-				await route.fulfill(content_type='text/html', body='<!doctype html><link rel="icon" href="data:,">')
-			else:
-				await route.abort()
-
-		try:
-			await context.route('**/*', synthetic_site)
-			await context.add_cookies(
-				[
-					{
-						'name': 'session',
-						'value': 'synthetic-readable-cookie',
-						'url': 'https://anyrouter.top/',
-						'secure': True,
-					},
-					{
-						'name': 'hidden',
-						'value': 'synthetic-httponly-cookie',
-						'url': 'https://anyrouter.top/',
-						'httpOnly': True,
-						'secure': True,
-					},
-				]
-			)
-			target = await context.new_page()
-			target.on('console', lambda message: logs.append(message.text))
-			await target.goto('https://anyrouter.top/')
-			await target.evaluate('() => { window.copy = (value) => { window.copiedCookie = value; }; }')
-			await target.evaluate(script)
-			assert await target.evaluate('window.copiedCookie') == 'session=synthetic-readable-cookie'
-			assert '不包含 HttpOnly Cookie' in logs[-1]
-			await target.evaluate("""() => {
-				delete window.copy;
-				Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
-					writeText: async (value) => { window.copiedCookie = value; }
-				} });
-				window.copiedCookie = 'preserved';
-			}""")
-			await target.evaluate(script)
-			assert await target.evaluate('window.copiedCookie') == 'session=synthetic-readable-cookie'
-			await target.evaluate("""() => {
-				window.copiedCookie = 'preserved';
-				navigator.clipboard.writeText = async () => { throw new Error('synthetic denial'); };
-			}""")
-			await target.evaluate(script)
-			assert await target.evaluate('window.copiedCookie') == 'preserved'
-			assert '无法写入剪贴板' in logs[-1]
-			await context.clear_cookies(name='session')
-			await context.add_cookies(
-				[
-					{
-						'name': 'session',
-						'value': 'synthetic-hidden-session',
-						'url': 'https://anyrouter.top/',
-						'httpOnly': True,
-						'secure': True,
-					},
-					{'name': 'acw_sc__v2', 'value': 'synthetic-waf', 'url': 'https://anyrouter.top/', 'secure': True},
-					{
-						'name': 'other_session',
-						'value': 'synthetic-decoy',
-						'url': 'https://anyrouter.top/',
-						'secure': True,
-					},
-				]
-			)
-			await target.evaluate("""() => {
-				window.copyAttempted = false;
-				window.copy = (value) => { window.copyAttempted = true; window.copiedCookie = value; };
-			}""")
-			await target.evaluate(script)
-			assert '未读取到登录 Cookie session' in logs[-1]
-			assert await target.evaluate('window.copiedCookie') == 'preserved'
-			assert await target.evaluate('window.copyAttempted') is False
-			await context.clear_cookies()
-			await target.evaluate(script)
-			assert await target.evaluate('window.copiedCookie') == 'preserved'
-			assert '未读取到 Cookie' in logs[-1]
-			assert not any(
-				any(
-					value in entry
-					for value in (
-						'synthetic-readable-cookie',
-						'synthetic-httponly-cookie',
-						'synthetic-hidden-session',
-						'synthetic-waf',
-						'synthetic-decoy',
-					)
-				)
-				for entry in logs
-			)
-			assert target_requests == [('GET', 'https://anyrouter.top/')]
-			page.on('console', lambda message: logs.append(message.text))
-			await page.evaluate('() => { window.copy = () => { throw new Error("must not read WebUI cookies"); }; }')
-			await page.evaluate(script)
-			assert '请在已登录的 https://anyrouter.top 页面执行' in logs[-1]
-		finally:
-			await context.close()
 
 
 @pytest.mark.asyncio
@@ -345,7 +193,8 @@ async def test_unknown_config_save_locks_until_reload_without_losing_draft(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_unknown_job_start_is_not_repeated_and_results_are_actionable(tmp_path):
+@pytest.mark.parametrize('single_account', [False, True])
+async def test_unknown_job_start_is_not_repeated_and_results_are_actionable(tmp_path, single_account):
 	starts = []
 	running = False
 	run = None
@@ -367,15 +216,30 @@ async def test_unknown_job_start_is_not_repeated_and_results_are_actionable(tmp_
 			return True
 		return False
 
-	async with local_ui(tmp_path, intercept) as (page, _, _):
+	async with local_ui(tmp_path, intercept) as (page, service, _):
+		if single_account:
+			config, revision = service.store.load()
+			config['accounts'] = [
+				{
+					'id': 'a',
+					'provider': 'anyrouter',
+					'auth_type': 'cookie',
+					'cookies': 'session=synthetic',
+					'api_user': '17',
+				}
+			]
+			service.store.save(config, revision)
+			await page.reload()
 		await expect(page.locator('#start-button')).to_be_enabled()
-		await page.locator('#start-button').click()
+		start = page.locator('[data-account-run="a"]') if single_account else page.locator('#start-button')
+		await start.click()
 		await expect(page.locator('#global-message')).to_contain_text('未能确认结果')
 		await expect(page.locator('#start-button')).to_be_disabled()
 		await expect(page.locator('#stop-button')).to_be_disabled()
 		await page.get_by_role('button', name='重新读取确认', exact=True).click()
 		await expect(page.locator('#stop-button')).to_be_enabled()
 		assert len(starts) == 1
+		assert starts[0] == ({'revision': 1, 'account_id': 'a'} if single_account else {'revision': 0})
 
 		running = False
 		run = {
@@ -427,6 +291,196 @@ async def test_unknown_job_start_is_not_repeated_and_results_are_actionable(tmp_
 		await expect(page.locator('#runs-list')).to_contain_text('至少等待 120 秒')
 		await expect(page.locator('#runs-list')).to_contain_text('请先到站点核对是否已执行')
 		assert len(starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_single_account_controls_require_saved_enabled_fresh_idle_configuration(tmp_path):
+	starts = []
+	running = False
+	status_error = False
+	attention = {'paused': {'outcome': 'uncertain', 'reason': 'request_result_unknown', 'retry_at': None}}
+
+	async def intercept(route, origin):
+		nonlocal running
+		request = route.request
+		if request.url == origin + '/api/status':
+			if status_error:
+				await route.abort('failed')
+			else:
+				await route.fulfill(json={'running': running, 'run': None, 'attention': attention})
+			return True
+		if request.url == origin + '/api/runs' and request.method == 'POST':
+			starts.append(request.post_data_json)
+			running = True
+			await route.fulfill(json={'started': True})
+			return True
+		return False
+
+	async with local_ui(tmp_path, intercept) as (page, service, _):
+		config, revision = service.store.load()
+		config['accounts'] = [
+			{
+				'id': account_id,
+				'provider': 'anyrouter',
+				'auth_type': 'cookie',
+				'cookies': 'session=synthetic',
+				'api_user': str(index + 17),
+				'enabled': account_id != 'disabled',
+			}
+			for index, account_id in enumerate(['first', 'second', 'disabled', 'paused'])
+		]
+		service.store.save(config, revision)
+		await page.reload()
+		first = page.locator('[data-account-run="first"]')
+		second = page.locator('[data-account-run="second"]')
+		await expect(first).to_be_enabled()
+		await expect(second).to_be_enabled()
+		await expect(page.locator('[data-account-run="disabled"]')).to_be_disabled()
+		await expect(page.locator('[data-account-run="paused"]')).to_be_disabled()
+		await page.locator('[data-account-id="first"] .card-toggle').click()
+		await page.locator('[data-account-id="first"]').get_by_label(re.compile('^账号名称')).fill('已保存账号')
+		await expect(first).to_be_disabled()
+		await expect(second).to_be_disabled()
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#config-revision')).to_have_text('已保存版本 2')
+		await expect(first).to_be_enabled()
+		await first.click()
+		await expect(second).to_be_disabled()
+		await expect(page.locator('#start-button')).to_be_disabled()
+		assert starts == [{'revision': 2, 'account_id': 'first'}]
+		running = False
+		status_error = True
+		await page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+		await expect(page.locator('#status-error')).to_be_visible()
+		await expect(first).to_be_disabled()
+		status_error = False
+		await page.locator('#retry-status').click()
+		await expect(first).to_be_enabled()
+		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+		await expect(page.locator('[data-account-run="account-1"]')).to_be_disabled()
+		await expect(first).to_be_disabled()
+		await page.set_viewport_size({'width': 390, 'height': 844})
+		assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+		assert len(starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_progress_diagnostics_and_open_details_survive_poll_and_read_failure(tmp_path):
+	run: dict = {
+		'id': 37,
+		'state': 'running',
+		'started_at': '2026-10-20T00:00:00Z',
+		'summary': {
+			'progress': {
+				'total': 2,
+				'completed': 0,
+				'active_account': {
+					'id': 'first',
+					'name': '首账号',
+					'provider': 'anyrouter',
+					'stage': 'checkin',
+					'at': '2026-10-20T00:00:01Z',
+					'method': 'POST',
+					'path': '/api/user/sign_in',
+				},
+			},
+			'accounts': [],
+		},
+	}
+	read_error = False
+	old_runs = [
+		{'id': value, 'state': 'succeeded', 'started_at': '2026-10-19T00:00:00Z'} for value in range(36, 24, -1)
+	]
+
+	async def intercept(route, origin):
+		if route.request.url == origin + '/api/status':
+			await route.fulfill(json={'running': run['state'] == 'running', 'run': run, 'next_run_at': None})
+			return True
+		if route.request.url == origin + '/api/runs' and route.request.method == 'GET':
+			if read_error:
+				await route.abort('failed')
+			else:
+				await route.fulfill(json={'runs': [run, *old_runs]})
+			return True
+		return False
+
+	async with local_ui(tmp_path, intercept) as (page, _, requests):
+		await expect(page.locator('#task-progress')).to_contain_text('已处理 0 / 2 个账号')
+		await expect(page.locator('#task-progress')).to_contain_text('首账号 / 发送签到请求 / POST / /api/user/sign_in')
+		row = page.locator('[data-run-id="37"]')
+		details = row.locator('.run-details')
+		await details.locator('summary').click()
+		await details.locator('summary').focus()
+		scroll = await page.evaluate("""() => {
+			window.savedRunRoot = document.querySelector('[data-run-id="37"]');
+			window.savedRunSummary = window.savedRunRoot.querySelector('summary');
+			const list = document.getElementById('runs-list');
+			list.scrollTop = 30;
+			return list.scrollTop;
+		}""")
+		run['summary']['progress']['completed'] = 1
+		run['summary']['progress']['active_account'] = {
+			'id': 'second',
+			'name': '次账号',
+			'stage': 'verify_identity',
+			'at': '2026-10-20T00:00:03Z',
+			'method': 'GET',
+			'path': '/api/user/self',
+		}
+		run['summary']['accounts'] = [
+			{
+				'id': 'first',
+				'name': '首账号',
+				'outcome': 'uncertain',
+				'reason': 'request_result_unknown',
+				'verification_reason': 'network_error',
+				'diagnostic': {
+					'stage': 'checkin',
+					'method': 'POST',
+					'path': '/api/user/sign_in',
+					'http_status': 503,
+					'error_type': 'ReadTimeout',
+					'timeout_seconds': 30,
+				},
+				'steps': [
+					{'stage': 'verify_identity', 'at': '2026-10-20T00:00:01Z', 'state': 'completed'},
+					{'stage': 'checkin', 'at': '2026-10-20T00:00:02Z', 'state': 'failed', 'error_type': 'ReadTimeout'},
+				],
+			}
+		]
+		await page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+		await expect(page.locator('#task-progress')).to_contain_text('已处理 1 / 2 个账号')
+		await expect(details).to_have_attribute('open', '')
+		await expect(details).to_contain_text('代码: request_result_unknown')
+		await expect(details).to_contain_text('结果核验: 网络请求失败')
+		await expect(details).to_contain_text(
+			'诊断: 发送签到请求 / POST / /api/user/sign_in / HTTP 503 / ReadTimeout / 超时设置 30 秒'
+		)
+		await expect(details.locator('.run-steps')).to_contain_text('发送签到请求: 失败')
+		assert await page.evaluate(
+			'window.savedRunRoot === document.querySelector(\'[data-run-id="37"]\') && document.activeElement === window.savedRunSummary'
+		)
+		assert await page.locator('#runs-list').evaluate('(el) => el.scrollTop') == scroll
+		read_error = True
+		await page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+		await expect(page.locator('#runs-error')).to_contain_text('已保留上次读取的记录')
+		await expect(details).to_have_attribute('open', '')
+		assert await page.evaluate('document.activeElement === window.savedRunSummary')
+		read_error = False
+		await page.locator('#retry-runs').click()
+		await expect(page.locator('#runs-error')).to_be_hidden()
+		await details.locator('summary').click()
+		await page.locator('#refresh-runs').click()
+		await expect(details).not_to_have_attribute('open', '')
+		await details.locator('summary').click()
+		run['state'] = 'interrupted'
+		await page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+		await expect(page.locator('#task-progress')).to_contain_text('最后阶段: 次账号')
+		await expect(details.locator('.run-active')).to_contain_text('最后处理 次账号')
+		await expect(details).to_have_attribute('open', '')
+		await page.set_viewport_size({'width': 390, 'height': 844})
+		assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+		assert not any(method == 'POST' and path == '/api/runs' for method, path in requests)
 
 
 @pytest.mark.asyncio

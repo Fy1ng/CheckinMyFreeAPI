@@ -132,7 +132,11 @@ class HttpCheckinRuntime:
 		self.sessions = cast(_Sessions, sessions)
 		self.client_factory = client_factory
 
-	async def execute(self, account: dict) -> dict:
+	async def execute(self, account: dict, *, on_progress: Callable[[dict], None] | None = None) -> dict:
+		self._steps: list[dict] = []
+		self._current: dict = {}
+		self._on_progress = on_progress
+		self._stage('prepare')
 		result = {
 			'id': account.get('id', ''),
 			'name': account.get('name', ''),
@@ -140,7 +144,7 @@ class HttpCheckinRuntime:
 			'success': False,
 		}
 		if account.get('enabled', True) is False:
-			return {**result, 'outcome': 'skipped', 'reason': 'account_disabled'}
+			return self._finish({**result, 'outcome': 'skipped', 'reason': 'account_disabled'})
 		try:
 			provider = account.get('provider')
 			auth_type = account.get('auth_type')
@@ -168,11 +172,34 @@ class HttpCheckinRuntime:
 					details = await self._agent(client, account)
 				else:
 					details = await self._any(client, account, origin)
-			return {**result, **details, 'success': True}
+			return self._finish({**result, **details, 'success': True})
 		except _Failure as exc:
-			return {**result, 'outcome': exc.outcome, 'reason': exc.reason, **exc.details}
+			return self._finish({**result, 'outcome': exc.outcome, 'reason': exc.reason, **exc.details})
 		except (ValueError, TypeError):
-			return {**result, 'outcome': 'failed', 'reason': 'invalid_http_configuration'}
+			return self._finish({**result, 'outcome': 'failed', 'reason': 'invalid_http_configuration'})
+
+	def _update(self, **details: Any) -> None:
+		self._current.update(details)
+		self._steps[-1] = dict(self._current)
+		if self._on_progress:
+			self._on_progress(dict(self._current))
+
+	def _stage(self, stage: str) -> None:
+		if self._current and self._current['state'] == 'running':
+			self._update(state='completed')
+		self._current = {'stage': stage, 'at': datetime.now(timezone.utc).isoformat(), 'state': 'running'}
+		self._steps.append(dict(self._current))
+		self._update()
+
+	def _finish(self, result: dict) -> dict:
+		if result.get('success'):
+			self._stage('finished')
+			self._update(state='completed')
+		else:
+			self._update(state='failed')
+			result['diagnostic'] = {key: value for key, value in self._current.items() if key not in {'at', 'state'}}
+		result['steps'] = [dict(step) for step in self._steps]
+		return result
 
 	def _proxy(self, account: dict) -> str | None:
 		mode = account.get('proxy')
@@ -226,12 +253,31 @@ class HttpCheckinRuntime:
 		self, client: httpx.AsyncClient, method: str, path: str, *, side_effect: bool = False, **kwargs: Any
 	) -> dict:
 		mutation = method == 'POST' or side_effect
+		self._update(method=method, path=path, timeout_seconds=self.config.get('http', {}).get('timeout_seconds', 30))
 		try:
 			response = await client.request(method, path, **kwargs)
-		except httpx.RequestError:
+		except httpx.RequestError as exc:
+			error_type = next(
+				(
+					name
+					for category, name in (
+						(httpx.TimeoutException, 'TimeoutException'),
+						(httpx.ProxyError, 'ProxyError'),
+						(httpx.ConnectError, 'ConnectError'),
+						(httpx.NetworkError, 'NetworkError'),
+						(httpx.ProtocolError, 'ProtocolError'),
+					)
+					if isinstance(exc, category)
+				),
+				'RequestError',
+			)
+			self._update(error_type=error_type)
 			raise _Failure(
 				'uncertain' if mutation else 'failed', 'request_result_unknown' if mutation else 'network_error'
 			) from None
+		self._update(http_status=response.status_code)
+		if not 200 <= response.status_code < 300:
+			self._update(error_type='HTTPStatusError')
 		if response.status_code == 429:
 			raise _Failure('rate_limited', 'rate_limited', **_retry_after(response))
 		if 300 <= response.status_code < 400:
@@ -288,6 +334,7 @@ class HttpCheckinRuntime:
 		return data
 
 	async def _agent(self, client: httpx.AsyncClient, account: dict) -> dict:
+		self._stage('verify_identity')
 		user_id = _uid(account.get('api_user'))
 		token = account.get('system_access_token')
 		if not user_id or not isinstance(token, str) or not token.strip() or '\r' in token or '\n' in token:
@@ -375,6 +422,7 @@ class HttpCheckinRuntime:
 			)
 
 	async def _any(self, client: httpx.AsyncClient, account: dict, origin: str) -> dict:
+		self._stage('load_session')
 		binding = account_binding(account, self.config)
 		state = self._load(account, binding)
 		host = urlsplit(origin).hostname or ''
@@ -393,6 +441,7 @@ class HttpCheckinRuntime:
 			self._cookies(client, account.get('cookies'), host)
 		before = None
 		if state or account['auth_type'] == 'cookie':
+			self._stage('verify_identity')
 			try:
 				before = self._verify(
 					await self._request(client, 'GET', '/api/user/self', headers={'new-api-user': user_id}),
@@ -400,6 +449,7 @@ class HttpCheckinRuntime:
 					saved_id,
 				)
 			except _Failure as exc:
+				self._update(state='failed')
 				if account['auth_type'] != 'password' or exc.reason != 'credentials_rejected':
 					raise
 		if before is None:
@@ -407,6 +457,7 @@ class HttpCheckinRuntime:
 			if not isinstance(username, str) or not username or not isinstance(password, str) or not password:
 				raise _Failure('needs_credentials', 'username_and_password_required')
 			client.cookies.clear()
+			self._stage('password_login')
 			login = await self._request(
 				client, 'POST', '/api/user/login', json={'username': username, 'password': password}
 			)
@@ -419,12 +470,14 @@ class HttpCheckinRuntime:
 			user_id = user_id or login_id
 			if not user_id:
 				raise _Failure('needs_credentials', 'login_identity_unverified')
+			self._stage('verify_identity')
 			before = self._verify(
 				await self._request(client, 'GET', '/api/user/self', headers={'new-api-user': user_id}),
 				account,
 				user_id,
 			)
 		user_id = cast(str, _uid(before['id']))
+		self._stage('checkin')
 		payload = await self._request(
 			client, 'POST', '/api/user/sign_in', headers={'new-api-user': user_id, 'Content-Type': 'application/json'}
 		)
@@ -436,6 +489,7 @@ class HttpCheckinRuntime:
 			)
 		if not accepted and not already:
 			raise _Failure('failed', 'checkin_rejected')
+		self._stage('verify_result')
 		try:
 			after = self._verify(
 				await self._request(client, 'GET', '/api/user/self', headers={'new-api-user': user_id}),
@@ -455,6 +509,7 @@ class HttpCheckinRuntime:
 			for cookie in client.cookies.jar
 			if cookie.domain in {host, '.' + host}
 		]
+		self._stage('save_session')
 		try:
 			self.sessions.save(str(account['id']), binding, {'api_user': user_id, 'cookies': cookies})
 		except Exception:

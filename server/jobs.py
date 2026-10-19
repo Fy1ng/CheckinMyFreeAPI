@@ -167,7 +167,7 @@ class JobManager:
 		self.db.execute('UPDATE scheduler SET next_at=? WHERE id=1', (next_at,))
 		self.db.commit()
 
-	async def start(self, revision: int, *, trigger: str = 'manual') -> dict:
+	async def start(self, revision: int, *, trigger: str = 'manual', account_id: str | None = None) -> dict:
 		async with self._lock:
 			if self.active_id is not None:
 				raise BusyError('已有任务运行, 请等待完成或先停止')
@@ -176,22 +176,40 @@ class JobManager:
 				raise BusyError('配置已更新, 请重新读取后运行')
 			if trigger not in {'manual', 'scheduled'}:
 				raise BusyError('任务来源无效')
+			if account_id is not None:
+				if not isinstance(account_id, str) or trigger != 'manual':
+					raise BusyError('单账号任务参数无效')
+				selected = next((account for account in config['accounts'] if account['id'] == account_id), None)
+				if selected is None or not selected.get('enabled', True):
+					raise BusyError('请选择已保存且已启用的账号')
+				config['accounts'] = [selected]
 			if not any(account.get('enabled', True) for account in config['accounts']):
 				raise BusyError('请先保存至少一个已启用账号')
+			summary: dict = {
+				'account_id': account_id,
+				'accounts': [],
+				'progress': {
+					'total': sum(account.get('enabled', True) for account in config['accounts']),
+					'completed': 0,
+					'active_account': None,
+				},
+			}
 			cursor = self.db.execute(
-				"INSERT INTO runs(state,started_at,revision,kind,identity) VALUES ('running',?,?,?,?)",
-				(time.time(), revision, 'checkin', None),
+				"INSERT INTO runs(state,started_at,revision,kind,identity,summary) VALUES ('running',?,?,?,?,?)",
+				(time.time(), revision, 'checkin', None, json.dumps(summary)),
 			)
 			self.db.commit()
 			assert cursor.lastrowid is not None
 			self.active_id = cursor.lastrowid
 			self.stopping = False
 			self.task = asyncio.create_task(
-				self._execute(self.active_id, config, trigger=trigger), name='checkin-worker'
+				self._execute(self.active_id, config, trigger=trigger, account_id=account_id), name='checkin-worker'
 			)
 			return self.history()[0]
 
-	async def _execute(self, run_id: int, config: dict, *, trigger: str = 'manual') -> None:
+	async def _execute(
+		self, run_id: int, config: dict, *, trigger: str = 'manual', account_id: str | None = None
+	) -> None:
 		event_file = self.data_dir / f'run-{run_id}.json'
 		try:
 			if self.stopping:
@@ -221,6 +239,7 @@ class JobManager:
 				'event_file': str(event_file),
 				'run_id': run_id,
 				'trigger': trigger,
+				'account_id': account_id,
 			}
 			self.process.stdin.write(json.dumps(payload).encode())
 			await self.process.stdin.drain()
@@ -249,7 +268,9 @@ class JobManager:
 			)
 			if state != 'succeeded':
 				self._record_interrupted_account(progress, config)
-			summary = progress.get('summary') if isinstance(progress.get('summary'), dict) else None
+			summary = (
+				progress.get('summary') if isinstance(progress.get('summary'), dict) else self.history()[0]['summary']
+			)
 			error = (
 				None
 				if state == 'succeeded'
@@ -298,7 +319,12 @@ class JobManager:
 	def _read_progress(self, event_file: Path, run_id: int) -> None:
 		progress = self._progress(event_file)
 		state = 'stopping' if self.stopping else 'running'
-		self.db.execute('UPDATE runs SET state=? WHERE id=?', (state, run_id))
+		if isinstance(progress.get('summary'), dict):
+			self.db.execute(
+				'UPDATE runs SET state=?,summary=? WHERE id=?', (state, json.dumps(progress['summary']), run_id)
+			)
+		else:
+			self.db.execute('UPDATE runs SET state=? WHERE id=?', (state, run_id))
 		self.db.commit()
 
 	def _record_interrupted_account(self, progress: dict, config: dict) -> None:

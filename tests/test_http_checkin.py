@@ -120,7 +120,24 @@ async def test_any_cookie_checkin_verifies_identity_and_persists_only_successful
 		)
 
 	runner, store, requests, options, clients = runtime(handler)
-	result = await runner.execute(account())
+	events = []
+	result = await runner.execute(account(), on_progress=lambda event: events.append(copy.deepcopy(event)))
+	steps = result.pop('steps')
+	assert [step['stage'] for step in steps] == [
+		'prepare',
+		'load_session',
+		'verify_identity',
+		'checkin',
+		'verify_result',
+		'save_session',
+		'finished',
+	]
+	assert all(step['state'] == 'completed' for step in steps)
+	assert any(
+		event.get('method') == 'POST' and event['stage'] == 'checkin' and event['state'] == 'running'
+		for event in events
+	)
+	assert [step.get('http_status') for step in steps if 'method' in step] == [200, 200, 200]
 	assert result == {
 		'id': 'account-1',
 		'name': 'First account',
@@ -144,6 +161,7 @@ async def test_any_cookie_checkin_verifies_identity_and_persists_only_successful
 	assert options[0]['timeout'] == 30
 	assert clients[0].is_closed
 	assert capsys.readouterr().out == ''
+	assert 'private-cookie' not in json.dumps(events)
 	assert 'private-cookie' not in json.dumps(result)
 
 
@@ -402,6 +420,46 @@ async def test_info_network_error_does_not_login_or_retry():
 	result = await runner.execute(account())
 	assert result['outcome'] == 'failed' and result['reason'] == 'network_error'
 	assert len(requests) == 1 and not store.writes
+
+
+@pytest.mark.parametrize(
+	'error_type', [httpx.ReadTimeout, httpx.ConnectError, httpx.ProxyError, httpx.RemoteProtocolError]
+)
+async def test_diagnostics_keep_failure_stage_without_exception_text(error_type):
+	def handler(request):
+		raise error_type('private-cookie private-password private-system-token private-proxy', request=request)
+
+	runner, _, requests, _, _ = runtime(handler)
+	events: list[dict] = []
+	result = await runner.execute(account(), on_progress=events.append)
+	assert result['reason'] == 'network_error'
+	diagnostic = result['diagnostic']
+	assert diagnostic['stage'] == 'verify_identity'
+	assert diagnostic['method'] == 'GET' and diagnostic['path'] == '/api/user/self'
+	assert diagnostic['error_type'] in {'TimeoutException', 'ConnectError', 'ProxyError', 'ProtocolError'}
+	assert diagnostic['timeout_seconds'] == 30
+	assert result['steps'][-1]['state'] == 'failed'
+	assert len(requests) == 1
+	for secret in ('private-cookie', 'private-password', 'private-system-token', 'private-proxy'):
+		assert secret not in json.dumps([result, events])
+
+
+async def test_http_failure_diagnostics_include_status_without_response_body():
+	runner, _, requests, _, _ = runtime(
+		lambda request: httpx.Response(403, json={'message': 'private-cookie private-password'})
+	)
+	result = await runner.execute(account())
+	assert result['reason'] == 'access_blocked'
+	assert result['diagnostic'] == {
+		'stage': 'verify_identity',
+		'method': 'GET',
+		'path': '/api/user/self',
+		'timeout_seconds': 30,
+		'http_status': 403,
+		'error_type': 'HTTPStatusError',
+	}
+	assert len(requests) == 1
+	assert 'private-cookie' not in json.dumps(result) and 'private-password' not in json.dumps(result)
 
 
 @pytest.mark.parametrize('failure', ['timeout', 'network', 'server', 'malformed', 'array', 'invalid_user', 'empty'])

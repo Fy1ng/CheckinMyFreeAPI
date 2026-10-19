@@ -34,6 +34,7 @@
           <div class="task-panel">
             <div class="panel-title"><h2 id="task-title">当前任务</h2><span id="task-badge" class="badge">读取中</span></div>
             <p id="task-description" class="task-description">正在读取运行状态...</p>
+            <p id="task-progress" class="task-progress" role="status" aria-live="polite" hidden></p>
             <p id="next-run" class="muted small"></p>
             <div class="task-actions"><button id="start-button" class="button primary" type="button" disabled>开始签到</button><button id="stop-button" class="button danger-soft" type="button" disabled>停止任务</button></div>
             <p id="task-hint" class="muted small"></p>
@@ -42,6 +43,7 @@
           <div class="history-panel">
             <div class="panel-title"><h2>近期运行</h2><button id="refresh-runs" class="text-button" type="button">刷新</button></div>
             <div id="runs-list" class="runs-list"><p class="muted small">正在读取记录...</p></div>
+            <div id="runs-error" class="load-error" role="status" hidden><span></span><button id="retry-runs" class="text-button" type="button">重试记录读取</button></div>
           </div>
         </section>
 
