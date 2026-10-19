@@ -114,11 +114,15 @@ async def execute(payload: dict) -> int:
 		try:
 			result = await identity_runtime.execute(identity)
 		except AuthError as error:
+			identity_result = {'state': 'unverified'}
+			diagnostics = getattr(identity_runtime, 'diagnostics', None)
+			if diagnostics:
+				identity_result['diagnostics'] = diagnostics
 			publish(
 				state='failed',
 				manual=None,
 				error=error.reason,
-				summary={'kind': kind, 'identity': identity, 'identity_result': {'state': 'unverified'}},
+				summary={'kind': kind, 'identity': identity, 'identity_result': identity_result},
 			)
 			return 1
 		finally:

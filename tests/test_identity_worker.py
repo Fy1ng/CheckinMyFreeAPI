@@ -96,3 +96,21 @@ async def test_identity_task_cancellation_closes_runtime(identity_worker):
 		await worker.execute(payload)
 	runtime.close.assert_called_once()
 	checkin.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_failed_identity_task_persists_safe_probe_diagnostics(identity_worker):
+	payload, runtime, _, checkin, _ = identity_worker
+	runtime.diagnostics = {
+		'provider': 'linuxdo',
+		'endpoint': '/session/current.json',
+		'http_status': 403,
+		'response_kind': 'cloudflare_challenge',
+	}
+	runtime.execute.side_effect = AuthError('MANUAL_LOGIN_TIMED_OUT')
+	assert await worker.execute(payload) == 1
+	with open(payload['event_file'], encoding='utf-8') as stream:
+		result = json.load(stream)
+	assert result['summary']['identity_result'] == {'state': 'unverified', 'diagnostics': runtime.diagnostics}
+	assert result['error'] == 'MANUAL_LOGIN_TIMED_OUT'
+	checkin.assert_not_called()

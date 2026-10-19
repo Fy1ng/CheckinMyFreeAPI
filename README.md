@@ -237,7 +237,7 @@ uv run --frozen bandit -r . -c pyproject.toml
 - 无法打开页面: 检查服务状态、端口占用和 SSH 转发. 默认只允许本机访问.
 - 密钥读取失败: 检查文件为原始 32 字节, 以及容器 UID `10001` 的读取权限. 不要用 base64 文本替代原始文件.
 - 人工接管不可用: Linux 检查 DISPLAY/Xvfb、x11vnc、noVNC 与浏览器运行模式; Windows 本地有界面模式直接操作 Chromium, 不提供 noVNC 远程入口.
-- LinuxDo 独立身份登录会将身份查询接口明确返回的 `403 / not_logged_in` 视为尚未登录, 保留同一窗口等待人工操作; 其他 403 仍以 `ACCESS_BLOCKED` 结束. 429 表示限流, 不会自动重试. 只有实际身份校验通过后才保存登录态.
+- LinuxDo 登录表单可见时不查询受保护的身份接口, 保留原窗口等待人工登录. 身份接口明确返回 `403 / not_logged_in` 时继续等待; 若返回 `cf-mitigated: challenge`, 会在同一窗口打开身份接口, 让用户手动完成验证, 不重启浏览器. 一次任务最多自动打开该验证入口一次, 沿用原人工登录时限. 只有接口实际返回 200 且身份校验通过后才保存登录态. 普通 403 仍以 `ACCESS_BLOCKED` 结束, 429 不自动重试. 失败记录仅保留固定接口路径、状态码和响应类别, 不记录响应正文或 Cookie.
 - `OAUTH_IDENTITY_NOT_CONFIGURED`: 检查 Identity 别名、类型和 Account 关联.
 - `ACCOUNT_IDENTITY_PROXY_CONFLICT` / `SHARED_IDENTITY_PROXY_CONFLICT`: 统一同一身份的最终代理策略.
 - `ACCOUNT_MISMATCH`: 核对目标站点用户名和 ID, 不要删除校验字段接受未知账号.

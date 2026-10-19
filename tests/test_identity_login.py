@@ -11,6 +11,7 @@ from utils.auth_runtime import build_plans
 from utils.config import AccountConfig, AppConfig, IdentityConfig, ProviderConfig
 from utils.identity_login import (
 	IdentityLoginRuntime,
+	IdentityProbeError,
 	check_identity_subject,
 	identity_proxy,
 	probe_identity_user,
@@ -354,6 +355,57 @@ async def test_other_forbidden_responses_still_stop_without_retry(browser, kind,
 	with pytest.raises(AuthError, match='ACCESS_BLOCKED'):
 		await probe_identity_user(browser.page, kind)
 	assert browser.page.evaluate.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_api_challenge_has_only_safe_diagnostics(browser):
+	browser.page.url = 'https://linux.do/'
+	browser.page.evaluate.return_value = {
+		'status': 403,
+		'url': 'https://linux.do/session/current.json',
+		'cf_challenge': True,
+		'content_kind': 'html',
+		'data': {'private': 'synthetic-private-response'},
+		'headers': {'set-cookie': 'synthetic-private-cookie'},
+	}
+	with pytest.raises(IdentityProbeError, match='IDENTITY_CHALLENGE_REQUIRED') as caught:
+		await probe_identity_user(browser.page, 'linuxdo')
+	assert caught.value.diagnostics == {
+		'provider': 'linuxdo',
+		'endpoint': '/session/current.json',
+		'http_status': 403,
+		'response_kind': 'cloudflare_challenge',
+	}
+	assert 'synthetic-private' not in repr(caught.value.diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_identity_verification_navigation_is_bounded_and_never_relaunches(browser, monkeypatch):
+	browser.page.evaluate.return_value = {
+		'status': 403,
+		'url': 'https://linux.do/session/current.json',
+		'cf_challenge': True,
+	}
+
+	class Takeover:
+		async def __aenter__(self):
+			return SimpleNamespace(url='')
+
+		async def __aexit__(self, *args):
+			pass
+
+	monkeypatch.setattr('utils.identity_login.ManualTakeover', lambda timeout: Takeover())
+	runtime = IdentityLoginRuntime(configuration(), browser.store)
+	with pytest.raises(IdentityProbeError, match='ACCESS_BLOCKED'):
+		await runtime.execute('main')
+	assert [call.args[0] for call in browser.page.goto.await_args_list] == [
+		'https://linux.do/login',
+		'https://linux.do/session/current.json',
+	]
+	assert browser.launch.await_count == 1
+	assert not browser.store.cache_file.exists()
+	assert not browser.store.dirty
+	browser.context.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

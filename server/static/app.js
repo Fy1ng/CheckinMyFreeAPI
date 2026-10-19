@@ -301,6 +301,10 @@
             main.append(el('p', 'run-meta', `成功 ${run.summary.success_count} / ${run.summary.total_count}`));
           }
           if (run.summary.notification_error) main.append(el('p', 'run-meta', '通知发送异常'));
+          const diagnostic = run.summary.identity_result?.diagnostics;
+          if (diagnostic && diagnostic.http_status === 403) {
+            main.append(el('p', 'run-meta', `身份查询 ${diagnostic.endpoint || ''}: HTTP 403 / ${({ cloudflare_challenge: 'Cloudflare 要求人工验证', json: 'JSON 响应', html: 'HTML 响应' })[diagnostic.response_kind] || '访问被拒绝'}`));
+          }
           if (Array.isArray(run.summary.accounts) && run.summary.accounts.length) {
             const details = el('details', 'run-details');
             details.append(el('summary', '', '查看账号结果'));

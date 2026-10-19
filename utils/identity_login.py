@@ -28,6 +28,24 @@ CHALLENGE_VISIBLE = """Boolean(
   (/just a moment|checking your browser|请稍候|正在验证/i.test(document.title) &&
     document.querySelector('script[src*="/cdn-cgi/challenge-platform/"]'))
 )"""
+LINUXDO_LOGIN_VISIBLE = """[...document.querySelectorAll('#login-form, #login-account-name, #login-account-password')]
+  .some(element => element.getClientRects().length > 0)"""
+
+
+class IdentityProbeError(AuthError):
+	def __init__(self, reason: str, kind: str, result: dict):
+		super().__init__(reason)
+		content_kind = result.get('content_kind')
+		self.diagnostics = {
+			'provider': kind,
+			'endpoint': '/session/current.json' if kind == 'linuxdo' else '/settings/profile',
+			'http_status': 403,
+			'response_kind': 'cloudflare_challenge'
+			if result.get('cf_challenge') is True
+			else content_kind
+			if content_kind in {'json', 'html'}
+			else 'other',
+		}
 
 
 def identity_proxy(config: AppConfig, alias: str, accounts: list[AccountConfig]) -> str | None:
@@ -101,6 +119,15 @@ async def probe_identity_user(page, kind: str) -> dict | None:
 			"""async ({url, kind}) => {
 		  // Leave interactive verification to the user before probing authentication.
 		  if (__IDENTITY_CHALLENGE__) return {challenge: true};
+		  if (kind === 'linuxdo' && (__LINUXDO_LOGIN__)) return {login_required: true};
+		  // A challenged fetch must be opened as a document for the user to verify.
+		  // Verify that document's actual HTTP status before accepting its JSON.
+		  const navigation = performance.getEntriesByType('navigation')[0];
+		  if (kind === 'linuxdo' && location.href === url && navigation?.name === url) {
+		    let data = null;
+		    try { data = JSON.parse(document.querySelector('pre')?.textContent || document.body.textContent); } catch {}
+		    return {status: navigation.responseStatus || 0, url, data, content_kind: data ? 'json' : 'other'};
+		  }
 		  try {
 		    const response = await fetch(url, {method: 'GET', credentials: 'same-origin',
 		      headers: kind === 'linuxdo' ? {Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest'} : {},
@@ -122,9 +149,12 @@ async def probe_identity_user(page, kind: str) -> dict | None:
 		          actor_id: marker('octolytics-actor-id')};
 		      }
 		    }
-		    return {status: response.status, url: response.url, data};
+		    const contentType = response.headers.get('content-type') || '';
+		    return {status: response.status, url: response.url, data,
+		      cf_challenge: response.headers.get('cf-mitigated') === 'challenge',
+		      content_kind: contentType.includes('application/json') ? 'json' : contentType.includes('text/html') ? 'html' : 'other'};
 		  } catch { return {status: 0}; }
-		}""".replace('__IDENTITY_CHALLENGE__', CHALLENGE_VISIBLE),
+		}""".replace('__IDENTITY_CHALLENGE__', CHALLENGE_VISIBLE).replace('__LINUXDO_LOGIN__', LINUXDO_LOGIN_VISIBLE),
 			{'url': origin + path, 'kind': kind},
 		)
 	except BrowserError as error:
@@ -138,6 +168,8 @@ async def probe_identity_user(page, kind: str) -> dict | None:
 	if result.get('redirected') is True:
 		return None
 	if result.get('challenge') is True:
+		return None
+	if result.get('login_required') is True:
 		return None
 	status = result.get('status', 0)
 	if status == 401:
@@ -159,7 +191,9 @@ async def probe_identity_user(page, kind: str) -> dict | None:
 			and data.get('error_type') == 'not_logged_in'
 		):
 			return None
-		raise AuthError('ACCESS_BLOCKED')
+		if kind == 'linuxdo' and result.get('url') == origin + path and result.get('cf_challenge') is True:
+			raise IdentityProbeError('IDENTITY_CHALLENGE_REQUIRED', kind, result)
+		raise IdentityProbeError('ACCESS_BLOCKED', kind, result)
 	if not isinstance(status, int) or status == 0 or status >= 500:
 		raise AuthError('NETWORK_OR_SERVICE_ERROR')
 	if status != 200 or result.get('url') != origin + path or not isinstance(result.get('data'), dict):
@@ -189,6 +223,7 @@ class IdentityLoginRuntime:
 		self.accounts = accounts or []
 		self.notify_ready = notify_ready
 		self._lock = asyncio.Lock()
+		self.diagnostics: dict = {}
 		self.manual_timeout = int(os.getenv('CHECKIN_MANUAL_TIMEOUT_SECONDS', '600'))
 		if not 30 <= self.manual_timeout <= 1800:
 			raise AuthError('INVALID_MANUAL_TIMEOUT')
@@ -248,10 +283,17 @@ class IdentityLoginRuntime:
 			if response is not None and response.status >= 500:
 				if await page.evaluate('() => ' + CHALLENGE_VISIBLE) is not True:
 					raise AuthError('NETWORK_OR_SERVICE_ERROR')
-			user = await probe_identity_user(page, kind)
+			verification_required = False
+			try:
+				user = await self._probe(page, kind)
+			except IdentityProbeError as error:
+				if error.reason != 'IDENTITY_CHALLENGE_REQUIRED':
+					raise
+				verification_required = True
+				user = None
 			if user is None:
 				await page.bring_to_front()
-				user = await self._manual(page, kind, alias)
+				user = await self._manual(page, kind, alias, verification_required=verification_required)
 			check_identity_subject(metadata, kind, user)
 			verified = {**user, 'verified_at': datetime.now(timezone.utc).isoformat()}
 		finally:
@@ -264,7 +306,27 @@ class IdentityLoginRuntime:
 		self.store.save()
 		return verified
 
-	async def _manual(self, page, kind: str, alias: str) -> dict:
+	async def _probe(self, page, kind: str) -> dict | None:
+		try:
+			return await probe_identity_user(page, kind)
+		except IdentityProbeError as error:
+			self.diagnostics = error.diagnostics
+			raise
+
+	async def _open_manual_page(self, page, url: str) -> None:
+		response = await page.goto(
+			url, wait_until='domcontentloaded', timeout=int(os.getenv('CHECKIN_WAIT_TIMEOUT_MS', '60000'))
+		)
+		if response is not None and response.status == 429:
+			raise AuthError('RATE_LIMITED')
+		if response is not None and response.status >= 500:
+			if await page.evaluate('() => ' + CHALLENGE_VISIBLE) is not True:
+				raise AuthError('NETWORK_OR_SERVICE_ERROR')
+
+	async def _manual(self, page, kind: str, alias: str, *, verification_required: bool = False) -> dict:
+		verification_opened = False
+		login_returned = False
+		verification_url = IDENTITY_ORIGINS[kind] + '/session/current.json'
 		async with ManualTakeover(self.manual_timeout) as takeover:
 			deadline = time.monotonic() + self.manual_timeout
 			async with asyncio.timeout(self.manual_timeout):
@@ -273,10 +335,26 @@ class IdentityLoginRuntime:
 						await asyncio.wait_for(self.notify_ready(takeover.url, alias, self.manual_timeout), timeout=20)
 					except Exception:
 						print('[MANUAL] Notification unavailable; use the current task in WebUI')
+				if verification_required:
+					verification_opened = True
+					await self._open_manual_page(page, verification_url)
 				while time.monotonic() < deadline:
-					user = await probe_identity_user(page, kind)
+					try:
+						user = await self._probe(page, kind)
+					except IdentityProbeError as error:
+						if error.reason != 'IDENTITY_CHALLENGE_REQUIRED':
+							raise
+						if verification_opened:
+							raise IdentityProbeError('ACCESS_BLOCKED', kind, {'cf_challenge': True}) from None
+						verification_opened = True
+						await self._open_manual_page(page, verification_url)
+						continue
 					if user is not None:
 						return user
+					if verification_opened and not login_returned and page.url == verification_url:
+						if await page.evaluate('() => ' + CHALLENGE_VISIBLE) is not True:
+							login_returned = True
+							await self._open_manual_page(page, IDENTITY_ORIGINS[kind] + '/login')
 					await asyncio.sleep(min(2, max(0, deadline - time.monotonic())))
 				raise TimeoutError
 

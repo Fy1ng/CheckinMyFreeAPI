@@ -11,6 +11,7 @@ from playwright.async_api import async_playwright
 
 from utils.config import AppConfig, IdentityConfig
 from utils.identity_login import IdentityLoginRuntime, probe_identity_user
+from utils.oauth import AuthError
 from utils.secure_state import SnapshotStore, state_key
 
 pytestmark = pytest.mark.skipif(os.getenv('CHECKIN_BROWSER_TESTS') != '1', reason='Opt-in offline Chromium fixture')
@@ -146,3 +147,126 @@ async def test_verification_identity_login_and_fresh_profile_restore(
 		assert manual_count == 1 and len(contexts) == 2
 		assert b'identity_session' not in cache.read_bytes()
 		assert not blocked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('api_challenge,document_status', [(False, 200), (True, 200), (True, 403)])
+async def test_linuxdo_form_waits_for_user_and_api_challenge_uses_same_browser(
+	monkeypatch, tmp_path, api_challenge, document_status
+):
+	origin = 'https://identity.fixture.test'
+	monkeypatch.setitem(
+		__import__('utils.identity_login', fromlist=['IDENTITY_ORIGINS']).IDENTITY_ORIGINS, 'linuxdo', origin
+	)
+	contexts = []
+	probes = []
+	blocked = []
+	human_task = None
+
+	async def route(request_route):
+		request = request_route.request
+		if not request.url.startswith(origin + '/'):
+			blocked.append(request.url)
+			await request_route.abort()
+			return
+		path = urlsplit(request.url).path
+		cookies = (await request.all_headers()).get('cookie', '')
+		if path == '/login':
+			await request_route.fulfill(
+				content_type='text/html',
+				body='<link rel="icon" href="data:,"><form id="login-form" method="post" action="/sign-in"><input id="login-account-name" aria-label="Username"><input id="login-account-password" type="password" aria-label="Password"><button>Sign in fixture</button></form>',
+			)
+		elif path in {'/sign-in', '/verify'}:
+			assert request.method == 'POST'
+			cookie = 'identity_session=valid' if path == '/sign-in' else 'api_clearance=complete'
+			target = '/' if path == '/sign-in' else '/session/current.json'
+			await request_route.fulfill(
+				content_type='text/html',
+				headers={'Set-Cookie': cookie + '; Path=/; HttpOnly; Secure; SameSite=Lax'},
+				body=f'<script>location.replace("{target}")</script>',
+			)
+		elif path == '/':
+			await request_route.fulfill(content_type='text/html', body='<h1>Signed in fixture</h1>')
+		elif path == '/session/current.json':
+			assert 'identity_session=valid' in cookies, 'Do not query the protected API while the login form is visible'
+			probes.append(request.is_navigation_request())
+			if api_challenge and 'api_clearance=complete' not in cookies:
+				await request_route.fulfill(
+					status=403,
+					headers={'cf-mitigated': 'challenge'},
+					content_type='text/html',
+					body='<title>Just a moment</title><form id="challenge-form" method="post" action="/verify"><button>Complete verification</button></form>',
+				)
+			else:
+				await request_route.fulfill(
+					status=document_status, json={'current_user': {'id': 42, 'username': 'fixture-user'}}
+				)
+		else:
+			await request_route.fulfill(status=404)
+
+	async with asyncio.timeout(25), async_playwright() as playwright:
+
+		async def launch(settings, **kwargs):
+			context = await playwright.chromium.launch_persistent_context(
+				str(settings.profile_dir),
+				channel=os.getenv('CHECKIN_TEST_BROWSER_CHANNEL', 'chrome') or None,
+				headless=True,
+				service_workers='block',
+			)
+			await context.route('**/*', route)
+			await context.set_offline(True)
+			contexts.append(context)
+			return context
+
+		async def human():
+			page = contexts[0].pages[-1]
+			assert await probe_identity_user(page, 'linuxdo') is None
+			assert probes == []
+			await page.get_by_label('Username').fill('fixture-user')
+			await page.get_by_label('Password').fill('synthetic-password')
+			await page.get_by_role('button', name='Sign in fixture').click()
+			await page.wait_for_url(origin + '/')
+			if api_challenge:
+				await page.get_by_role('button', name='Complete verification').click()
+
+		class Takeover:
+			async def __aenter__(self):
+				nonlocal human_task
+				human_task = asyncio.create_task(human())
+				return SimpleNamespace(url='')
+
+			async def __aexit__(self, *args):
+				if human_task is not None:
+					try:
+						await asyncio.wait_for(human_task, timeout=5)
+					finally:
+						if not human_task.done():
+							human_task.cancel()
+							await asyncio.gather(human_task, return_exceptions=True)
+
+		monkeypatch.setattr('utils.identity_login.launch_login_context', launch)
+		monkeypatch.setattr('utils.identity_login.ManualTakeover', lambda seconds: Takeover())
+		store = SnapshotStore(
+			tmp_path / 'state',
+			tmp_path / 'cache' / 'auth-state.enc',
+			base64.urlsafe_b64encode(os.urandom(32)).decode(),
+			scope='fixture',
+			compatibility='browser',
+		)
+		runtime = IdentityLoginRuntime(
+			AppConfig(providers={}, identities={'main': IdentityConfig('linuxdo', proxy='direct')}), store
+		)
+		try:
+			if document_status == 403:
+				with pytest.raises(AuthError, match='ACCESS_BLOCKED'):
+					await runtime.execute('main')
+				assert not store.cache_file.exists()
+			else:
+				result = await runtime.execute('main')
+				assert result['user_id'] == '42'
+				assert store.cache_file.exists()
+			assert len(contexts) == 1
+			assert probes == ([False, True, True] if api_challenge else [False])
+			assert not blocked
+		finally:
+			runtime.close()
