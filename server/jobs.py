@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import math
 import os
@@ -81,6 +82,11 @@ class JobManager:
 		CREATE TABLE IF NOT EXISTS scheduler (id INTEGER PRIMARY KEY CHECK(id=1), next_at REAL);
 		INSERT OR IGNORE INTO scheduler VALUES (1, NULL);
 		""")
+		columns = {column[1] for column in self.db.execute('PRAGMA table_info(runs)')}
+		if 'kind' not in columns:
+			self.db.execute("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'checkin'")
+		if 'identity' not in columns:
+			self.db.execute('ALTER TABLE runs ADD COLUMN identity TEXT')
 		self.db.execute(
 			"UPDATE runs SET state='interrupted',finished_at=?,error='服务重启, 请核对站点结果后再运行' WHERE state IN ('running','awaiting_login','stopping')",
 			(time.time(),),
@@ -100,7 +106,7 @@ class JobManager:
 
 	def history(self) -> list[dict]:
 		rows = self.db.execute(
-			'SELECT id,state,started_at,finished_at,error,summary,revision FROM runs ORDER BY id DESC LIMIT 50'
+			'SELECT id,state,started_at,finished_at,error,summary,revision,kind,identity FROM runs ORDER BY id DESC LIMIT 50'
 		).fetchall()
 		return [
 			dict(
@@ -111,6 +117,8 @@ class JobManager:
 				error=row[4],
 				summary=json.loads(row[5]) if row[5] else None,
 				revision=row[6],
+				kind=row[7],
+				identity=row[8],
 			)
 			for row in rows
 		]
@@ -154,16 +162,28 @@ class JobManager:
 		self.db.commit()
 
 	async def start(self, revision: int) -> dict:
+		return await self._start(revision, kind='checkin')
+
+	async def start_identity(self, identity: str, revision: int) -> dict:
+		return await self._start(revision, kind='identity_login', identity=identity)
+
+	async def _start(self, revision: int, *, kind: str, identity: str | None = None) -> dict:
 		async with self._lock:
 			if self.active_id is not None:
 				raise BusyError('已有任务运行, 请等待完成或先停止')
 			config, current_revision = self.config_store.load()
 			if current_revision != revision:
 				raise BusyError('配置已更新, 请重新读取后运行')
-			if not config['accounts']:
+			if kind == 'identity_login':
+				if not isinstance(identity, str) or identity not in config['identities']:
+					raise BusyError('请选择已保存的登录身份')
+				config = copy.deepcopy(config)
+				config['browser']['headless'] = False
+			elif not config['accounts']:
 				raise BusyError('请先保存至少一个账号')
 			cursor = self.db.execute(
-				"INSERT INTO runs(state,started_at,revision) VALUES ('running',?,?)", (time.time(), revision)
+				"INSERT INTO runs(state,started_at,revision,kind,identity) VALUES ('running',?,?,?,?)",
+				(time.time(), revision, kind, identity),
 			)
 			self.db.commit()
 			assert cursor.lastrowid is not None
@@ -206,6 +226,8 @@ class JobManager:
 				'run_id': run_id,
 				'manual_session': secrets.token_urlsafe(32),
 			}
+			kind, identity = self.db.execute('SELECT kind,identity FROM runs WHERE id=?', (run_id,)).fetchone()
+			payload.update(kind=kind, identity=identity)
 			self.process.stdin.write(json.dumps(payload).encode())
 			await self.process.stdin.drain()
 			self.process.stdin.close()

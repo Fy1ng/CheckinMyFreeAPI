@@ -9,7 +9,8 @@
     tab: 'accounts', busy: false, configLoading: false, statusLoading: false,
     runsLoading: false, status: null, statusFresh: false, uncertain: null,
     savedIds: new Set(), savedIdentities: new Set(), savedProviders: new Set(),
-    pollTimer: null, polling: false,
+    pollTimer: null, polling: false, expanded: new Map(), cardHeaders: [],
+    identityStates: {}, identitiesLoading: false, identitiesError: '',
   };
 
   class ApiError extends Error {
@@ -71,6 +72,7 @@
 
   function markDirty() {
     state.dirty = true;
+    state.cardHeaders.forEach((refresh) => refresh());
     updateControls();
   }
 
@@ -102,13 +104,20 @@
     let taskHint = '保存配置不会执行签到. 定时任务使用最近一次保存的配置.';
     if (state.status?.platform?.manual_supported === false) taskHint = '当前环境不支持人工登录. 请使用 Windows 本地有界面浏览器, 或 Linux 图形会话.';
     else if (state.status?.platform?.manual_mode === 'desktop') taskHint = '本机登录会使用已打开的 Chromium 窗口. 请在窗口中完成验证和登录, 程序会连续等待.';
-    if (state.config?.browser?.headless) taskHint = '无头模式只尝试自动登录. 需要人工验证或登录时会停止该账号, 请关闭无头模式后再运行.';
+    const identityLoginRunning = state.status?.running && state.status?.run?.kind === 'identity_login';
+    if (state.config?.browser?.headless && !identityLoginRunning) taskHint = '无头模式只尝试自动登录. 需要人工验证或登录时会停止该账号, 请关闭无头模式后再运行.';
+    if (identityLoginRunning) taskHint = '身份登录使用有界面浏览器. 本机请操作 Chromium 窗口, 服务器请等待人工登录入口出现.';
     const manualRun = state.status?.run;
     if (state.status?.running && manualRun?.manual_transport === 'desktop') {
       const seconds = manualRun.manual_remaining_seconds;
       taskHint = `请在本机已打开的 Chromium 窗口完成验证, 登录和授权. ${Number.isFinite(seconds) ? `剩余约 ${seconds} 秒. ` : ''}验证后继续在同一窗口登录, 无需重新运行.`;
     }
     $('task-hint').textContent = state.dirty ? '请先保存当前修改, 再开始签到.' : taskHint;
+    document.querySelectorAll('[data-identity-login]').forEach((item) => {
+      const unsaved = state.dirty || !state.savedIdentities.has(item.dataset.identityLogin);
+      item.disabled = !available || blocked || unsaved || !state.statusFresh || !!state.status?.running;
+      item.textContent = unsaved ? '先保存再登录' : '登录 / 重新登录';
+    });
   }
 
   function setBusy(value) {
@@ -146,7 +155,7 @@
     $('logout-button').hidden = false;
     if (state.uncertain === 'logout') state.uncertain = null;
     const configTask = state.config && state.dirty ? Promise.resolve(renderForm()) : loadConfig(false);
-    await Promise.allSettled([configTask, loadStatus(), loadRuns()]);
+    await Promise.allSettled([configTask, loadStatus(), loadRuns(), loadIdentities()]);
     schedulePoll();
   }
 
@@ -215,7 +224,7 @@
   }
 
   function explainError(code) {
-    return ({ MANUAL_LOGIN_UNAVAILABLE: '当前环境无法进行人工登录', MANUAL_LOGIN_TIMED_OUT: '等待人工登录超时', MANUAL_LOGIN_REQUIRES_HEADED_BROWSER: '需要人工登录, 请关闭无头模式后再运行', OAUTH_BROWSER_CLOSED: '浏览器窗口已关闭, 登录未完成', IDENTITY_MANUAL_LOGIN_FAILED: '同一身份的前一个人工登录未完成' })[code] || code;
+    return ({ MANUAL_LOGIN_UNAVAILABLE: '当前环境无法进行人工登录', MANUAL_LOGIN_TIMED_OUT: '等待人工登录超时', MANUAL_LOGIN_REQUIRES_HEADED_BROWSER: '需要人工登录, 请关闭无头模式后再运行', OAUTH_BROWSER_CLOSED: '浏览器窗口已关闭, 登录未完成', IDENTITY_BROWSER_CLOSED: '身份登录窗口已关闭', IDENTITY_ACCOUNT_MISMATCH: '登录的第三方账号与此身份的原绑定不一致, 切换账号请新建身份', INVALID_IDENTITY_RESPONSE: '无法验证平台返回的登录身份', INVALID_SAVED_IDENTITY: '已保存的身份记录无效', IDENTITY_MANUAL_LOGIN_FAILED: '同一身份的前一个人工登录未完成' })[code] || code;
   }
 
   function renderStatus(data) {
@@ -223,7 +232,7 @@
     const currentBadge = badge(run?.state);
     currentBadge.id = 'task-badge';
     $('task-badge').replaceWith(currentBadge);
-    $('task-description').textContent = run ? `任务 #${run.id}, ${formatTime(run.started_at)} 开始.${run.error ? ` ${run.error}` : ''}${data.running && run.manual_transport === 'desktop' ? ' 正在等待本机浏览器中的人工登录.' : ''}` : '还没有运行中的任务. 配置完成后即可开始.';
+    $('task-description').textContent = run ? `${run.kind === 'identity_login' ? `身份登录 ${run.identity || ''}, ` : ''}任务 #${run.id}, ${formatTime(run.started_at)} 开始.${run.error ? ` ${explainError(run.error)}` : ''}${data.running && run.manual_transport === 'desktop' ? ' 正在等待本机浏览器中的人工登录.' : ''}` : '还没有运行中的任务. 配置完成后即可开始.';
     $('next-run').textContent = data.next_run_at ? `下次计划: ${formatTime(data.next_run_at)}` : '定时任务未启用, 或尚未安排下一次运行.';
     const link = $('manual-link');
     link.hidden = true;
@@ -246,12 +255,14 @@
     $('retry-status').disabled = true;
     try {
       const data = await api('/api/status');
+      const completed = state.status?.running && !data.running;
       state.status = data;
       state.statusFresh = true;
       renderStatus(data);
       $('connection-status').textContent = '服务已连接';
       $('connection-status').className = 'connection-state';
       $('status-error').hidden = true;
+      if (completed) loadIdentities();
       return true;
     } catch (error) {
       state.statusFresh = false;
@@ -281,10 +292,10 @@
       data.runs.slice(0, 12).forEach((run) => {
         const row = el('div', 'run-row');
         const main = el('div', 'run-main');
-        main.append(el('p', 'run-title', `任务 #${run.id}`));
+        main.append(el('p', 'run-title', `${run.kind === 'identity_login' ? `身份登录 ${run.identity || ''}, ` : ''}任务 #${run.id}`));
         main.append(el('p', 'run-meta', formatTime(run.started_at)));
         if (run.finished_at) main.append(el('p', 'run-meta', `结束: ${formatTime(run.finished_at)}`));
-        if (run.error) main.append(el('p', 'run-meta', run.error));
+        if (run.error) main.append(el('p', 'run-meta', explainError(run.error)));
         if (run.summary && typeof run.summary === 'object') {
           if (typeof run.summary.success_count === 'number' && typeof run.summary.total_count === 'number') {
             main.append(el('p', 'run-meta', `成功 ${run.summary.success_count} / ${run.summary.total_count}`));
@@ -309,6 +320,39 @@
     } finally {
       state.runsLoading = false;
       $('refresh-runs').disabled = false;
+    }
+  }
+
+  function refreshIdentityStates() {
+    const status = $('identity-load-status');
+    if (status) {
+      status.replaceChildren();
+      status.className = state.identitiesError ? 'load-error' : 'muted small identity-status-note';
+      status.append(el('span', '', state.identitiesLoading ? '正在读取登录状态...' : state.identitiesError || '登录状态来自上次验证记录, 不代表当前仍在线.'));
+      const retry = button('重新读取登录状态', 'text-button', loadIdentities);
+      retry.disabled = state.identitiesLoading;
+      status.append(retry);
+    }
+    document.querySelectorAll('[data-identity-state]').forEach((item) => {
+      const identity = state.identityStates[item.dataset.identityState];
+      const name = identity?.username || identity?.user_id;
+      item.textContent = state.identitiesError ? '登录状态暂时不可用, 可继续编辑配置.' : identity?.state === 'verified' ? `上次验证成功${name ? `: ${name}` : ''}${identity.verified_at ? `, ${formatTime(identity.verified_at)}` : ''}` : identity?.state === 'expired' ? '登录态已过期, 请重新登录.' : '尚未验证登录. 保存身份后可直接登录, 无需添加账号.';
+    });
+  }
+
+  async function loadIdentities() {
+    if (state.identitiesLoading) return;
+    state.identitiesLoading = true;
+    refreshIdentityStates();
+    try {
+      const data = await api('/api/identities');
+      state.identityStates = data.identities || {};
+      state.identitiesError = '';
+    } catch (error) {
+      state.identitiesError = `读取登录状态失败. ${errorText(error)}`;
+    } finally {
+      state.identitiesLoading = false;
+      refreshIdentityStates();
     }
   }
 
@@ -349,7 +393,7 @@
       return;
     }
     const success = await loadStatus();
-    await loadRuns();
+    await Promise.allSettled([loadRuns(), loadIdentities()]);
     if (success && state.uncertain !== 'config') {
       state.uncertain = null;
       notice('已重新读取任务状态. 请核对当前任务和近期记录后再操作.');
@@ -491,16 +535,50 @@
     return row;
   }
 
-  function card(title, index, remove) {
+  function moveExpanded(oldKey, newKey) {
+    if (state.expanded.has(oldKey)) {
+      state.expanded.set(newKey, state.expanded.get(oldKey));
+      state.expanded.delete(oldKey);
+    }
+  }
+
+  function card(title, index, remove, options) {
     const outer = el('section', 'config-card');
     const head = el('div', 'card-heading');
-    const text = el('h4', 'card-title');
-    text.append(el('span', 'card-index', String(index + 1).padStart(2, '0')), document.createTextNode(title));
-    head.append(text, button('移除', 'text-button remove', remove));
+    const toggle = button('', 'card-toggle', () => {
+      state.expanded.set(options.key(), !state.expanded.get(options.key()));
+      applyExpanded();
+    });
+    const text = el('span', 'card-copy');
+    const name = el('span', 'card-title');
+    const summary = el('span', 'card-summary');
+    const affordance = el('span', 'card-affordance');
+    text.append(name, summary);
+    toggle.append(el('span', 'card-index', String(index + 1).padStart(2, '0')), text, affordance);
+    const content = el('div', 'card-content');
+    content.id = `card-content-${++card.counter}`;
+    toggle.setAttribute('aria-controls', content.id);
+    const applyExpanded = () => {
+      const open = !!state.expanded.get(options.key());
+      toggle.setAttribute('aria-expanded', String(open));
+      content.hidden = !open;
+      outer.classList.toggle('collapsed', !open);
+      affordance.textContent = open ? '收起' : '展开';
+    };
+    if (!state.expanded.has(options.key())) state.expanded.set(options.key(), !options.saved);
+    applyExpanded();
+    const refresh = () => { name.textContent = title(); summary.textContent = options.summary(); };
+    refresh();
+    state.cardHeaders.push(refresh);
+    const removeButton = button('移除', 'text-button remove', remove);
+    removeButton.setAttribute('aria-label', `移除${title()}`);
+    head.append(toggle, removeButton);
     const grid = el('div', 'form-grid');
-    outer.append(head, grid);
-    return { outer, grid };
+    content.append(grid);
+    outer.append(head, content);
+    return { outer, grid, content };
   }
+  card.counter = 0;
 
   function advanced(title, children) {
     const details = el('details', 'details-box');
@@ -519,20 +597,49 @@
     return `${prefix}-${index}`;
   }
 
+  function editIdentity(alias) {
+    state.tab = 'identities';
+    state.expanded.set(`identity:${alias}`, true);
+    renderForm();
+    const target = Array.from(document.querySelectorAll('[data-identity-login]')).find((item) => item.dataset.identityLogin === alias);
+    const card = target?.closest('.config-card');
+    card?.scrollIntoView({ block: 'nearest' });
+    card?.querySelector('input')?.focus();
+  }
+
+  function ensureOAuthIdentity(account) {
+    if (!account.auth || !['linuxdo', 'github'].includes(account.auth.type)) return;
+    const type = account.auth.type;
+    const matches = Object.keys(state.config.identities).filter((alias) => state.config.identities[alias].type === type);
+    if (matches.includes(account.auth.identity)) return;
+    account.auth.identity = matches.length === 1 ? matches[0] : '';
+    if (matches.length) return;
+    const alias = uniqueKey(type, Object.keys(state.config.identities));
+    state.config.identities[alias] = { type, proxy: 'direct' };
+    account.auth.identity = alias;
+    state.expanded.set(`identity:${alias}`, true);
+    notice(`已在草稿中新建并关联 ${type === 'linuxdo' ? 'LinuxDo' : 'GitHub'} 身份 ${alias}. 保存后生效, 本次没有登录.`, '', { label: '编辑此身份', handler: () => editIdentity(alias) });
+  }
+
   function renderAccounts(container) {
     container.append(heading('签到账号', '一个账号对应一个目标站点. OAuth 登录只选择身份别名, 不填写第三方平台密码.', '+ 添加账号', () => {
-      state.config.accounts.push({ id: uniqueKey('account', state.config.accounts.map((item) => item.id)), name: '', provider: 'anyrouter', auth: { type: 'linuxdo', identity: '' } });
+      const account = { id: uniqueKey('account', state.config.accounts.map((item) => item.id)), name: '', provider: 'anyrouter', auth: { type: 'linuxdo', identity: '' } };
+      state.config.accounts.push(account);
+      ensureOAuthIdentity(account);
       markDirty(); renderForm();
     }));
     const cards = el('div', 'cards');
-    if (!state.config.accounts.length) empty(cards, '添加第一个账号', '先在登录身份中添加 LinuxDo 或 GitHub 身份, 再将它关联到目标站点.');
+    if (!state.config.accounts.length) empty(cards, '添加第一个账号', '选择 OAuth 时, 如果尚无对应平台的身份, 会自动在草稿中新建并关联.');
     state.config.accounts.forEach((account, index) => {
-      const { outer, grid } = card(account.name || account.id || '新账号', index, () => { state.config.accounts.splice(index, 1); markDirty(); renderForm(); });
+      const { outer, grid, content } = card(() => account.name || account.id || '新账号', index, () => { state.expanded.delete(`account:${account.id}`); state.config.accounts.splice(index, 1); markDirty(); renderForm(); }, {
+        key: () => `account:${account.id}`, saved: state.savedIds.has(account.id),
+        summary: () => `${({ anyrouter: 'AnyRouter', agentrouter: 'AgentRouter' })[account.provider] || account.provider || '未选择站点'} / ${account.auth ? `${account.auth.type === 'linuxdo' ? 'LinuxDo' : 'GitHub'}: ${account.auth.identity || '未选择身份'}` : account.cookies !== undefined ? 'Cookie' : '站点邮箱密码'}`,
+      });
       const providers = [...new Set(['anyrouter', 'agentrouter', ...Object.keys(state.config.providers), ...(account.provider ? [account.provider] : [])])];
       grid.append(
         field('账号名称', account.name, (value) => { account.name = value; }, { placeholder: '例如: 主账号', optional: true }),
         selectField('目标站点', account.provider || 'anyrouter', providers.map((name) => [name, ({ anyrouter: 'AnyRouter', agentrouter: 'AgentRouter' })[name] || name]), (value) => { account.provider = value; }),
-        field('稳定 ID', account.id, (value) => { account.id = value; }, { required: true, readOnly: state.savedIds.has(account.id), hint: '用于关联登录态. 首次保存后固定, 不随名称变化.' }),
+        field('稳定 ID', account.id, (value) => { moveExpanded(`account:${account.id}`, `account:${value}`); account.id = value; }, { required: true, readOnly: state.savedIds.has(account.id), hint: '用于关联登录态. 首次保存后固定, 不随名称变化.' }),
       );
       const type = account._uiAuth || account.auth?.type || (account.cookies ? 'cookie' : 'password');
       grid.append(selectField('认证方式', type, [['linuxdo', 'LinuxDo OAuth'], ['github', 'GitHub OAuth'], ['password', '站点邮箱密码'], ['cookie', '已有 Cookie']], (value) => {
@@ -541,6 +648,7 @@
         else if (value === 'cookie') account.cookies = '';
         else { account.email = ''; account.password = ''; }
         account._uiAuth = value;
+        ensureOAuthIdentity(account);
         renderForm();
       }));
       const activeType = account._uiAuth || type;
@@ -548,6 +656,9 @@
         const identities = Object.entries(state.config.identities).filter(([, value]) => value.type === activeType).map(([alias]) => [alias, alias]);
         if (account.auth.identity && !identities.some(([key]) => key === account.auth.identity)) identities.push([account.auth.identity, `${account.auth.identity} (身份不存在或类型不匹配)`]);
         grid.append(selectField('登录身份', account.auth.identity, [['', '请选择身份'], ...identities], (value) => { account.auth.identity = value; }, { hint: identities.length ? '同一身份可关联多个站点账号.' : `尚无 ${activeType === 'linuxdo' ? 'LinuxDo' : 'GitHub'} 身份. 请先在登录身份中添加.` }));
+        if (account.auth.identity && Object.hasOwn(state.config.identities, account.auth.identity)) {
+          grid.append(button('编辑此身份', 'text-button identity-edit', () => editIdentity(account.auth.identity)));
+        }
       } else if (activeType === 'password') {
         grid.append(field('站点登录邮箱', account.email, (value) => { account.email = value; }, { type: 'email', autocomplete: 'off', placeholder: 'account@example.com' }));
         grid.append(secretField('站点密码', account.password, (value) => { account.password = value; }, { hint: '只填写目标站点密码, 不填写 LinuxDo 或 GitHub 密码.' }));
@@ -558,36 +669,59 @@
         field('目标站点用户名', account.expected_username, (value) => { account.expected_username = value; }, { optional: activeType !== 'linuxdo' && activeType !== 'github', hint: 'OAuth 需要填写用户名或用户 ID, 以核验登录的账号.' }),
         field('目标站点用户 ID', account.api_user, (value) => { account.api_user = value; }, { optional: true, placeholder: '例如: 12345', hint: '两项均填写时必须同时匹配. Cookie 认证请提供用户 ID.' }),
       );
-      outer.append(advanced('账号代理', [proxyField('代理', account, 'proxy', '沿用上级时按身份和站点配置解析. 共享同一身份的账号必须使用一致代理.')]));
+      content.append(advanced('账号代理', [proxyField('代理', account, 'proxy', '沿用上级时按身份和站点配置解析. 共享同一身份的账号必须使用一致代理.')]));
       cards.append(outer);
     });
     container.append(cards);
   }
 
   function renderIdentities(container) {
-    container.append(heading('登录身份', '身份代表同一个 LinuxDo 或 GitHub 用户. 首次登录由运行任务中的人工登录入口完成.', '+ 添加身份', () => {
-      state.config.identities[uniqueKey('identity', Object.keys(state.config.identities))] = { type: 'linuxdo' };
+    container.append(heading('登录身份', '身份代表同一个 LinuxDo 或 GitHub 用户. 保存后可在此直接登录, 无需先创建签到账号. 登录不会执行签到.', '+ 添加身份', () => {
+      const alias = uniqueKey('identity', Object.keys(state.config.identities));
+      state.config.identities[alias] = { type: 'linuxdo', proxy: 'direct' };
+      state.expanded.set(`identity:${alias}`, true);
       markDirty(); renderForm();
     }));
+    const status = el('div');
+    status.id = 'identity-load-status';
+    status.setAttribute('aria-live', 'polite');
+    container.append(status);
     const cards = el('div', 'cards');
     if (!Object.keys(state.config.identities).length) empty(cards, '还没有登录身份', '添加身份后, 在账号表单选择对应别名. 不需要导出 Cookie 或填写 OAuth 平台密码.');
     Object.entries(state.config.identities).forEach(([originalAlias, identity], index) => {
       let alias = originalAlias;
-      const { outer, grid } = card(alias, index, () => { delete state.config.identities[alias]; markDirty(); renderForm(); });
+      const linkedAccounts = () => state.config.accounts.filter((account) => account.auth?.identity === alias);
+      const { outer, grid, content } = card(() => alias || '新身份', index, () => { state.expanded.delete(`identity:${alias}`); delete state.config.identities[alias]; markDirty(); renderForm(); }, {
+        key: () => `identity:${alias}`, saved: state.savedIdentities.has(alias),
+        summary: () => `${identity.type === 'github' ? 'GitHub' : 'LinuxDo'} / ${linkedAccounts().length ? `关联 ${linkedAccounts().length} 个账号` : '未关联账号'}`,
+      });
       grid.append(
         field('身份别名', alias, (value) => {
           if (value === alias) return;
           if (Object.hasOwn(state.config.identities, value)) { notice('身份别名已存在. 请使用另一个别名.', 'warning'); renderForm(); return; }
+          linkedAccounts().forEach((account) => { account.auth.identity = value; });
+          moveExpanded(`identity:${alias}`, `identity:${value}`);
           delete state.config.identities[alias]; Object.defineProperty(state.config.identities, value, { value: identity, configurable: true, writable: true, enumerable: true }); alias = value;
+          login.dataset.identityLogin = alias;
+          loginState.dataset.identityState = alias;
         }, { required: true, readOnly: state.savedIdentities.has(alias), hint: '用于关联账号. 首次保存后固定.' }),
         selectField('身份平台', identity.type, [['linuxdo', 'LinuxDo'], ['github', 'GitHub']], (value) => { identity.type = value; }),
         proxyField('身份代理', identity, 'proxy', '所有关联账号将共享该代理选择. 沿用上级时由目标站点决定.'),
       );
-      const linked = state.config.accounts.filter((account) => account.auth?.identity === originalAlias);
-      outer.append(el('p', 'hint-box', linked.length ? `关联账号: ${linked.map((account) => account.name || account.id).join(', ')}` : '尚未关联账号. 请在账号配置中选择该身份.'));
+      const linked = linkedAccounts();
+      content.append(el('p', 'hint-box', linked.length ? `关联账号: ${linked.map((account) => account.name || account.id).join(', ')}` : '尚未关联账号. 可先在此登录, 再关联签到账号.'));
+      const loginState = el('p', 'identity-login-state');
+      loginState.dataset.identityState = alias;
+      loginState.setAttribute('aria-live', 'polite');
+      const actions = el('div', 'identity-actions');
+      const login = button('登录 / 重新登录', 'button secondary', () => taskAction(false, alias));
+      login.dataset.identityLogin = alias;
+      actions.append(login);
+      content.append(loginState, actions);
       cards.append(outer);
     });
     container.append(cards);
+    refreshIdentityStates();
   }
 
   function renderProviders(container) {
@@ -600,9 +734,12 @@
     Object.entries(state.config.providers).forEach(([originalAlias, provider], index) => {
       let alias = originalAlias;
       provider.oauth_client_ids ||= {};
-      const { outer, grid } = card(alias, index, () => { delete state.config.providers[alias]; markDirty(); renderForm(); });
+      const { outer, grid, content } = card(() => alias || '新站点', index, () => { state.expanded.delete(`provider:${alias}`); delete state.config.providers[alias]; markDirty(); renderForm(); }, {
+        key: () => `provider:${alias}`, saved: state.savedProviders.has(alias),
+        summary: () => `${provider.domain || '尚未填写域名'} / ${state.config.accounts.filter((account) => account.provider === alias).length} 个关联账号`,
+      });
       grid.append(
-        field('站点别名', alias, (value) => { if (value === alias) return; if (Object.hasOwn(state.config.providers, value)) { notice('站点别名已存在. 请使用另一个别名.', 'warning'); renderForm(); return; } delete state.config.providers[alias]; Object.defineProperty(state.config.providers, value, { value: provider, configurable: true, writable: true, enumerable: true }); alias = value; }, { required: true, readOnly: state.savedProviders.has(alias), hint: '例如: anyrouter, agentrouter 或 my-site.' }),
+        field('站点别名', alias, (value) => { if (value === alias) return; if (Object.hasOwn(state.config.providers, value)) { notice('站点别名已存在. 请使用另一个别名.', 'warning'); renderForm(); return; } state.config.accounts.filter((account) => account.provider === alias).forEach((account) => { account.provider = value; }); moveExpanded(`provider:${alias}`, `provider:${value}`); delete state.config.providers[alias]; Object.defineProperty(state.config.providers, value, { value: provider, configurable: true, writable: true, enumerable: true }); alias = value; }, { required: true, readOnly: state.savedProviders.has(alias), hint: '例如: anyrouter, agentrouter 或 my-site.' }),
         field('站点域名', provider.domain, (value) => { provider.domain = value; }, { required: true, type: 'url', placeholder: 'https://example.com', hint: '使用纯 HTTPS origin, 不包含路径或查询参数.' }),
         field('登录页面', provider.login_path, (value) => { provider.login_path = value; }, { placeholder: '/login', optional: true }),
         field('签到接口', provider.sign_in_path, (value) => { provider.sign_in_path = value || null; }, { placeholder: '/api/user/sign_in', optional: true, hint: '留空表示不额外调用签到接口.' }),
@@ -610,7 +747,7 @@
         field('用户 ID 请求头', provider.api_user_key, (value) => { provider.api_user_key = value; }, { placeholder: 'new-api-user', optional: true }),
         checkField('使用默认代理', provider.use_proxy, (value) => { provider.use_proxy = value; }, '需在定时与浏览器中设置默认代理 URL.'),
       );
-      outer.append(advanced('OAuth 和浏览器参数', [
+      content.append(advanced('OAuth 和浏览器参数', [
         field('站点状态接口', provider.status_path, (value) => { provider.status_path = value; }, { placeholder: '/api/status', optional: true }),
         field('OAuth state 接口', provider.auth_state_path, (value) => { provider.auth_state_path = value; }, { placeholder: '/api/oauth/state', optional: true }),
         field('LinuxDo client ID', provider.oauth_client_ids.linuxdo, (value) => { provider.oauth_client_ids.linuxdo = value; }, { optional: true, hint: '通常从站点状态接口读取, 必要时覆盖.' }),
@@ -708,6 +845,7 @@
 
   function renderForm() {
     if (!state.config) return;
+    state.cardHeaders = [];
     const container = $('form-content'); container.replaceChildren();
     renderers[state.tab](container);
     document.querySelectorAll('[data-tab]').forEach((item) => {
@@ -779,7 +917,7 @@
       state.dirty = false;
       renderForm();
       notice('配置已保存. 本次保存没有执行签到.');
-      await loadStatus();
+      await Promise.allSettled([loadStatus(), loadIdentities()]);
     } catch (error) {
       if (!(error instanceof ApiError) || error.status >= 500 || error.status === 0 || (error.status >= 200 && error.status < 300)) setUncertain('config', errorText(error));
       else if (error.status === 409) notice(`保存冲突, 当前草稿已保留. ${errorText(error)} 请重新读取前先保留所需修改.`, 'warning');
@@ -787,13 +925,16 @@
     } finally { setBusy(false); }
   }
 
-  async function taskAction(stop) {
+  async function taskAction(stop, identity = null) {
     if (state.busy || state.uncertain || !state.statusFresh) return;
-    if (!stop && state.dirty) { notice('请先保存当前修改, 再开始签到.', 'warning'); return; }
+    if (!stop && (state.dirty || (identity && !state.savedIdentities.has(identity)))) { notice('请先保存当前修改, 再启动任务.', 'warning'); return; }
+    if (!stop && state.status?.running) return;
     setBusy(true);
     try {
-      await api(stop ? '/api/runs/stop' : '/api/runs', { method: 'POST', body: stop ? {} : { revision: state.revision } });
-      notice(stop ? '已请求停止任务. 请等待运行状态更新.' : '签到任务已启动. 请留意当前任务状态和人工登录入口.');
+      const path = stop ? '/api/runs/stop' : identity ? '/api/identities/login' : '/api/runs';
+      const body = stop ? {} : { revision: state.revision, ...(identity ? { identity } : {}) };
+      await api(path, { method: 'POST', body });
+      notice(stop ? '已请求停止任务. 请等待运行状态更新.' : identity ? `身份 ${identity} 的登录任务已启动. 请留意当前任务状态和人工登录入口. 本次不执行签到.` : '签到任务已启动. 请留意当前任务状态和人工登录入口.');
       await Promise.allSettled([loadStatus(), loadRuns()]);
     } catch (error) {
       if (!(error instanceof ApiError) || error.status >= 500 || error.status === 0 || (error.status >= 200 && error.status < 300)) setUncertain(stop ? 'stop' : 'run', errorText(error));

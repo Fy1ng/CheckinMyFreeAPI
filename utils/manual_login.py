@@ -308,6 +308,7 @@ class ManualTakeover:
 				self.url = f'http://127.0.0.1:{gateway_port}'
 				self.gateway.origin = self.url
 				self.gateway._session = os.environ['CHECKIN_MANUAL_SESSION']
+				self.gateway.deadline = time.monotonic() + self.timeout
 				return self
 			tunnel = await asyncio.create_subprocess_exec(
 				cloudflared,

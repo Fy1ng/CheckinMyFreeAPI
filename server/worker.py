@@ -18,6 +18,10 @@ from utils.secure_state import atomic_write, remove_owned_tree
 
 async def execute(payload: dict) -> int:
 	config = payload['config']
+	kind = payload.get('kind', 'checkin')
+	if kind not in {'checkin', 'identity_login'}:
+		raise ValueError('Unsupported task kind')
+	headless = False if kind == 'identity_login' else config['browser']['headless']
 	data_dir = Path(payload['data_dir'])
 	event_file = Path(payload['event_file'])
 	key = base64.b64decode(payload['key'])
@@ -35,9 +39,9 @@ async def execute(payload: dict) -> int:
 		'CHECKIN_MANUAL_LOGIN': 'true',
 		'CHECKIN_MANUAL_TRANSPORT': 'local',
 		'CHECKIN_MANUAL_SESSION': payload['manual_session'],
-		'CHECKIN_MANUAL_HEADLESS': str(config['browser']['headless']).lower(),
+		'CHECKIN_MANUAL_HEADLESS': str(headless).lower(),
 		'CHECKIN_REMOTE_PASSWORD': payload['manual_session'],
-		'CHECKIN_HEADLESS': str(config['browser']['headless']).lower(),
+		'CHECKIN_HEADLESS': str(headless).lower(),
 		'CHECKIN_HUMANIZE': str(config['browser']['humanize']).lower(),
 		'CHECKIN_WAIT_TIMEOUT_MS': str(config['browser']['wait_timeout_ms']),
 		'CHECKIN_MANUAL_TIMEOUT_SECONDS': str(config['browser']['manual_timeout_seconds']),
@@ -89,10 +93,43 @@ async def execute(payload: dict) -> int:
 		instructions = '请在本机已打开的 Chromium 中完成登录' if not url else '请通过已登录的 WebUI 打开当前任务'
 		await asyncio.to_thread(
 			notify.push_message,
-			'签到需要人工登录',
+			'身份需要人工登录' if kind == 'identity_login' else '签到需要人工登录',
 			f'{account_name} 需要人工登录. {instructions}, 剩余约 {timeout} 秒.',
 			msg_type='text',
 		)
+
+	if kind == 'identity_login':
+		import utils.identity_login as identity_module
+		from utils.identity_login import IdentityLoginRuntime
+		from utils.oauth import AuthError
+
+		setattr(identity_module, 'ManualTakeover', LocalTakeover)
+		identity = payload.get('identity')
+		if not isinstance(identity, str) or identity not in config['identities']:
+			raise AuthError('OAUTH_IDENTITY_NOT_CONFIGURED')
+		identity_runtime = IdentityLoginRuntime.from_environment(
+			build_app_config(config), accounts=accounts, notify_ready=notify_ready
+		)
+		publish()
+		try:
+			result = await identity_runtime.execute(identity)
+		except AuthError as error:
+			publish(
+				state='failed',
+				manual=None,
+				error=error.reason,
+				summary={'kind': kind, 'identity': identity, 'identity_result': {'state': 'unverified'}},
+			)
+			return 1
+		finally:
+			identity_runtime.close()
+		publish(
+			state='succeeded',
+			manual=None,
+			error=None,
+			summary={'kind': kind, 'identity': identity, 'identity_result': {'state': 'verified', **result}},
+		)
+		return 0
 
 	runtime = AuthenticationRuntime.from_environment(accounts, build_app_config(config), notify_ready=notify_ready)
 	results: list[dict | None] = [None] * len(accounts)

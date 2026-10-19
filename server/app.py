@@ -15,7 +15,9 @@ from urllib.parse import urlsplit
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
 from server.config_store import ConfigError, ConfigStore, ConflictError
+from server.identity_state import IdentityStateReader
 from server.jobs import BusyError, JobManager
+from utils.secure_state import StateError
 
 STATIC_ROOT = Path(__file__).parent / 'static'
 
@@ -25,6 +27,7 @@ class WebService:
 		self.store = ConfigStore(data_dir / 'webui.sqlite3', key)
 		self.store.load()
 		self.jobs = JobManager(self.store, data_dir, key)
+		self.identity_states = IdentityStateReader(data_dir, key)
 		self.db = sqlite3.connect(data_dir / 'webui.sqlite3')
 		self.db.execute(
 			'CREATE TABLE IF NOT EXISTS web_auth (id INTEGER PRIMARY KEY CHECK(id=1), salt BLOB NOT NULL, digest BLOB NOT NULL)'
@@ -160,6 +163,28 @@ class WebService:
 	async def stop_run(self, request):
 		return web.json_response({'stopping': await self.jobs.stop()})
 
+	async def login_identity(self, request):
+		body = await request.json()
+		if (
+			not isinstance(body, dict)
+			or type(body.get('revision')) is not int
+			or not isinstance(body.get('identity'), str)
+			or not body['identity'].strip()
+		):
+			raise ValueError
+		return web.json_response(
+			{'run': await self.jobs.start_identity(body['identity'], body['revision'])}, status=202
+		)
+
+	async def identities(self, request):
+		config, _ = self.store.load()
+		try:
+			return web.json_response({'identities': await asyncio.to_thread(self.identity_states.read, config)})
+		except (StateError, OSError):
+			return web.json_response(
+				{'error': '无法读取身份登录状态, 请检查密钥和加密快照, 不会覆盖已有登录态'}, status=503
+			)
+
 	async def status(self, request):
 		return web.json_response(self.jobs.status())
 
@@ -290,6 +315,8 @@ def create_app(data_dir: Path, key: bytes, password: str | None = None, *, sched
 	app.router.add_put('/api/config', service.save_config)
 	app.router.add_get('/api/status', service.status)
 	app.router.add_get('/api/runs', service.runs)
+	app.router.add_get('/api/identities', service.identities)
+	app.router.add_post('/api/identities/login', service.login_identity)
 	app.router.add_post('/api/runs', service.start_run)
 	app.router.add_post('/api/runs/stop', service.stop_run)
 	app.router.add_route('*', '/manual/{run_id}/{tail:.*}', service.manual)
