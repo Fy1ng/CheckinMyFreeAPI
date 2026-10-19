@@ -2,8 +2,11 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 from typing import Any, Literal
+from uuid import uuid4
 
 import httpx
+
+from utils.fy1push import fy1push_channel, fy1push_endpoint, fy1push_summary, validate_fy1push_token
 
 
 class NotificationKit:
@@ -26,6 +29,9 @@ class NotificationKit:
 		self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
 		self.bark_key = os.getenv('BARK_KEY')
 		self.bark_server = os.getenv('BARK_SERVER', 'https://api.day.app')
+		self.fy1push_server = os.getenv('FY1PUSH_SERVER', '')
+		self.fy1push_token = os.getenv('FY1PUSH_TOKEN', '')
+		self.fy1push_channel = os.getenv('FY1PUSH_CHANNEL', '')
 
 	def _post_json(self, service: str, url: str, data: dict[str, Any]) -> httpx.Response:
 		with httpx.Client(timeout=30.0) as client:
@@ -157,6 +163,33 @@ class NotificationKit:
 
 		self._post_json('Bark', url, data)
 
+	def send_fy1push(self, title: str, content: str):
+		if not self.fy1push_server or not self.fy1push_token:
+			raise ValueError('Fy1Push server or sending token not configured')
+		endpoint = fy1push_endpoint(self.fy1push_server)
+		channel = fy1push_channel(self.fy1push_channel)
+		validate_fy1push_token(self.fy1push_token)
+		title_limit = 40 if channel == 'default' else 40 - 5 - len(channel)
+		payload = {
+			'title': fy1push_summary(title, title_limit),
+			'body': fy1push_summary(content, 100),
+			'channel': channel,
+		}
+		headers = {'Authorization': 'Bearer ' + self.fy1push_token, 'Idempotency-Key': str(uuid4())}
+		try:
+			with httpx.Client(timeout=30.0, trust_env=False, follow_redirects=False) as client:
+				response = client.post(endpoint, json=payload, headers=headers)
+		except httpx.HTTPError:
+			raise RuntimeError('Fy1Push request outcome unknown; no automatic retry') from None
+		if response.status_code != 200:
+			raise RuntimeError(f'Fy1Push request failed: HTTP {response.status_code}')
+		try:
+			result = response.json()
+		except ValueError:
+			raise RuntimeError('Fy1Push returned an invalid response; delivery is unconfirmed') from None
+		if not isinstance(result, dict) or result.get('ok') is not True or result.get('accepted') is not True:
+			raise RuntimeError('Fy1Push did not confirm acceptance; no automatic retry')
+
 	def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text'):
 		notifications = [
 			('Email', lambda: self.send_email(title, content, msg_type)),
@@ -169,11 +202,16 @@ class NotificationKit:
 			('Telegram', lambda: self.send_telegram(title, content)),
 			('Bark', lambda: self.send_bark(title, content)),
 		]
+		if self.fy1push_server:
+			notifications.append(('Fy1Push', lambda: self.send_fy1push(title, content)))
 
 		for name, func in notifications:
 			try:
 				func()
-				print(f'[{name}]: Message push successful!')
+				if name == 'Fy1Push':
+					print('[Fy1Push]: Request accepted; device delivery not confirmed')
+				else:
+					print(f'[{name}]: Message push successful!')
 			except Exception as e:
 				print(f'[{name}]: Message push failed! Reason: {str(e)}')
 

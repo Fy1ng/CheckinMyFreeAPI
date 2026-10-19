@@ -21,6 +21,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from utils.config import AccountConfig, AppConfig, IdentityConfig, ProviderConfig
+from utils.fy1push import fy1push_channel, fy1push_endpoint, validate_fy1push_token
 
 # Public UI marker; never an authentication credential.
 SECRET_KEEP = '__UNCHANGED_SECRET__'  # nosec B105
@@ -45,6 +46,9 @@ NOTIFICATION_ENV_NAMES = frozenset(
 		'TELEGRAM_CHAT_ID',
 		'BARK_KEY',
 		'BARK_SERVER',
+		'FY1PUSH_SERVER',
+		'FY1PUSH_TOKEN',
+		'FY1PUSH_CHANNEL',
 	}
 )
 SECRET_NOTIFICATION_ENV_NAMES = frozenset(
@@ -60,6 +64,7 @@ SECRET_NOTIFICATION_ENV_NAMES = frozenset(
 		'TELEGRAM_BOT_TOKEN',
 		'BARK_KEY',
 		'BARK_SERVER',
+		'FY1PUSH_TOKEN',
 	}
 )
 _TOP_LEVEL_FIELDS = frozenset(
@@ -408,6 +413,14 @@ def validate_config(config: dict) -> dict:
 		if key == 'GOTIFY_PRIORITY' and value:
 			if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 10:
 				raise ConfigError('Gotify priority must be an integer between 1 and 10')
+	try:
+		if notifications.get('FY1PUSH_SERVER'):
+			fy1push_endpoint(notifications['FY1PUSH_SERVER'])
+		if notifications.get('FY1PUSH_CHANNEL'):
+			fy1push_channel(notifications['FY1PUSH_CHANNEL'])
+		validate_fy1push_token(notifications.get('FY1PUSH_TOKEN', ''))
+	except ValueError as error:
+		raise ConfigError(str(error)) from None
 	data['notifications'] = notifications
 	schedule = default_config()['schedule']
 	schedule.update(_object(data['schedule'], set(schedule), 'Schedule'))

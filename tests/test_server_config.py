@@ -193,6 +193,46 @@ def test_notification_allowlist_matches_existing_notifier():
 	assert NOTIFICATION_ENV_NAMES == read_names
 
 
+def test_fy1push_token_is_encrypted_redacted_retained_and_explicitly_cleared(tmp_path):
+	path = tmp_path / 'config.db'
+	store = ConfigStore(path, os.urandom(32))
+	try:
+		config = default_config()
+		config['notifications'] = {
+			'FY1PUSH_SERVER': 'https://push.example.test',
+			'FY1PUSH_TOKEN': 'synthetic-fy1push-secret',
+			'FY1PUSH_CHANNEL': '签到',
+		}
+		public = store.save(config, 0)
+		assert public['config']['notifications']['FY1PUSH_TOKEN'] == SECRET_KEEP
+		assert public['config']['notifications']['FY1PUSH_SERVER'] == 'https://push.example.test'
+		assert b'synthetic-fy1push-secret' not in path.read_bytes()
+		store.save(public['config'], 1)
+		assert store.load()[0]['notifications']['FY1PUSH_TOKEN'] == 'synthetic-fy1push-secret'
+		public = store.public()
+		public['config']['notifications']['FY1PUSH_TOKEN'] = ''
+		store.save(public['config'], 2)
+		assert store.load()[0]['notifications']['FY1PUSH_TOKEN'] == ''
+	finally:
+		store.close()
+
+
+@pytest.mark.parametrize(
+	'field,value',
+	[
+		('FY1PUSH_SERVER', 'http://remote.example.test'),
+		('FY1PUSH_SERVER', 'https://name:synthetic-secret@push.example.test'),
+		('FY1PUSH_CHANNEL', 'two words'),
+		('FY1PUSH_TOKEN', 'synthetic\tinjection'),
+	],
+)
+def test_invalid_fy1push_configuration_fails_before_saving(field, value):
+	config = default_config()
+	config['notifications'][field] = value
+	with pytest.raises(ConfigError):
+		validate_config(config)
+
+
 @pytest.mark.parametrize('name', ['PATH', 'PYTHONPATH', 'CHECKIN_STATE_KEY', 'CHECKIN_PROXY_URL'])
 def test_unknown_notification_environment_is_rejected(name):
 	config = default_config()

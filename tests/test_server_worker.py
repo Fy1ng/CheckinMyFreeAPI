@@ -86,6 +86,11 @@ def install_runtime(monkeypatch, runtime, captured=None):
 @pytest.mark.asyncio
 async def test_worker_converts_config_and_derives_separate_login_key(isolated_worker, monkeypatch, tmp_path):
 	fixture = isolated_worker
+	fixture.payload['config']['notifications'].update(
+		FY1PUSH_SERVER='https://push.example.test',
+		FY1PUSH_TOKEN='synthetic-fy1push-sending-token',
+		FY1PUSH_CHANNEL='签到',
+	)
 	runtime = SimpleNamespace(
 		execute=AsyncMock(return_value=(True, None, {'quota': 12.5})),
 		close=Mock(),
@@ -111,6 +116,9 @@ async def test_worker_converts_config_and_derives_separate_login_key(isolated_wo
 	assert environment['CHECKIN_PROXY_URL'] == 'http://proxy.example.test:8080'
 	assert environment['EMAIL_PASS'] == 'synthetic-notification-password'
 	assert environment['EMAIL_TO'] == 'recipient@example.test'
+	assert environment['FY1PUSH_SERVER'] == 'https://push.example.test'
+	assert environment['FY1PUSH_TOKEN'] == 'synthetic-fy1push-sending-token'
+	assert environment['FY1PUSH_CHANNEL'] == '签到'
 	assert environment['CHECKIN_MANUAL_TRANSPORT'] == 'local'
 	assert environment['CHECKIN_MANUAL_SESSION'] == fixture.payload['manual_session']
 	assert environment['CHECKIN_HEADLESS'] == 'false'

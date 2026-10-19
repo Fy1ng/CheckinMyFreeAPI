@@ -155,7 +155,17 @@ Account 的 `id` 应唯一且稳定, 修改它会影响登录态复用. OAuth �
 
 WebUI 不会启动 Mihomo 或自动消费订阅. 原有 `scripts/setup_mihomo_proxy.sh` 作为独立 CLI 兼容工具保留, 订阅和代理服务由使用者管理. 容器中的 `127.0.0.1` 指容器自身, 不代表宿主机已有代理.
 
-通知在 WebUI 中按需配置, 支持 SMTP、钉钉、飞书、企业微信、PushPlus、Server 酱、Telegram、Gotify 和 Bark. 保存秘密后界面使用掩码, 编辑时按表单说明保留或清除旧值. 通知密码、Webhook token、代理密码和站点凭据不应出现在 URL、运行记录或截图中. 通知失败或延迟不代表任务失败或成功, 以任务记录和站点实际结果为准.
+通知在 WebUI 中按需配置, 支持 SMTP、钉钉、飞书、企业微信、PushPlus、Server 酱、Telegram、Gotify、Bark 和 Fy1Push. 保存秘密后界面使用掩码, 编辑时按表单说明保留或清除旧值. 通知密码、Webhook token、代理密码和站点凭据不应出现在 URL、运行记录或截图中. 通知失败或延迟不代表任务失败或成功, 以任务记录和站点实际结果为准.
+
+Fy1Push 在通知渠道的独立分组中配置, CLI 使用相同环境变量:
+
+| 字段 | 配置说明 |
+| --- | --- |
+| `FY1PUSH_SERVER` | 服务根 URL, 例如 `https://push.example.com`. 留空禁用该渠道. 也接受已有 `/v1/push` 后缀, 不会重复追加. 仅允许 HTTPS 或 HTTP loopback (`localhost`, `127.0.0.1`, `::1`), 路径仅允许根路径或 `/v1/push`, 不含 URL 凭据, 查询参数或片段. |
+| `FY1PUSH_TOKEN` | Fy1Push 发送 token, 通过 `Authorization: Bearer` 发送, 在数据库中作为敏感字段加密. WebUI 输入留空保留已有值, 点击清除才删除. |
+| `FY1PUSH_CHANNEL` | 可选消息分组, 留空或省略时默认 `签到`. 允许 1 至 24 个 Unicode 字母, 数字或 `-_.`. |
+
+Fy1Push 标题包含分组前缀, 合计最多 40 字符, 过长时截断. 正文超过 100 字符时截为摘要, 完整执行记录请查看 WebUI. 当前 WebUI 任务通知通常较短, 旧 CLI 的长通知可能截断. `accepted=true` 只表示 Fy1Push 服务端接收, 不代表手机已收到. 保存配置不会发送测试通知.
 
 ## 数据备份与恢复
 

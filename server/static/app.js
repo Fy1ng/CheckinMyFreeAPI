@@ -643,6 +643,9 @@
     ['Bark', [
       ['BARK_KEY', '设备 key', true], ['BARK_SERVER', '服务器 URL', true],
     ]],
+    ['Fy1Push', [
+      ['FY1PUSH_SERVER', '服务器 URL'], ['FY1PUSH_TOKEN', '发送 token', true], ['FY1PUSH_CHANNEL', '消息分组'],
+    ]],
   ];
 
   function renderNotifications(container) {
@@ -655,10 +658,21 @@
       fields.forEach(([key, label, secret]) => {
         const value = state.config.notifications[key];
         const update = (next) => { state.config.notifications[key] = next; };
-        const options = { optional: true, hint: key, placeholder: key === 'BARK_SERVER' ? 'https://api.day.app' : key === 'GOTIFY_PRIORITY' ? '9 (1-10)' : '' };
+        const options = {
+          optional: true,
+          hint: key,
+          placeholder: key === 'BARK_SERVER' ? 'https://api.day.app' : key === 'GOTIFY_PRIORITY' ? '9 (1-10)' : '',
+          ...{
+            FY1PUSH_SERVER: { placeholder: 'https://push.example.com', hint: 'FY1PUSH_SERVER. 留空禁用. 使用 HTTPS 服务根地址, 本机测试可用 HTTP loopback; 也兼容 /v1/push 后缀. 不含凭据, 查询参数或片段.' },
+            FY1PUSH_TOKEN: { hint: 'FY1PUSH_TOKEN. 使用发送 token, 通过 Bearer 认证. 已保存值留空保留, 点击清除才删除.' },
+            FY1PUSH_CHANNEL: { placeholder: '签到', hint: 'FY1PUSH_CHANNEL. 留空默认签到, 允许 1 至 24 个 Unicode 字母, 数字或 -_.' },
+          }[key],
+        };
         grid.append(secret || value === SECRET ? secretField(label, value, update, options) : field(label, value, update, options));
       });
-      group.append(grid); container.append(group);
+      group.append(grid);
+      if (title === 'Fy1Push') group.append(el('p', 'hint-box', '标题含分组前缀最多 40 字符, 过长时截断. 正文超过 100 字符时仅发送摘要, 完整执行记录请查看 WebUI. accepted=true 只表示服务端已接收, 不代表手机已到达.'));
+      container.append(group);
     });
     container.append(el('p', 'hint-box', '邮箱采用 SMTP SSL, 端口 465. Telegram 需要可访问其 API 的网络. 已保存的密钥留空保留, 点击清除才删除.'));
   }
