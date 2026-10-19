@@ -9,12 +9,12 @@ import secrets
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
-from importlib.metadata import version
 from pathlib import Path
 
 from playwright.async_api import Error as BrowserError
 
 from utils.browser import launch_login_context, load_browser_login_settings
+from utils.browser_backend import browser_compatibility, browser_storage_paths, get_browser_engine
 from utils.config import AccountConfig, AppConfig
 from utils.manual_login import ManualLoginError, ManualTakeover
 from utils.oauth import AuthError
@@ -99,7 +99,7 @@ def check_identity_subject(metadata: dict, kind: str, user: dict) -> None:
 		raise AuthError('IDENTITY_ACCOUNT_MISMATCH')
 
 
-async def probe_identity_user(page, kind: str) -> dict | None:
+async def probe_identity_user(page, kind: str, *, allow_fetch: bool = True) -> dict | None:
 	"""Verify the current self subject on the exact official HTTPS origin.
 
 	GitHub's public REST /user cannot authenticate a browser cookie. Instead the
@@ -116,18 +116,31 @@ async def probe_identity_user(page, kind: str) -> dict | None:
 	path = '/session/current.json' if kind == 'linuxdo' else '/settings/profile'
 	try:
 		result = await page.evaluate(
-			"""async ({url, kind}) => {
+			"""async ({url, kind, allowFetch = true}) => {
+		  if (location.origin !== new URL(url).origin) return {pending: true};
 		  // Leave interactive verification to the user before probing authentication.
 		  if (__IDENTITY_CHALLENGE__) return {challenge: true};
 		  if (kind === 'linuxdo' && (__LINUXDO_LOGIN__)) return {login_required: true};
-		  // A challenged fetch must be opened as a document for the user to verify.
-		  // Verify that document's actual HTTP status before accepting its JSON.
+		  // Discourse renders currentUser only for the authenticated session.
+		  // Read that first-party bootstrap without navigating to a challenged API.
 		  const navigation = performance.getEntriesByType('navigation')[0];
-		  if (kind === 'linuxdo' && location.href === url && navigation?.name === url) {
-		    let data = null;
-		    try { data = JSON.parse(document.querySelector('pre')?.textContent || document.body.textContent); } catch {}
-		    return {status: navigation.responseStatus || 0, url, data, content_kind: data ? 'json' : 'other'};
+		  if (kind === 'linuxdo' && navigation?.responseStatus === 200) {
+		    const nodes = document.querySelectorAll('#data-preloaded');
+		    const actor = document.querySelector('#current-user');
+		    if (nodes.length === 1 && actor?.getClientRects().length > 0) {
+		      const text = nodes[0].getAttribute('data-preloaded') || nodes[0].textContent;
+		      if (text?.length <= 2097152) {
+		        try {
+		          const preload = JSON.parse(text);
+		          const user = typeof preload.currentUser === 'string' ? JSON.parse(preload.currentUser) : preload.currentUser;
+		          if (user && typeof user === 'object' && !Array.isArray(user)) {
+		            return {status: 200, url, data: {current_user: {id: user.id, username: user.username}}};
+		          }
+		        } catch {}
+		      }
+		    }
 		  }
+		  if (!allowFetch) return {pending: true};
 		  try {
 		    const response = await fetch(url, {method: 'GET', credentials: 'same-origin',
 		      headers: kind === 'linuxdo' ? {Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest'} : {},
@@ -155,7 +168,7 @@ async def probe_identity_user(page, kind: str) -> dict | None:
 		      content_kind: contentType.includes('application/json') ? 'json' : contentType.includes('text/html') ? 'html' : 'other'};
 		  } catch { return {status: 0}; }
 		}""".replace('__IDENTITY_CHALLENGE__', CHALLENGE_VISIBLE).replace('__LINUXDO_LOGIN__', LINUXDO_LOGIN_VISIBLE),
-			{'url': origin + path, 'kind': kind},
+			{'url': origin + path, 'kind': kind, **({'allowFetch': False} if not allow_fetch else {})},
 		)
 	except BrowserError as error:
 		if page.is_closed():
@@ -170,6 +183,8 @@ async def probe_identity_user(page, kind: str) -> dict | None:
 	if result.get('challenge') is True:
 		return None
 	if result.get('login_required') is True:
+		return None
+	if result.get('pending') is True:
 		return None
 	status = result.get('status', 0)
 	if status == 401:
@@ -216,11 +231,18 @@ async def probe_identity_user(page, kind: str) -> dict | None:
 
 class IdentityLoginRuntime:
 	def __init__(
-		self, config: AppConfig, store: SnapshotStore, *, notify_ready=None, accounts: list[AccountConfig] | None = None
+		self,
+		config: AppConfig,
+		store: SnapshotStore,
+		*,
+		notify_ready=None,
+		accounts: list[AccountConfig] | None = None,
+		bound_subjects: dict[str, str] | None = None,
 	):
 		self.config = config
 		self.store = store
 		self.accounts = accounts or []
+		self.bound_subjects = bound_subjects or {}
 		self.notify_ready = notify_ready
 		self._lock = asyncio.Lock()
 		self.diagnostics: dict = {}
@@ -229,19 +251,30 @@ class IdentityLoginRuntime:
 			raise AuthError('INVALID_MANUAL_TIMEOUT')
 
 	@classmethod
-	def from_environment(cls, config: AppConfig, *, notify_ready=None, accounts: list[AccountConfig] | None = None):
-		from cloakbrowser.config import get_chromium_version
-
-		store = SnapshotStore(
+	def from_environment(
+		cls,
+		config: AppConfig,
+		*,
+		notify_ready=None,
+		accounts: list[AccountConfig] | None = None,
+		bound_subjects: dict[str, str] | None = None,
+	):
+		engine = get_browser_engine()
+		root, cache_file = browser_storage_paths(
 			Path(os.getenv('CHECKIN_AUTH_ROOT', '.auth-state')),
 			Path(os.getenv('CHECKIN_AUTH_CACHE_FILE', '.auth-cache/auth-state.enc')),
+			engine,
+		)
+		store = SnapshotStore(
+			root,
+			cache_file,
 			os.getenv('CHECKIN_STATE_KEY', ''),
 			scope=os.getenv('CHECKIN_STATE_SCOPE', os.getenv('GITHUB_REPOSITORY', 'local-test')),
-			compatibility=f'{os.name}:{version("cloakbrowser")}:{get_chromium_version()}',
+			compatibility=browser_compatibility(engine),
 		)
 		try:
 			print(f'[STATE] Encrypted authentication snapshot: {store.restore()}')
-			return cls(config, store, notify_ready=notify_ready, accounts=accounts)
+			return cls(config, store, notify_ready=notify_ready, accounts=accounts, bound_subjects=bound_subjects)
 		except BaseException:
 			store.close()
 			raise
@@ -254,6 +287,10 @@ class IdentityLoginRuntime:
 				raise AuthError('MANUAL_LOGIN_UNAVAILABLE') from None
 			except TimeoutError:
 				raise AuthError('MANUAL_LOGIN_TIMED_OUT') from None
+			except BrowserError as error:
+				if type(error).__name__ == 'TargetClosedError':
+					raise AuthError('IDENTITY_BROWSER_CLOSED') from None
+				raise
 
 	async def _execute(self, alias: str) -> dict:
 		proxy = identity_proxy(self.config, alias, self.accounts)
@@ -283,18 +320,18 @@ class IdentityLoginRuntime:
 			if response is not None and response.status >= 500:
 				if await page.evaluate('() => ' + CHALLENGE_VISIBLE) is not True:
 					raise AuthError('NETWORK_OR_SERVICE_ERROR')
-			verification_required = False
 			try:
 				user = await self._probe(page, kind)
 			except IdentityProbeError as error:
 				if error.reason != 'IDENTITY_CHALLENGE_REQUIRED':
 					raise
-				verification_required = True
 				user = None
 			if user is None:
 				await page.bring_to_front()
-				user = await self._manual(page, kind, alias, verification_required=verification_required)
+				user = await self._manual(page, kind, alias)
 			check_identity_subject(metadata, kind, user)
+			if alias in self.bound_subjects and self.bound_subjects[alias] != user['user_id']:
+				raise AuthError('IDENTITY_ACCOUNT_MISMATCH')
 			verified = {**user, 'verified_at': datetime.now(timezone.utc).isoformat()}
 		finally:
 			await context.close()
@@ -306,27 +343,14 @@ class IdentityLoginRuntime:
 		self.store.save()
 		return verified
 
-	async def _probe(self, page, kind: str) -> dict | None:
+	async def _probe(self, page, kind: str, *, allow_fetch: bool = True) -> dict | None:
 		try:
-			return await probe_identity_user(page, kind)
+			return await probe_identity_user(page, kind, allow_fetch=allow_fetch)
 		except IdentityProbeError as error:
 			self.diagnostics = error.diagnostics
 			raise
 
-	async def _open_manual_page(self, page, url: str) -> None:
-		response = await page.goto(
-			url, wait_until='domcontentloaded', timeout=int(os.getenv('CHECKIN_WAIT_TIMEOUT_MS', '60000'))
-		)
-		if response is not None and response.status == 429:
-			raise AuthError('RATE_LIMITED')
-		if response is not None and response.status >= 500:
-			if await page.evaluate('() => ' + CHALLENGE_VISIBLE) is not True:
-				raise AuthError('NETWORK_OR_SERVICE_ERROR')
-
-	async def _manual(self, page, kind: str, alias: str, *, verification_required: bool = False) -> dict:
-		verification_opened = False
-		login_returned = False
-		verification_url = IDENTITY_ORIGINS[kind] + '/session/current.json'
+	async def _manual(self, page, kind: str, alias: str) -> dict:
 		async with ManualTakeover(self.manual_timeout) as takeover:
 			deadline = time.monotonic() + self.manual_timeout
 			async with asyncio.timeout(self.manual_timeout):
@@ -335,26 +359,10 @@ class IdentityLoginRuntime:
 						await asyncio.wait_for(self.notify_ready(takeover.url, alias, self.manual_timeout), timeout=20)
 					except Exception:
 						print('[MANUAL] Notification unavailable; use the current task in WebUI')
-				if verification_required:
-					verification_opened = True
-					await self._open_manual_page(page, verification_url)
 				while time.monotonic() < deadline:
-					try:
-						user = await self._probe(page, kind)
-					except IdentityProbeError as error:
-						if error.reason != 'IDENTITY_CHALLENGE_REQUIRED':
-							raise
-						if verification_opened:
-							raise IdentityProbeError('ACCESS_BLOCKED', kind, {'cf_challenge': True}) from None
-						verification_opened = True
-						await self._open_manual_page(page, verification_url)
-						continue
+					user = await self._probe(page, kind, allow_fetch=kind != 'linuxdo')
 					if user is not None:
 						return user
-					if verification_opened and not login_returned and page.url == verification_url:
-						if await page.evaluate('() => ' + CHALLENGE_VISIBLE) is not True:
-							login_returned = True
-							await self._open_manual_page(page, IDENTITY_ORIGINS[kind] + '/login')
 					await asyncio.sleep(min(2, max(0, deadline - time.monotonic())))
 				raise TimeoutError
 

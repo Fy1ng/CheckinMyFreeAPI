@@ -248,7 +248,7 @@ async def test_manual_entry_is_published_only_during_takeover(isolated_worker, m
 		assert all(manual['url'] == 'http://127.0.0.1:1234' for manual in inside)
 	manual_messages = [call.args[1] for call in fixture.notify.call_args_list if call.args[0] == '签到需要人工登录']
 	assert len(manual_messages) == 2
-	assert all(('本机已打开的 Chromium' if transport == 'desktop' else 'WebUI') in msg for msg in manual_messages)
+	assert all(('本机已打开的浏览器' if transport == 'desktop' else 'WebUI') in msg for msg in manual_messages)
 	assert all(fixture.payload['manual_session'] not in msg and 'http://' not in msg for msg in manual_messages)
 	assert json.loads((tmp_path / 'run-1.json').read_text(encoding='utf-8'))['manual'] is None
 

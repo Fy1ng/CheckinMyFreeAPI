@@ -2,6 +2,8 @@
 
 import asyncio
 import base64
+import html
+import json
 import os
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -11,10 +13,18 @@ from playwright.async_api import async_playwright
 
 from utils.config import AppConfig, IdentityConfig
 from utils.identity_login import IdentityLoginRuntime, probe_identity_user
-from utils.oauth import AuthError
 from utils.secure_state import SnapshotStore, state_key
 
 pytestmark = pytest.mark.skipif(os.getenv('CHECKIN_BROWSER_TESTS') != '1', reason='Opt-in offline Chromium fixture')
+
+
+def discourse_bootstrap(*, attribute=False):
+	data = json.dumps({'currentUser': json.dumps({'id': 42, 'username': 'fixture-user'})})
+	if attribute:
+		preload = f'<div id="data-preloaded" data-preloaded="{html.escape(data, quote=True)}"></div>'
+	else:
+		preload = f'<script id="data-preloaded" type="application/json">{data}</script>'
+	return preload + '<button id="current-user">Current user</button>'
 
 
 @pytest.mark.asyncio
@@ -51,6 +61,8 @@ async def test_verification_identity_login_and_fresh_profile_restore(
 				body = '<h1>Synthetic login</h1><form method="post" action="/sign-in"><input aria-label="Username"><input aria-label="Password" type="password"><button>Sign in fixture</button></form>'
 			else:
 				body = '<h1>Synthetic signed-in identity</h1>'
+				if kind == 'linuxdo':
+					body += discourse_bootstrap()
 			await request_route.fulfill(content_type='text/html', body='<link rel="icon" href="data:,">' + body)
 		elif parsed.path in {'/clearance', '/sign-in'}:
 			assert request.method == 'POST'
@@ -150,10 +162,8 @@ async def test_verification_identity_login_and_fresh_profile_restore(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('api_challenge,document_status', [(False, 200), (True, 200), (True, 403)])
-async def test_linuxdo_form_waits_for_user_and_api_challenge_uses_same_browser(
-	monkeypatch, tmp_path, api_challenge, document_status
-):
+@pytest.mark.parametrize('attribute', [False, True])
+async def test_linuxdo_confirms_page_identity_without_opening_challenged_api(monkeypatch, tmp_path, attribute):
 	origin = 'https://identity.fixture.test'
 	monkeypatch.setitem(
 		__import__('utils.identity_login', fromlist=['IDENTITY_ORIGINS']).IDENTITY_ORIGINS, 'linuxdo', origin
@@ -176,31 +186,24 @@ async def test_linuxdo_form_waits_for_user_and_api_challenge_uses_same_browser(
 				content_type='text/html',
 				body='<link rel="icon" href="data:,"><form id="login-form" method="post" action="/sign-in"><input id="login-account-name" aria-label="Username"><input id="login-account-password" type="password" aria-label="Password"><button>Sign in fixture</button></form>',
 			)
-		elif path in {'/sign-in', '/verify'}:
+		elif path == '/sign-in':
 			assert request.method == 'POST'
-			cookie = 'identity_session=valid' if path == '/sign-in' else 'api_clearance=complete'
-			target = '/' if path == '/sign-in' else '/session/current.json'
 			await request_route.fulfill(
 				content_type='text/html',
-				headers={'Set-Cookie': cookie + '; Path=/; HttpOnly; Secure; SameSite=Lax'},
-				body=f'<script>location.replace("{target}")</script>',
+				headers={'Set-Cookie': 'identity_session=valid; Path=/; HttpOnly; Secure; SameSite=Lax'},
+				body='<script>location.replace("/")</script>',
 			)
 		elif path == '/':
-			await request_route.fulfill(content_type='text/html', body='<h1>Signed in fixture</h1>')
+			assert 'identity_session=valid' in cookies
+			await request_route.fulfill(content_type='text/html', body=discourse_bootstrap(attribute=attribute))
 		elif path == '/session/current.json':
-			assert 'identity_session=valid' in cookies, 'Do not query the protected API while the login form is visible'
 			probes.append(request.is_navigation_request())
-			if api_challenge and 'api_clearance=complete' not in cookies:
-				await request_route.fulfill(
-					status=403,
-					headers={'cf-mitigated': 'challenge'},
-					content_type='text/html',
-					body='<title>Just a moment</title><form id="challenge-form" method="post" action="/verify"><button>Complete verification</button></form>',
-				)
-			else:
-				await request_route.fulfill(
-					status=document_status, json={'current_user': {'id': 42, 'username': 'fixture-user'}}
-				)
+			await request_route.fulfill(
+				status=403,
+				headers={'cf-mitigated': 'challenge'},
+				content_type='text/html',
+				body='<title>Just a moment</title><form id="challenge-form">Verification</form>',
+			)
 		else:
 			await request_route.fulfill(status=404)
 
@@ -226,8 +229,6 @@ async def test_linuxdo_form_waits_for_user_and_api_challenge_uses_same_browser(
 			await page.get_by_label('Password').fill('synthetic-password')
 			await page.get_by_role('button', name='Sign in fixture').click()
 			await page.wait_for_url(origin + '/')
-			if api_challenge:
-				await page.get_by_role('button', name='Complete verification').click()
 
 		class Takeover:
 			async def __aenter__(self):
@@ -257,16 +258,50 @@ async def test_linuxdo_form_waits_for_user_and_api_challenge_uses_same_browser(
 			AppConfig(providers={}, identities={'main': IdentityConfig('linuxdo', proxy='direct')}), store
 		)
 		try:
-			if document_status == 403:
-				with pytest.raises(AuthError, match='ACCESS_BLOCKED'):
-					await runtime.execute('main')
-				assert not store.cache_file.exists()
-			else:
-				result = await runtime.execute('main')
-				assert result['user_id'] == '42'
-				assert store.cache_file.exists()
+			result = await runtime.execute('main')
+			assert result['user_id'] == '42'
+			assert store.cache_file.exists()
 			assert len(contexts) == 1
-			assert probes == ([False, True, True] if api_challenge else [False])
+			assert probes == []
 			assert not blocked
 		finally:
 			runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('variant', ['valid', 'denied', 'public_user', 'duplicate', 'no_actor', 'challenge'])
+async def test_linuxdo_bootstrap_requires_authenticated_page_and_never_queries_api(monkeypatch, variant):
+	origin = 'https://identity.fixture.test'
+	monkeypatch.setitem(
+		__import__('utils.identity_login', fromlist=['IDENTITY_ORIGINS']).IDENTITY_ORIGINS, 'linuxdo', origin
+	)
+	body = discourse_bootstrap()
+	if variant == 'public_user':
+		body = '<script id="data-preloaded" type="application/json">{"user":{"id":42,"username":"public"}}</script><button id="current-user">User</button>'
+	elif variant == 'duplicate':
+		body += discourse_bootstrap()
+	elif variant == 'no_actor':
+		body = body.split('<button')[0]
+	elif variant == 'challenge':
+		body += '<form id="challenge-form">Verification pending</form>'
+	requests = []
+	async with async_playwright() as playwright:
+		browser = await playwright.chromium.launch(
+			channel=os.getenv('CHECKIN_TEST_BROWSER_CHANNEL', 'chrome') or None, headless=True
+		)
+		try:
+			page = await browser.new_page()
+
+			async def route(request_route):
+				requests.append(request_route.request.url)
+				await request_route.fulfill(
+					content_type='text/html', body=body, status=403 if variant == 'denied' else 200
+				)
+
+			await page.route('**/*', route)
+			await page.goto(origin + '/')
+			result = await probe_identity_user(page, 'linuxdo', allow_fetch=False)
+			assert result == ({'user_id': '42', 'username': 'fixture-user'} if variant == 'valid' else None)
+			assert requests == [origin + '/']
+		finally:
+			await browser.close()

@@ -32,7 +32,7 @@
   }
 
   function errorText(error) {
-    return error instanceof ApiError ? error.message : '网络连接失败. 请检查本地服务是否仍在运行.';
+    return error instanceof ApiError ? explainError(error.message) : '网络连接失败. 请检查本地服务是否仍在运行.';
   }
 
   async function api(path, options = {}) {
@@ -77,6 +77,7 @@
   }
 
   function updateControls() {
+    const browserName = state.config?.browser?.engine === 'chrome' ? 'Chrome' : 'Chromium';
     const available = !!state.config && !state.configLoading && state.authenticated;
     const blocked = state.busy || !!state.uncertain;
     $('save-button').disabled = !available || blocked || !state.dirty;
@@ -103,14 +104,14 @@
     }
     let taskHint = '保存配置不会执行签到. 定时任务使用最近一次保存的配置.';
     if (state.status?.platform?.manual_supported === false) taskHint = '当前环境不支持人工登录. 请使用 Windows 本地有界面浏览器, 或 Linux 图形会话.';
-    else if (state.status?.platform?.manual_mode === 'desktop') taskHint = '本机登录会使用已打开的 Chromium 窗口. 请在窗口中完成验证和登录, 程序会连续等待.';
+    else if (state.status?.platform?.manual_mode === 'desktop') taskHint = `本机登录会使用已打开的 ${browserName} 窗口. 请在窗口中完成验证和登录, 程序会连续等待.`;
     const identityLoginRunning = state.status?.running && state.status?.run?.kind === 'identity_login';
     if (state.config?.browser?.headless && !identityLoginRunning) taskHint = '无头模式只尝试自动登录. 需要人工验证或登录时会停止该账号, 请关闭无头模式后再运行.';
-    if (identityLoginRunning) taskHint = '身份登录使用有界面浏览器. 本机请操作 Chromium 窗口, 服务器请等待人工登录入口出现.';
+    if (identityLoginRunning) taskHint = `身份登录使用有界面浏览器. 本机请操作 ${browserName} 窗口, 服务器请等待人工登录入口出现.`;
     const manualRun = state.status?.run;
     if (state.status?.running && manualRun?.manual_transport === 'desktop') {
       const seconds = manualRun.manual_remaining_seconds;
-      taskHint = `请在本机已打开的 Chromium 窗口完成验证, 登录和授权. ${Number.isFinite(seconds) ? `剩余约 ${seconds} 秒. ` : ''}验证后继续在同一窗口登录, 无需重新运行.`;
+      taskHint = `请在本机已打开的 ${browserName} 窗口完成验证, 登录和授权. ${Number.isFinite(seconds) ? `剩余约 ${seconds} 秒. ` : ''}验证后继续在同一窗口登录, 无需重新运行.`;
     }
     $('task-hint').textContent = state.dirty ? '请先保存当前修改, 再开始签到.' : taskHint;
     document.querySelectorAll('[data-identity-login]').forEach((item) => {
@@ -168,7 +169,7 @@
     result.proxy_url ||= '';
     result.schedule ||= { enabled: false, interval_minutes: 360 };
     result.browser ||= {};
-    const defaults = { headless: false, humanize: true, wait_timeout_ms: 60000, manual_timeout_seconds: 600, manual_total_timeout_seconds: 1800 };
+    const defaults = { engine: 'cloakbrowser', headless: false, humanize: true, wait_timeout_ms: 60000, manual_timeout_seconds: 600, manual_total_timeout_seconds: 1800 };
     Object.entries(defaults).forEach(([key, value]) => { if (result.browser[key] === undefined) result.browser[key] = value; });
     return result;
   }
@@ -224,7 +225,7 @@
   }
 
   function explainError(code) {
-    return ({ MANUAL_LOGIN_UNAVAILABLE: '当前环境无法进行人工登录', MANUAL_LOGIN_TIMED_OUT: '等待人工登录超时', MANUAL_LOGIN_REQUIRES_HEADED_BROWSER: '需要人工登录, 请关闭无头模式后再运行', OAUTH_BROWSER_CLOSED: '浏览器窗口已关闭, 登录未完成', IDENTITY_BROWSER_CLOSED: '身份登录窗口已关闭', IDENTITY_ACCOUNT_MISMATCH: '登录的第三方账号与此身份的原绑定不一致, 切换账号请新建身份', INVALID_IDENTITY_RESPONSE: '无法验证平台返回的登录身份', INVALID_SAVED_IDENTITY: '已保存的身份记录无效', IDENTITY_MANUAL_LOGIN_FAILED: '同一身份的前一个人工登录未完成' })[code] || code;
+    return ({ INVALID_BROWSER_ENGINE: '浏览器类型无效, 请重新选择后保存', SYSTEM_CHROME_WINDOWS_ONLY: '系统 Chrome 目前仅支持 Windows, Linux 请使用 CloakBrowser', SYSTEM_CHROME_NOT_INSTALLED: '未找到系统 Chrome, 请先安装 Google Chrome', SYSTEM_CHROME_VERSION_UNAVAILABLE: '无法读取系统 Chrome 版本, 请检查安装后重试', MANUAL_LOGIN_UNAVAILABLE: '当前环境无法进行人工登录', MANUAL_LOGIN_TIMED_OUT: '等待人工登录超时', MANUAL_LOGIN_REQUIRES_HEADED_BROWSER: '需要人工登录, 请关闭无头模式后再运行', OAUTH_BROWSER_CLOSED: '浏览器窗口已关闭, 登录未完成', IDENTITY_BROWSER_CLOSED: '身份登录窗口已关闭', IDENTITY_ACCOUNT_MISMATCH: '登录的第三方账号与此身份的原绑定不一致, 切换账号请新建身份', INVALID_IDENTITY_RESPONSE: '无法验证平台返回的登录身份', INVALID_SAVED_IDENTITY: '已保存的身份记录无效', IDENTITY_MANUAL_LOGIN_FAILED: '同一身份的前一个人工登录未完成' })[code] || code;
   }
 
   function renderStatus(data) {
@@ -832,9 +833,12 @@
     proxy.append(secretField('代理 URL', state.config.proxy_url, (value) => { state.config.proxy_url = value; }, { placeholder: 'http://127.0.0.1:7890', hint: '供选择默认代理的账号, 身份和站点使用. 留空不启用默认代理.' }));
     const browsing = el('section', 'runtime-group'); browsing.append(el('h3', '', '浏览器与人工登录'));
     const browserGrid = el('div', 'form-grid');
+    const humanize = checkField('启用自然交互', browser.humanize, (value) => { browser.humanize = value; }, browser.engine === 'chrome' ? '系统 Chrome 不使用此选项. 原有设置会保留, 切回 CloakBrowser 后生效.' : '仅用于 CloakBrowser.');
+    humanize.querySelector('input').disabled = browser.engine === 'chrome';
     browserGrid.append(
+      selectField('浏览器', browser.engine, [['cloakbrowser', 'CloakBrowser Chromium'], ['chrome', '系统 Chrome (仅 Windows)']], (value) => { browser.engine = value; renderForm(); }, { wide: true, hint: '用于身份登录和账号运行. 系统 Chrome 使用本项目独立的 profile, 不读取日常 Chrome 的账号和登录态. 两种浏览器的登录态分别加密保存, 首次使用所选浏览器需重新登录, 原浏览器的状态会保留. Linux 请使用 CloakBrowser.' }),
       checkField('使用无头浏览器', browser.headless, (value) => { browser.headless = value; }, '人工登录需要关闭此项. Windows 操作本机窗口, Linux 通过 WebUI 接管有界面浏览器.'),
-      checkField('启用自然交互', browser.humanize, (value) => { browser.humanize = value; }),
+      humanize,
       field('页面等待上限, 毫秒', browser.wait_timeout_ms, (value) => { browser.wait_timeout_ms = value; }, { type: 'number', min: 1000, max: 120000, required: true }),
       field('单次人工登录上限, 秒', browser.manual_timeout_seconds, (value) => { browser.manual_timeout_seconds = value; }, { type: 'number', min: 30, max: 1800, required: true }),
       field('整次任务人工登录总上限, 秒', browser.manual_total_timeout_seconds, (value) => { browser.manual_total_timeout_seconds = value; }, { type: 'number', min: 30, max: 3600, required: true, hint: '应不小于单次人工登录上限.' }),
@@ -858,6 +862,7 @@
   }
 
   function validateDraft(config) {
+    if (!['cloakbrowser', 'chrome'].includes(config.browser.engine)) return explainError('INVALID_BROWSER_ENGINE');
     const ids = new Set();
     for (const account of config.accounts) {
       if (typeof account.id !== 'string' || !account.id || account.id.length > 128 || account.id.trim() !== account.id) return '账号稳定 ID 不能为空, 不能包含首尾空白, 且不能超过 128 个字符.';

@@ -34,6 +34,7 @@ def test_explicit_import_preserves_legacy_accounts_and_browser_settings(tmp_path
 	assert config['accounts'][0]['id'] == 'legacy-account-1'
 	assert config['accounts'][0]['password'] == 'fixture-password'
 	assert config['browser'] == {
+		'engine': 'cloakbrowser',
 		'headless': True,
 		'humanize': False,
 		'wait_timeout_ms': 45000,
@@ -42,6 +43,14 @@ def test_explicit_import_preserves_legacy_accounts_and_browser_settings(tmp_path
 	}
 	assert config['notifications'] == {'EMAIL_PASS': 'fixture-mail-password'}
 	assert config['schedule']['enabled'] is False
+	assert dict(os.environ) == before
+
+
+def test_explicit_import_accepts_system_chrome_selection_without_starting_it(tmp_path):
+	path = tmp_path / 'chrome.env'
+	path.write_text('CHECKIN_BROWSER_ENGINE=chrome\n', encoding='utf-8')
+	before = dict(os.environ)
+	assert import_environment(path)['browser']['engine'] == 'chrome'
 	assert dict(os.environ) == before
 
 

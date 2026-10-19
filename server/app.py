@@ -177,9 +177,13 @@ class WebService:
 		)
 
 	async def identities(self, request):
+		from utils.oauth import AuthError
+
 		config, _ = self.store.load()
 		try:
 			return web.json_response({'identities': await asyncio.to_thread(self.identity_states.read, config)})
+		except AuthError as error:
+			return web.json_response({'error': error.reason}, status=503)
 		except (StateError, OSError):
 			return web.json_response(
 				{'error': '无法读取身份登录状态, 请检查密钥和加密快照, 不会覆盖已有登录态'}, status=503

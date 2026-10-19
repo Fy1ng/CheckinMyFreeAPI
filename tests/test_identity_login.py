@@ -143,6 +143,16 @@ async def test_mismatched_subject_keeps_last_known_good_snapshot(browser):
 
 
 @pytest.mark.asyncio
+async def test_new_browser_cannot_rebind_existing_alias_to_a_different_user(browser):
+	runtime = IdentityLoginRuntime(configuration(), browser.store, bound_subjects={'main': '7'})
+	with pytest.raises(AuthError, match='IDENTITY_ACCOUNT_MISMATCH'):
+		await runtime.execute('main')
+	assert not browser.store.cache_file.exists()
+	assert not browser.store.dirty
+	browser.context.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('transport', ['desktop', 'remote'])
 @pytest.mark.parametrize(
 	'anonymous',
@@ -380,12 +390,15 @@ async def test_cloudflare_api_challenge_has_only_safe_diagnostics(browser):
 
 
 @pytest.mark.asyncio
-async def test_identity_verification_navigation_is_bounded_and_never_relaunches(browser, monkeypatch):
-	browser.page.evaluate.return_value = {
-		'status': 403,
-		'url': 'https://linux.do/session/current.json',
-		'cf_challenge': True,
-	}
+async def test_identity_challenge_never_redirects_or_retries_api_while_user_operates(browser, monkeypatch):
+	browser.page.evaluate.side_effect = [
+		{
+			'status': 403,
+			'url': 'https://linux.do/session/current.json',
+			'cf_challenge': True,
+		},
+		asyncio.CancelledError,
+	]
 
 	class Takeover:
 		async def __aenter__(self):
@@ -396,12 +409,12 @@ async def test_identity_verification_navigation_is_bounded_and_never_relaunches(
 
 	monkeypatch.setattr('utils.identity_login.ManualTakeover', lambda timeout: Takeover())
 	runtime = IdentityLoginRuntime(configuration(), browser.store)
-	with pytest.raises(IdentityProbeError, match='ACCESS_BLOCKED'):
+	with pytest.raises(asyncio.CancelledError):
 		await runtime.execute('main')
 	assert [call.args[0] for call in browser.page.goto.await_args_list] == [
 		'https://linux.do/login',
-		'https://linux.do/session/current.json',
 	]
+	assert browser.page.evaluate.call_args.args[1]['allowFetch'] is False
 	assert browser.launch.await_count == 1
 	assert not browser.store.cache_file.exists()
 	assert not browser.store.dirty

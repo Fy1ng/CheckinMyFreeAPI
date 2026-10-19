@@ -51,6 +51,46 @@ def test_default_is_independent_and_does_not_read_environment(monkeypatch):
 	assert dict(os.environ) == before
 
 
+@pytest.mark.parametrize('engine', [None, 'cloakbrowser', 'chrome'])
+def test_browser_engine_legacy_default_and_validated_roundtrip(tmp_path, engine):
+	config = default_config()
+	if engine is None:
+		del config['browser']['engine']
+	else:
+		config['browser']['engine'] = engine
+	before = copy.deepcopy(config)
+	expected_engine = engine or 'cloakbrowser'
+	assert validate_config(config)['browser']['engine'] == expected_engine
+	assert config == before
+	path, key = tmp_path / 'config.db', os.urandom(32)
+	store = ConfigStore(path, key)
+	try:
+		public = store.save(config, 0)
+		assert public['config']['browser']['engine'] == expected_engine
+		assert public['config']['browser']['humanize'] is True
+	finally:
+		store.close()
+	reopened = ConfigStore(path, key)
+	try:
+		assert reopened.load() == (validate_config(config), 1)
+	finally:
+		reopened.close()
+
+
+@pytest.mark.parametrize('engine', [None, False, 1, [], {}, '', 'Chrome', ' chrome', 'synthetic-secret'])
+def test_invalid_browser_engine_is_rejected_without_changing_saved_configuration(tmp_path, engine):
+	store = ConfigStore(tmp_path / 'config.db', os.urandom(32))
+	try:
+		store.save(default_config(), 0)
+		config = default_config()
+		config['browser']['engine'] = engine
+		with pytest.raises(ConfigError, match='^INVALID_BROWSER_ENGINE$'):
+			store.save(config, 1)
+		assert store.load() == (default_config(), 1)
+	finally:
+		store.close()
+
+
 def test_encrypted_database_has_no_plaintext_and_reopens(tmp_path):
 	path = tmp_path / 'private' / 'config.sqlite3'
 	key = os.urandom(32)

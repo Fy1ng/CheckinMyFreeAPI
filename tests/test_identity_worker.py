@@ -48,8 +48,10 @@ def identity_worker(monkeypatch, tmp_path):
 	)
 	captured: dict = {}
 
-	def factory(config, *, accounts, notify_ready):
-		captured.update(accounts=accounts, notify_ready=notify_ready, environment=dict(os.environ))
+	def factory(config, *, accounts, notify_ready, bound_subjects):
+		captured.update(
+			accounts=accounts, notify_ready=notify_ready, bound_subjects=bound_subjects, environment=dict(os.environ)
+		)
 		return runtime
 
 	monkeypatch.setattr(identity_module.IdentityLoginRuntime, 'from_environment', factory)
@@ -114,3 +116,44 @@ async def test_failed_identity_task_persists_safe_probe_diagnostics(identity_wor
 	assert result['summary']['identity_result'] == {'state': 'unverified', 'diagnostics': runtime.diagnostics}
 	assert result['error'] == 'MANUAL_LOGIN_TIMED_OUT'
 	checkin.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_chrome_selection_reaches_identity_worker_without_touching_other_engine(identity_worker, tmp_path):
+	payload, runtime, captured, checkin, _ = identity_worker
+	payload['config']['browser']['engine'] = 'chrome'
+	base = tmp_path / 'auth-root'
+	legacy = base / 'live'
+	legacy.mkdir(parents=True)
+	marker = legacy / 'preserved-legacy-profile'
+	marker.write_text('synthetic')
+	os.environ['CHECKIN_AUTH_ROOT'] = str(base)
+	assert await worker.execute(payload) == 0
+	assert captured['environment']['CHECKIN_BROWSER_ENGINE'] == 'chrome'
+	assert marker.read_text() == 'synthetic'
+	runtime.execute.assert_awaited_once_with('main')
+	checkin.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_missing_system_chrome_reports_actionable_code(identity_worker, monkeypatch):
+	payload, runtime, _, checkin, _ = identity_worker
+	monkeypatch.setattr(
+		identity_module.IdentityLoginRuntime,
+		'from_environment',
+		Mock(side_effect=AuthError('SYSTEM_CHROME_NOT_INSTALLED')),
+	)
+	assert await worker.execute(payload) == 1
+	with open(payload['event_file'], encoding='utf-8') as stream:
+		assert json.load(stream)['error'] == 'SYSTEM_CHROME_NOT_INSTALLED'
+	runtime.execute.assert_not_called()
+	checkin.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_account_worker_startup_preserves_browser_error_code(identity_worker, monkeypatch):
+	payload, _, _, _, _ = identity_worker
+	monkeypatch.setattr(worker, 'execute', AsyncMock(side_effect=AuthError('SYSTEM_CHROME_NOT_INSTALLED')))
+	assert await worker.main(payload) == 1
+	with open(payload['event_file'], encoding='utf-8') as stream:
+		assert json.load(stream)['error'] == 'SYSTEM_CHROME_NOT_INSTALLED'

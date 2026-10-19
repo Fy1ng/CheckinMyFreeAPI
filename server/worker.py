@@ -42,6 +42,7 @@ async def execute(payload: dict) -> int:
 		'CHECKIN_MANUAL_HEADLESS': str(headless).lower(),
 		'CHECKIN_REMOTE_PASSWORD': payload['manual_session'],
 		'CHECKIN_HEADLESS': str(headless).lower(),
+		'CHECKIN_BROWSER_ENGINE': config['browser'].get('engine', 'cloakbrowser'),
 		'CHECKIN_HUMANIZE': str(config['browser']['humanize']).lower(),
 		'CHECKIN_WAIT_TIMEOUT_MS': str(config['browser']['wait_timeout_ms']),
 		'CHECKIN_MANUAL_TIMEOUT_SECONDS': str(config['browser']['manual_timeout_seconds']),
@@ -86,11 +87,16 @@ async def execute(payload: dict) -> int:
 	setattr(auth_module, 'ManualTakeover', LocalTakeover)
 	accounts = [AccountConfig.from_dict(account, index) for index, account in enumerate(config['accounts'])]
 	root = Path(environment['CHECKIN_AUTH_ROOT'])
+	from utils.browser_backend import browser_storage_paths
+
+	root, _ = browser_storage_paths(
+		root, Path(environment['CHECKIN_AUTH_CACHE_FILE']), environment['CHECKIN_BROWSER_ENGINE']
+	)
 	for directory in (root / 'live', root / 'saved'):
 		remove_owned_tree(directory, root)
 
 	async def notify_ready(url: str, account_name: str, timeout: int):
-		instructions = '请在本机已打开的 Chromium 中完成登录' if not url else '请通过已登录的 WebUI 打开当前任务'
+		instructions = '请在本机已打开的浏览器中完成登录' if not url else '请通过已登录的 WebUI 打开当前任务'
 		await asyncio.to_thread(
 			notify.push_message,
 			'身份需要人工登录' if kind == 'identity_login' else '签到需要人工登录',
@@ -100,6 +106,7 @@ async def execute(payload: dict) -> int:
 
 	if kind == 'identity_login':
 		import utils.identity_login as identity_module
+		from server.identity_state import IdentityStateReader
 		from utils.identity_login import IdentityLoginRuntime
 		from utils.oauth import AuthError
 
@@ -107,11 +114,15 @@ async def execute(payload: dict) -> int:
 		identity = payload.get('identity')
 		if not isinstance(identity, str) or identity not in config['identities']:
 			raise AuthError('OAUTH_IDENTITY_NOT_CONFIGURED')
-		identity_runtime = IdentityLoginRuntime.from_environment(
-			build_app_config(config), accounts=accounts, notify_ready=notify_ready
-		)
+		identity_runtime = None
 		publish()
 		try:
+			identity_runtime = IdentityLoginRuntime.from_environment(
+				build_app_config(config),
+				accounts=accounts,
+				notify_ready=notify_ready,
+				bound_subjects=IdentityStateReader(data_dir, key).bound_subjects(config),
+			)
 			result = await identity_runtime.execute(identity)
 		except AuthError as error:
 			identity_result = {'state': 'unverified'}
@@ -126,7 +137,8 @@ async def execute(payload: dict) -> int:
 			)
 			return 1
 		finally:
-			identity_runtime.close()
+			if identity_runtime is not None:
+				identity_runtime.close()
 		publish(
 			state='succeeded',
 			manual=None,
@@ -208,9 +220,17 @@ async def main(payload: dict) -> int:
 	except asyncio.CancelledError:
 		return 130
 	except Exception as error:
+		from utils.oauth import AuthError
+
 		atomic_write(
 			Path(payload['event_file']),
-			json.dumps({'state': 'failed', 'manual': None, 'error': '执行失败: ' + type(error).__name__}).encode(),
+			json.dumps(
+				{
+					'state': 'failed',
+					'manual': None,
+					'error': error.reason if isinstance(error, AuthError) else '执行失败: ' + type(error).__name__,
+				}
+			).encode(),
 		)
 		return 1
 

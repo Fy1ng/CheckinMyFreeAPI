@@ -283,6 +283,13 @@ class JobManager:
 				and self.process.returncode is not None
 			):
 				root = Path(os.getenv('CHECKIN_AUTH_ROOT', str(self.data_dir / 'auth-live')))
+				from utils.browser_backend import browser_storage_paths
+
+				root, _ = browser_storage_paths(
+					root,
+					self.data_dir / 'auth-cache' / 'auth-state.enc',
+					config['browser'].get('engine', 'cloakbrowser'),
+				)
 				try:
 					for directory in (root / 'live', root / 'saved'):
 						remove_owned_tree(directory, root)

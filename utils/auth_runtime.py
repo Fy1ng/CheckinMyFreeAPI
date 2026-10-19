@@ -9,7 +9,6 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, field, replace
-from importlib.metadata import version
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -131,15 +130,20 @@ class AuthenticationRuntime:
 
 	@classmethod
 	def from_environment(cls, accounts: list[AccountConfig], config: AppConfig, *, notify_ready=None):
-		from cloakbrowser.config import get_chromium_version
+		from utils.browser_backend import browser_compatibility, browser_storage_paths, get_browser_engine
 
-		compatibility = f'{os.name}:{version("cloakbrowser")}:{get_chromium_version()}'
-		store = SnapshotStore(
+		engine = get_browser_engine()
+		root, cache_file = browser_storage_paths(
 			Path(os.getenv('CHECKIN_AUTH_ROOT', '.auth-state')),
 			Path(os.getenv('CHECKIN_AUTH_CACHE_FILE', '.auth-cache/auth-state.enc')),
+			engine,
+		)
+		store = SnapshotStore(
+			root,
+			cache_file,
 			os.getenv('CHECKIN_STATE_KEY', ''),
 			scope=os.getenv('CHECKIN_STATE_SCOPE', os.getenv('GITHUB_REPOSITORY', 'local-test')),
-			compatibility=compatibility,
+			compatibility=browser_compatibility(engine),
 		)
 		try:
 			print(f'[STATE] Encrypted authentication snapshot: {store.restore()}')

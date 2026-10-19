@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import time
@@ -11,7 +12,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
+from utils.browser_backend import BROWSER_ENGINES, get_browser_engine, system_chrome_details
 from utils.debug import debug_print, is_debug_enabled
+from utils.oauth import AuthError
 from utils.popups import dismiss_popups, setup_popup_guard
 from utils.proxy import get_playwright_proxy, playwright_proxy
 
@@ -153,6 +156,7 @@ class BrowserLoginSettings:
 	profile_dir: Path
 	cloakbrowser_binary_path: str | None
 	persist_profile: bool
+	engine: str = 'cloakbrowser'
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -166,6 +170,9 @@ def load_browser_login_settings(
 	account_name: str, provider: str, *, persist_profile: bool = True
 ) -> BrowserLoginSettings:
 	profile_base = Path(os.getenv('CHECKIN_BROWSER_PROFILE_DIR', '.browser_profiles'))
+	engine = get_browser_engine()
+	if engine == 'chrome':
+		profile_base = profile_base / 'chrome'
 	profile_dir = profile_base / provider / account_name
 	humanize = _env_bool('CHECKIN_HUMANIZE', True)
 	if provider == 'agentrouter':
@@ -177,6 +184,7 @@ def load_browser_login_settings(
 		profile_dir=profile_dir,
 		cloakbrowser_binary_path=os.getenv('CLOAKBROWSER_BINARY_PATH', '').strip() or None,
 		persist_profile=persist_profile,
+		engine=engine,
 	)
 
 
@@ -200,6 +208,75 @@ class _EphemeralBrowserContext:
 			await self._browser.close()
 
 
+class _ChromeBrowserContext:
+	def __init__(self, context: BrowserContext, browser, driver) -> None:
+		self._context = context
+		self._browser = browser
+		self._driver = driver
+		self._closed = False
+
+	def __getattr__(self, name: str):
+		return getattr(self._context, name)
+
+	async def close(self, *args, **kwargs) -> None:
+		if self._closed:
+			return
+		self._closed = True
+		try:
+			await self._context.close(*args, **kwargs)
+		finally:
+			try:
+				if self._browser is not None:
+					await self._browser.close()
+			finally:
+				await self._driver.stop()
+
+
+async def _launch_chrome_context(
+	settings: BrowserLoginSettings, *, proxy: dict | None, secure: bool
+) -> _ChromeBrowserContext:
+	from playwright.async_api import async_playwright
+
+	executable, _ = system_chrome_details()
+	launch_kwargs: dict = {'executable_path': str(executable), 'headless': settings.headless}
+	context_kwargs: dict = {'viewport': {'width': 1920, 'height': 1080}}
+	if proxy:
+		launch_kwargs['proxy'] = proxy
+	if secure:
+		from utils.manual_login import child_environment
+
+		launch_kwargs['env'] = child_environment()
+		context_kwargs.update({'service_workers': 'block', 'accept_downloads': False})
+	driver = await async_playwright().start()
+	browser = None
+	context = None
+	try:
+		if settings.persist_profile:
+			settings.profile_dir.mkdir(parents=True, exist_ok=True)
+			context = await driver.chromium.launch_persistent_context(
+				str(settings.profile_dir), **launch_kwargs, **context_kwargs
+			)
+			browser = context.browser
+		else:
+			browser = await driver.chromium.launch(**launch_kwargs)
+			context = await browser.new_context(**context_kwargs)
+		return _ChromeBrowserContext(context, browser, driver)
+	except BaseException:
+		try:
+			if context is not None:
+				with contextlib.suppress(Exception):
+					await context.close()
+		finally:
+			try:
+				if browser is not None:
+					with contextlib.suppress(Exception):
+						await browser.close()
+			finally:
+				with contextlib.suppress(Exception):
+					await driver.stop()
+		raise
+
+
 async def launch_login_context(
 	settings: BrowserLoginSettings,
 	*,
@@ -207,7 +284,12 @@ async def launch_login_context(
 	proxy_server: str | None = None,
 	fingerprint_seed: int | None = None,
 	secure: bool = False,
-) -> BrowserContext | _EphemeralBrowserContext:
+) -> BrowserContext | _EphemeralBrowserContext | _ChromeBrowserContext:
+	if settings.engine not in BROWSER_ENGINES:
+		raise AuthError('INVALID_BROWSER_ENGINE')
+	proxy = playwright_proxy(proxy_server) if proxy_server is not None else get_playwright_proxy(use_proxy=use_proxy)
+	if settings.engine == 'chrome':
+		return await _launch_chrome_context(settings, proxy=proxy, secure=secure)
 	_ensure_binary_path(settings)
 
 	launch_kwargs: dict = {
@@ -232,7 +314,6 @@ async def launch_login_context(
 		)
 	if fingerprint_seed is not None:
 		launch_kwargs['args'] = [f'--fingerprint={fingerprint_seed}']
-	proxy = playwright_proxy(proxy_server) if proxy_server is not None else get_playwright_proxy(use_proxy=use_proxy)
 	if proxy:
 		launch_kwargs['proxy'] = proxy
 		print('[INFO] Browser proxy enabled')

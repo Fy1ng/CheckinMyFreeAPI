@@ -93,6 +93,7 @@ def default_config() -> dict:
 		'notifications': {},
 		'schedule': {'enabled': False, 'interval_minutes': 360},
 		'browser': {
+			'engine': 'cloakbrowser',
 			'headless': False,
 			'humanize': True,
 			'wait_timeout_ms': 60000,
@@ -431,6 +432,8 @@ def validate_config(config: dict) -> dict:
 	data['schedule'] = schedule
 	browser = default_config()['browser']
 	browser.update(_object(data['browser'], set(browser), 'Browser'))
+	if not isinstance(browser['engine'], str) or browser['engine'] not in {'cloakbrowser', 'chrome'}:
+		raise ConfigError('INVALID_BROWSER_ENGINE')
 	for key in ('headless', 'humanize'):
 		browser[key] = _boolean(browser[key], 'Browser flag')
 	browser['wait_timeout_ms'] = _integer(browser['wait_timeout_ms'], 'Browser wait timeout', 1000, 120000)

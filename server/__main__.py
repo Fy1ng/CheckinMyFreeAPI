@@ -29,6 +29,8 @@ def import_environment(path: Path) -> dict:
 	for index, account in enumerate(config['accounts']):
 		account.setdefault('id', f'legacy-account-{index + 1}')
 	config['notifications'] = {name: values[name] for name in NOTIFICATION_ENV_NAMES if values.get(name)}
+	if values.get('CHECKIN_BROWSER_ENGINE') is not None:
+		config['browser']['engine'] = values['CHECKIN_BROWSER_ENGINE']
 	for field, variable in (('headless', 'CHECKIN_HEADLESS'), ('humanize', 'CHECKIN_HUMANIZE')):
 		if values.get(variable) is not None:
 			value = str(values[variable]).strip().lower()

@@ -19,21 +19,25 @@ uv run --frozen python -m server
 
 本地默认数据目录为 `./server-data`, SQLite 文件为 `server-data/webui.sqlite3`. 主密钥是 `./server-keys/master.key` 中的原始 32 字节, 本地首次启动可自动生成. `server-data` 与 `server-keys` 都不得提交到 Git. WebUI 日常启动不会读取 `.env`, 也不会自动导入旧账号或发起真实签到.
 
-Windows 可管理配置、查看状态和调度任务. 执行签到需安装 CloakBrowser:
+Windows 可管理配置、查看状态和调度任务. 在 WebUI 的 `定时与浏览器` 中可选择 `系统 Chrome (仅 Windows)` 完成身份登录和账号运行, 需先安装 Google Chrome. 为兼容已有配置, 新增浏览器选项前的配置仍使用 CloakBrowser, 不会自动切换登录态. 选择 CloakBrowser 时需安装其浏览器:
 
 ```bash
 uv run --frozen python -m cloakbrowser install
 ```
 
-Windows 本地测试时关闭无头模式, 可直接在已打开的 Chromium 中完成验证、LinuxDo/GitHub 登录和授权. 自动登录未完成时程序会在同一窗口继续等待, 默认单次最多 600 秒, WebUI 显示等待状态和剩余时间. Windows 不需要启动 noVNC 或隧道. Linux 服务器仍通过 DISPLAY/Xvfb 和 WebUI 远程接管. headless 模式只尝试自动登录一次, 需要人工操作时该账号会报错, 不会关闭后重开窗口重试.
+系统 Chrome 使用项目独立的 profile, 不读取或复用日常 Chrome 的个人资料和登录态. Chrome 与 CloakBrowser 的身份和账号登录态分别加密保存, 首次使用所选浏览器需重新登录, 原浏览器的状态会保留. `启用自然交互` 仅用于 CloakBrowser, Chrome 模式禁用该控件但保留原有设置. Linux 当前只支持 CloakBrowser, 选择系统 Chrome 会在运行时返回明确错误. 使用系统 Chrome 仍可能遇到 Cloudflare 验证或站点访问限制, 不保证放行.
+
+已有 Windows 本地测试实例若使用 `web-password`、`process-id` 和 `keys/master.key` 文件, 可手动运行 `scripts/restart_local_webui.ps1 -TestRoot <测试目录> -UseSystemChrome` 加载后端更新并只切换浏览器配置. 加 `-CheckOnly` 只检查实例是否空闲及进程归属. 脚本要求先关闭定时任务, 不会停止运行中的登录或签到, 不清空已有数据, 不会自动发起任务. 运行后刷新 WebUI 并重新登录管理界面.
+
+Windows 本地测试时关闭无头模式, 可直接在已打开的 Chrome 或 Chromium 中完成验证、LinuxDo/GitHub 登录和授权. 自动登录未完成时程序会在同一窗口继续等待, 默认单次最多 600 秒, WebUI 显示等待状态和剩余时间. Windows 不需要启动 noVNC 或隧道. Linux 服务器仍通过 DISPLAY/Xvfb 和 WebUI 远程接管. headless 模式只尝试自动登录一次, 需要人工操作时该账号会报错, 不会关闭后重开窗口重试.
 
 ## 浏览器配置和运行
 
 1. 登录 WebUI, 在表单中维护站点 Provider、OAuth 身份 Identity 与目标账号 Account. 账号、登录身份和自定义站点卡片均可收起详情, 收起不会丢弃未保存的修改.
 2. 账号切换到 LinuxDo/GitHub OAuth 时只修改账号草稿. 保存配置时, 若尚无对应类型的身份, 会自动新建并关联; 只有一个同类型身份时默认复用它, 有多个时需自行选择. 无论是否已有身份, 均可在账号的登录身份下拉框选择 `新建独立身份 (保存时创建)`, 为该账号创建独立身份. 保存失败不会向草稿添加身份. 也可先在身份页手动添加身份并配置代理.
-3. 登录身份可以在身份页独立登录, 不要求先创建目标站点账号. 先保存当前配置, 再点击对应身份的登录按钮. Windows 在本机 Chromium 操作, Linux 在当前任务的 WebUI 接管入口操作.
+3. 登录身份可以在身份页独立登录, 不要求先创建目标站点账号. 先保存当前配置, 再点击对应身份的登录按钮. Windows 在本机所选浏览器操作, Linux 在当前任务的 WebUI 接管入口操作. 身份卡片显示的是当前已保存浏览器的最近验证记录.
 4. 设置目标站点的 `api_user` 或 `expected_username`, 保存配置. OAuth 至少提供其中一项, 同时填写时两项都必须匹配. 按需填写现有代理、通知渠道和浏览器参数, 保存后再点击手动运行.
-5. 需要人工登录时, Windows 直接在本机已打开的 Chromium 中完成验证、登录和授权; Linux 服务器使用当前任务的 WebUI 接管入口. 验证完成后继续在同一窗口登录, 无需重新运行任务. 远程入口依赖当前登录会话, 只在任务需要且未超时时可用, 不会启动 Cloudflare 公网隧道.
+5. 需要人工登录时, Windows 直接在本机已打开的 Chrome 或 Chromium 中完成验证、登录和授权; Linux 服务器使用当前任务的 WebUI 接管入口. 验证完成后继续在同一窗口登录, 无需重新运行任务. 远程入口依赖当前登录会话, 只在任务需要且未超时时可用, 不会启动 Cloudflare 公网隧道.
 6. 确认手动运行结果后再启用定时任务. 调度默认关闭, 默认间隔为 360 分钟.
 
 保存配置、登录身份与执行签到是独立操作. 独立身份登录不会发起目标站点签到, 也不表示目标站点 OAuth 授权已完成. 同一服务只允许一个任务运行, 身份登录与签到共用串行执行锁和停止按钮. 运行中的配置使用该次任务的快照, 后续保存供下一次运行使用. 可以取消当前任务, 取消后不会为该任务自动重试; 定时调度在仍启用时可产生后续独立任务. 人工接管超时后入口关闭, 需要下一次任务重新建立.
@@ -236,8 +240,11 @@ uv run --frozen bandit -r . -c pyproject.toml
 
 - 无法打开页面: 检查服务状态、端口占用和 SSH 转发. 默认只允许本机访问.
 - 密钥读取失败: 检查文件为原始 32 字节, 以及容器 UID `10001` 的读取权限. 不要用 base64 文本替代原始文件.
-- 人工接管不可用: Linux 检查 DISPLAY/Xvfb、x11vnc、noVNC 与浏览器运行模式; Windows 本地有界面模式直接操作 Chromium, 不提供 noVNC 远程入口.
-- LinuxDo 登录表单可见时不查询受保护的身份接口, 保留原窗口等待人工登录. 身份接口明确返回 `403 / not_logged_in` 时继续等待; 若返回 `cf-mitigated: challenge`, 会在同一窗口打开身份接口, 让用户手动完成验证, 不重启浏览器. 一次任务最多自动打开该验证入口一次, 沿用原人工登录时限. 只有接口实际返回 200 且身份校验通过后才保存登录态. 普通 403 仍以 `ACCESS_BLOCKED` 结束, 429 不自动重试. 失败记录仅保留固定接口路径、状态码和响应类别, 不记录响应正文或 Cookie.
+- 人工接管不可用: Linux 检查 DISPLAY/Xvfb、x11vnc、noVNC 与浏览器运行模式; Windows 本地有界面模式直接操作所选浏览器, 不提供 noVNC 远程入口.
+- LinuxDo 登录表单或 CF 验证可见时保留原窗口等待人工操作. 登录后优先读取正常页面中由 Discourse 服务端预载的当前用户, 并要求页面 HTTP 200 和已登录用户控件可见. 人工登录期间不查询受保护接口, 也不再自动导航到 `/session/current.json` 或刷新页面, 避免程序触发额外的接口验证循环. 页面结构变化且无法可靠确认身份时不会保存登录态. 首次恢复检查若查询接口遇到 `403 / not_logged_in` 或 `cf-mitigated: challenge`, 仍转入原窗口的人工等待. 普通 403 以 `ACCESS_BLOCKED` 结束, 429 不自动重试. 只有确认当前平台用户并校验身份一致后才保存. 失败记录仅保留固定接口路径、状态码和响应类别, 不记录响应正文或 Cookie. 这些处理不保证 Cloudflare 放行.
+- `INVALID_BROWSER_ENGINE`: 在 `定时与浏览器` 中重新选择受支持的浏览器并保存.
+- `SYSTEM_CHROME_WINDOWS_ONLY`: 系统 Chrome 当前仅支持 Windows, Linux 请改用 CloakBrowser.
+- `SYSTEM_CHROME_NOT_INSTALLED` / `SYSTEM_CHROME_VERSION_UNAVAILABLE`: 安装或修复 Google Chrome 后重试. 不会自动改用其他浏览器或复用其登录态.
 - `OAUTH_IDENTITY_NOT_CONFIGURED`: 检查 Identity 别名、类型和 Account 关联.
 - `ACCOUNT_IDENTITY_PROXY_CONFLICT` / `SHARED_IDENTITY_PROXY_CONFLICT`: 统一同一身份的最终代理策略.
 - `ACCOUNT_MISMATCH`: 核对目标站点用户名和 ID, 不要删除校验字段接受未知账号.

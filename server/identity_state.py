@@ -3,15 +3,13 @@
 import base64
 import copy
 import hmac
-import os
 import shutil
 import tempfile
 import threading
-from importlib.metadata import version
 from pathlib import Path
 
-from cloakbrowser.config import get_chromium_version
-
+from utils.browser_backend import browser_compatibility, browser_storage_paths
+from utils.oauth import AuthError
 from utils.secure_state import MAX_FILES, MAX_SNAPSHOT_BYTES, SnapshotStore, StateError, state_key
 
 
@@ -27,12 +25,36 @@ class IdentityStateReader:
 		with self._lock:
 			return self._read(config)
 
+	def bound_subjects(self, config: dict) -> dict[str, str]:
+		"""Keep an alias bound to the same user when a different browser is selected."""
+		with self._lock:
+			result: dict[str, str] = {}
+			for engine in ('cloakbrowser', 'chrome'):
+				_, cache = browser_storage_paths(
+					self.data_dir / 'auth-live', self.data_dir / 'auth-cache' / 'auth-state.enc', engine
+				)
+				if not cache.exists() and not cache.with_suffix('.previous.enc').exists():
+					continue
+				selected = copy.deepcopy(config)
+				selected['browser']['engine'] = engine
+				for alias, state in self._read(selected).items():
+					if state['state'] != 'verified':
+						continue
+					if alias in result and result[alias] != state['user_id']:
+						raise AuthError('IDENTITY_ACCOUNT_MISMATCH')
+					result[alias] = state['user_id']
+			return result
+
 	def _read(self, config: dict) -> dict:
 		identities = config['identities']
 		if not identities:
 			return {}
-		files = [self.data_dir / 'auth-cache' / name for name in ('auth-state.enc', 'auth-state.previous.enc')]
-		compatibility = f'{os.name}:{version("cloakbrowser")}:{get_chromium_version()}'
+		engine = config['browser'].get('engine', 'cloakbrowser')
+		_, selected_cache = browser_storage_paths(
+			self.data_dir / 'auth-live', self.data_dir / 'auth-cache' / 'auth-state.enc', engine
+		)
+		files = [selected_cache, selected_cache.with_suffix('.previous.enc')]
+		compatibility = browser_compatibility(engine)
 		stamps: list[tuple[int, int, int] | None] = []
 		for file in files:
 			if file.is_symlink():
