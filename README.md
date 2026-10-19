@@ -87,6 +87,8 @@ ssh -N -L 18766:127.0.0.1:8765 your-server
 
 Windows 已有本地测试实例可手动运行 `scripts/restart_local_webui.ps1 -TestRoot <测试目录>`. 脚本先检查无任务且定时关闭, 核对监听进程归属, 才重启. 加 `-CheckOnly` 只检查. 不删除数据、不自动签到、不切换浏览器选项. 服务启动后按上述规则迁移旧配置.
 
+也可运行 `scripts/update-local-webui.cmd "测试目录" "仓库目录"`, 窗口会保留成功或失败信息. 更新过程从启动时显示分阶段进度, 登录、状态和配置请求默认最多等待 8 秒, 可通过 PowerShell 参数 `-RequestTimeoutSeconds` 调整. 普通更新将进度和错误追加到测试目录的 `update.log`, 服务启动错误见 `stderr.log`; `-CheckOnly` 不写日志或重启服务. 启动时进程提前退出会立即提示, 不静默等待.
+
 ## 开发验证
 
 ```bash

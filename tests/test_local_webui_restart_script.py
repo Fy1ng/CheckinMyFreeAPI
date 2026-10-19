@@ -10,6 +10,7 @@ import pytest
 
 pytestmark = pytest.mark.skipif(os.name != 'nt', reason='Exercises the Windows PowerShell helper')
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'restart_local_webui.ps1'
+WRAPPER = SCRIPT.with_name('update-local-webui.cmd')
 
 HARNESS = r"""
 param([string]$Helper, [string]$FixtureFile, [string]$Scenario, [switch]$CheckOnly)
@@ -17,6 +18,8 @@ $ErrorActionPreference = 'Stop'
 Import-Module Microsoft.PowerShell.Utility
 $fixture = Get-Content -LiteralPath $FixtureFile -Raw | ConvertFrom-Json
 $global:restartTestEvents = New-Object System.Collections.Generic.List[object]
+$global:restartTestOutput = New-Object System.Collections.Generic.List[string]
+$global:restartTestHealthChecks = 0
 $global:restartTestStored = $fixture.config
 $global:restartTestListenerId = if ($Scenario -eq 'owned-child') { 4101 } else { 4100 }
 if ($Scenario -eq 'wrong-pid') { $global:restartTestListenerId = 4900 }
@@ -30,11 +33,22 @@ function Invoke-RestMethod {
     param($Uri, $Method = 'Get', $Headers, $ContentType, $Body, $WebSession, $TimeoutSec)
     $path = ([uri]$Uri).AbsolutePath
     $request = if ($Body) { $Body | ConvertFrom-Json } else { $null }
-    $global:restartTestEvents.Add(@{kind = 'http'; path = $path; method = [string]$Method; body = $request})
+    $global:restartTestEvents.Add(@{kind = 'http'; path = $path; method = [string]$Method; body = $request; timeout = $TimeoutSec})
     switch ($path) {
-        '/api/login' { return @{csrf = 'synthetic-csrf'} }
+        '/api/login' {
+            if ($Scenario -eq 'login-timeout') { throw [System.TimeoutException]::new('synthetic request timeout') }
+            if ($Scenario -eq 'private-error') { throw ('synthetic request failure: ' + $request.password) }
+            return @{csrf = 'synthetic-csrf'}
+        }
         '/api/status' { return @{running = ($Scenario -eq 'active-task')} }
-        '/healthz' { return @{ok = $true} }
+        '/healthz' {
+            $global:restartTestHealthChecks += 1
+            if ($Scenario -in @('health-timeout', 'startup-exit') -or
+                ($Scenario -eq 'health-retry' -and $global:restartTestHealthChecks -lt 3)) {
+                throw [System.TimeoutException]::new('synthetic health timeout')
+            }
+            return @{ok = $true}
+        }
         '/api/config' {
             if ([string]$Method -eq 'Put') {
                 $global:restartTestStored = Copy-Object $request.config
@@ -81,7 +95,7 @@ function Start-Process {
         kind = 'start'; file = $FilePath; arguments = $ArgumentList; directory = $WorkingDirectory
         window = [string]$WindowStyle; stdout = $RedirectStandardOutput; stderr = $RedirectStandardError
     })
-    return @{Id = 5200}
+    return @{Id = 5200; HasExited = ($Scenario -eq 'startup-exit')}
 }
 function Start-Sleep {
     [CmdletBinding()]
@@ -91,8 +105,8 @@ function Start-Sleep {
 $success = $false
 $failure = $null
 try {
-    $null = & $Helper -TestRoot $fixture.testRoot -RepositoryRoot $fixture.repository `
-        -CheckOnly:$CheckOnly
+    & $Helper -TestRoot $fixture.testRoot -RepositoryRoot $fixture.repository `
+        -CheckOnly:$CheckOnly | ForEach-Object { $global:restartTestOutput.Add([string]$_) }
     $success = $true
 } catch { $failure = $_.Exception.Message + ' at ' + $_.InvocationInfo.PositionMessage }
 $environmentAfter = @{}
@@ -101,6 +115,7 @@ foreach ($name in $global:restartTestEnvironmentBefore.Keys) {
 }
 @{
     success = $success; error = $failure; events = @($global:restartTestEvents.ToArray()); stored = $global:restartTestStored
+    output = @($global:restartTestOutput.ToArray())
     environmentBefore = $global:restartTestEnvironmentBefore; environmentAfter = $environmentAfter
 } | ConvertTo-Json -Depth 50 -Compress
 """
@@ -185,6 +200,9 @@ def test_restart_check_only_preserves_files_config_environment_and_processes(res
 	assert not any(event['kind'] in {'stop', 'wait', 'start', 'sleep'} for event in result['events'])
 	assert all(event['method'].lower() != 'put' for event in _assert_no_task_endpoints(result))
 	assert all(path.read_bytes() == value for path, value in files.items())
+	assert '[1/6]' in result['output'][0]
+	assert any('ownership checks passed' in line for line in result['output'])
+	assert not (next(path.parent for path in files if path.name == 'process-id') / 'update.log').exists()
 
 
 @pytest.mark.parametrize(
@@ -233,3 +251,59 @@ def test_idle_owned_restart_only_stops_listener_and_preserves_settings_and_snaps
 	assert result['stored'] == config
 	assert (test_root / 'process-id').read_text().strip() == '5200'
 	assert all(path.read_bytes() == value for path, value in files.items() if path.name != 'process-id')
+	assert [event['timeout'] for event in requests] == [8, 8, 8, 2]
+	for phase in range(1, 7):
+		assert any(f'[{phase}/6]' in line for line in result['output'])
+	log = (test_root / 'update.log').read_text(encoding='utf-8-sig')
+	assert 'Updated local WebUI' in log
+	assert 'synthetic-admin-password' not in log
+
+
+@pytest.mark.parametrize(
+	('scenario', 'message'),
+	[
+		('login-timeout', 'checking service status'),
+		('private-error', 'checking service status'),
+		('health-timeout', 'did not become ready'),
+		('startup-exit', 'exited during startup'),
+	],
+)
+def test_update_failures_report_stage_and_log_without_password(restart_fixture, scenario, message):
+	run, _, _, _, test_root = restart_fixture
+	result = run(scenario)
+	assert result['success'] is False
+	assert message in result['error']
+	assert any('ERROR while' in line for line in result['output'])
+	assert '[1/6]' in result['output'][0]
+	assert 'synthetic-admin-password' not in '\n'.join(result['output']) + result['error']
+	log = (test_root / 'update.log').read_text(encoding='utf-8-sig')
+	assert 'ERROR while' in log and 'synthetic-admin-password' not in log
+	requests = _assert_no_task_endpoints(result)
+	assert all(event['timeout'] in (2, 8) for event in requests)
+	if scenario in ('login-timeout', 'private-error'):
+		assert not any(event['kind'] in {'stop', 'start'} for event in result['events'])
+	if scenario == 'health-timeout':
+		assert len([event for event in requests if event['path'] == '/healthz']) == 30
+
+
+def test_health_retry_shows_progress_then_finishes(restart_fixture):
+	run, _, _, _, _ = restart_fixture
+	result = run('health-retry')
+	assert result['success'] is True, result['error']
+	assert any('Still waiting for the health check' in line for line in result['output'])
+	assert any('Updated local WebUI' in line for line in result['output'])
+
+
+def test_cmd_wrapper_without_arguments_prints_usage_and_keeps_errors_visible():
+	completed = subprocess.run(
+		[os.environ.get('COMSPEC', 'cmd.exe'), '/d', '/c', str(WRAPPER)],
+		input='\n',
+		capture_output=True,
+		text=True,
+		timeout=10,
+		check=False,
+	)
+	assert completed.returncode == 2
+	assert 'Starting local WebUI update' in completed.stdout
+	assert 'Usage:' in completed.stdout
+	assert 'No service was stopped or started' in completed.stdout
