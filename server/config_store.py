@@ -20,6 +20,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from utils.fy1push import fy1push_channel, fy1push_endpoint, validate_fy1push_token
+from utils.proxy_validation import valid_socks5_credentials
 
 # Public UI marker; never an authentication credential.
 SECRET_KEEP = '__UNCHANGED_SECRET__'  # nosec B105
@@ -190,11 +191,12 @@ def _proxy(value, label: str, *, optional: bool = True) -> str | None:
 			and not any(char.isspace() for char in server)
 			and '\\' not in server
 		)
-		if not valid or (parsed.scheme == 'socks5' and (parsed.username is not None or parsed.password is not None)):
+		if not valid or (parsed.scheme == 'socks5' and not valid_socks5_credentials(parsed)):
 			raise ValueError
 	except ValueError:
 		raise ConfigError(
-			f'{label} must be an HTTP(S) proxy or unauthenticated SOCKS5 proxy with an explicit port'
+			f'{label} must be an HTTP(S) or SOCKS5 proxy with an explicit port; SOCKS5 authentication requires '
+			'a username and password of 1 to 255 UTF-8 bytes each'
 		) from None
 	return server
 

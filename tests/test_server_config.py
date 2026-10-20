@@ -364,7 +364,7 @@ def test_system_access_token_rejects_invalid_values_without_reflection(value):
 		lambda config: config['schedule'].update(interval_minutes=29),
 		lambda config: config['http'].update(timeout_seconds=0),
 		lambda config: config.update(proxy_url='http://user:secret-value@proxy.test:99999'),
-		lambda config: config.update(proxy_url='socks5://user:secret-value@proxy.test:88'),
+		lambda config: config.update(proxy_url='socks5://user@proxy.test:88'),
 		lambda config: config.update(accounts=[{**cookie_account(), 'password': 'secret-value'}]),
 		lambda config: config.update(accounts=[{**token_account(), 'api_user': 'x\r\nx'}]),
 	],
@@ -383,6 +383,75 @@ def test_invalid_global_proxy_types_are_not_silently_treated_as_empty(value):
 	config['proxy_url'] = value
 	with pytest.raises(ConfigError):
 		validate_config(config)
+
+
+@pytest.mark.parametrize(
+	'proxy',
+	[
+		'socks5://user:synthetic-proxy-password@proxy.example.test:1080',
+		'socks5://user%40department:synthetic%3Aproxy%2Fpassword%23%25@127.0.0.1:1080',
+		'socks5://%E7%94%A8%E6%88%B7:synthetic%20password@[::1]:1080',
+		'socks5://' + 'u' * 255 + ':' + 'p' * 255 + '@proxy.example.test:1080',
+	],
+)
+def test_authenticated_socks5_is_valid_for_global_and_account_routes(proxy):
+	config = default_config()
+	config['proxy_url'] = proxy
+	config['accounts'] = [{**token_account(), 'proxy': proxy}]
+	assert validate_config(config)['proxy_url'] == proxy
+	assert validate_config(config)['accounts'][0]['proxy'] == proxy
+
+
+@pytest.mark.parametrize(
+	'userinfo',
+	[
+		'synthetic-user',
+		':synthetic-password',
+		'user:',
+		':',
+		'user:%ZZ',
+		'%FF:synthetic-password',
+		'user:synthetic%0Apassword',
+		'user:synthetic%00password',
+		'user:synthetic%7Fpassword',
+		'u' * 256 + ':synthetic-password',
+		'user:' + 'p' * 256,
+		'%E7%94%A8' * 86 + ':synthetic-password',
+	],
+)
+@pytest.mark.parametrize('target', ['global', 'account'])
+def test_socks5_rejects_invalid_auth_without_reflecting_secrets(userinfo, target):
+	proxy = f'socks5://{userinfo}@proxy.example.test:1080'
+	config = default_config()
+	if target == 'global':
+		config['proxy_url'] = proxy
+	else:
+		config['accounts'] = [{**token_account(), 'proxy': proxy}]
+	with pytest.raises(ConfigError) as error:
+		validate_config(config)
+	assert userinfo not in str(error.value)
+	assert 'synthetic-password' not in str(error.value)
+
+
+def test_socks5_proxy_credentials_are_encrypted_and_preserved_as_secrets(tmp_path):
+	path, key = tmp_path / 'proxy.sqlite3', os.urandom(32)
+	proxy = 'socks5://synthetic-user:synthetic%40proxy%3Apassword@127.0.0.1:1080'
+	config = default_config()
+	config['proxy_url'] = proxy
+	config['accounts'] = [{**token_account(), 'proxy': proxy}]
+	store = ConfigStore(path, key)
+	try:
+		public = store.save(config, 0)
+		assert public['config']['proxy_url'] == SECRET_KEEP
+		assert public['config']['accounts'][0]['proxy'] == SECRET_KEEP
+		store.save(public['config'], public['revision'])
+		assert store.load()[0]['proxy_url'] == proxy
+		assert store.load()[0]['accounts'][0]['proxy'] == proxy
+		assert 'synthetic' not in json.dumps(store.public())
+	finally:
+		store.close()
+	assert proxy.encode() not in path.read_bytes()
+	assert b'synthetic%40proxy%3Apassword' not in path.read_bytes()
 
 
 @pytest.mark.parametrize(

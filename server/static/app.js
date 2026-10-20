@@ -261,6 +261,7 @@
       unsupported_account_configuration: '账号配置不受支持, 请重新配置',
       invalid_http_configuration: 'HTTP 配置无效, 请检查超时设置',
       invalid_proxy_configuration: '代理配置无效, 请检查代理设置',
+      proxy_authentication_failed: '代理认证失败, 请核对代理 URL 中的用户名和密码',
       proxy_not_configured: '未配置默认代理, 请更新网络设置',
       rate_limited: '站点限制请求频率, 请按提示等待后手动重试',
       response_redirected: '接口返回跳转, 可能需要重新登录或人工验证',
@@ -784,7 +785,7 @@
         field('目标站点用户 ID', account.api_user, (value) => { account.api_user = value; }, { optional: account.auth_type === 'password', placeholder: '例如: 12345', hint: 'Cookie 和系统访问令牌认证必须填写站点用户 ID, 用于 new-api-user 请求头及账号核对.' }),
         field('目标站点用户名', account.expected_username, (value) => { account.expected_username = value; }, { optional: true, hint: '可额外核对服务器返回的用户名, 不匹配时暂停.' }),
       );
-      content.append(advanced('账号代理', [proxyField('代理', account, 'proxy', '沿用上级时使用默认代理; 默认代理未配置时直连.')]));
+      content.append(advanced('账号代理', [proxyField('代理', account, 'proxy', '沿用上级时使用默认代理; 默认代理未配置时直连. 支持 HTTP/HTTPS 和 SOCKS5, 认证格式: socks5://用户名:密码@主机:端口. 特殊字符需进行 URL 编码.')]));
       const attention = el('div', 'hint-box');
       attention.dataset.accountAttention = account.id;
       attention.hidden = true;
@@ -872,7 +873,7 @@
     );
     network.append(networkGrid);
     const proxy = el('section', 'runtime-group'); proxy.append(el('h3', '', '默认代理'));
-    proxy.append(secretField('代理 URL', state.config.proxy_url, (value) => { state.config.proxy_url = value; }, { placeholder: 'http://127.0.0.1:7890', hint: '供使用默认代理的账号使用. 已保存值留空保留, 点击清除才删除.' }));
+    proxy.append(secretField('代理 URL', state.config.proxy_url, (value) => { state.config.proxy_url = value; }, { placeholder: 'socks5://用户名:密码@主机:1080', hint: '支持 HTTP/HTTPS 和 SOCKS5. 认证格式: socks5://用户名:密码@主机:端口. 用户名和密码中的 @ : / # % 等特殊字符需进行 URL 编码. 供沿用上级或使用默认代理的账号使用. 已保存值留空保留, 点击清除才删除.' }));
     container.append(scheduling, network, proxy);
   }
 

@@ -123,6 +123,41 @@ async def test_http_auth_choices_draft_switching_and_incomplete_disabled_account
 
 
 @pytest.mark.asyncio
+async def test_authenticated_socks5_proxy_fields_save_and_keep_credentials_hidden(tmp_path):
+	account_proxy = 'socks5://synthetic-user%40dept:synthetic%3Aproxy%40password@127.0.0.1:1080'
+	global_proxy = 'socks5://synthetic-global:synthetic-global-password@127.0.0.1:1081'
+	async with local_ui(tmp_path) as (page, service, requests):
+		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
+		await page.get_by_label('启用此账号', exact=True).uncheck()
+		await page.get_by_text('账号代理', exact=True).click()
+		await page.get_by_label('代理模式', exact=True).select_option('custom')
+		proxy_input = page.locator('.proxy-control input')
+		await proxy_input.fill(account_proxy)
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#config-revision')).to_have_text('已保存版本 1')
+		await page.get_by_text('账号代理', exact=True).click()
+		await expect(proxy_input).to_have_value('')
+		await expect(proxy_input).to_have_attribute('placeholder', '已设置, 留空保留')
+		assert service.store.public()['config']['accounts'][0]['proxy'] == SECRET_KEEP
+		await page.get_by_role('button', name='定时与网络', exact=True).click()
+		await expect(page.locator('.field-hint').filter(has_text='认证格式: socks5://')).to_be_visible()
+		await page.get_by_label('代理 URL', exact=True).fill(global_proxy)
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#config-revision')).to_have_text('已保存版本 2')
+		await expect(page.get_by_label('代理 URL', exact=True)).to_have_value('')
+		assert service.store.public()['config']['proxy_url'] == SECRET_KEEP
+		await page.get_by_role('button', name=re.compile('^账号')).click()
+		await page.get_by_label(re.compile('^账号名称')).fill('代理凭据保留')
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#config-revision')).to_have_text('已保存版本 3')
+		config, _ = service.store.load()
+		assert config['proxy_url'] == global_proxy and config['accounts'][0]['proxy'] == account_proxy
+		assert account_proxy.encode() not in (tmp_path / 'webui.sqlite3').read_bytes()
+		assert global_proxy.encode() not in (tmp_path / 'webui.sqlite3').read_bytes()
+		assert not any(method == 'POST' and path == '/api/runs' for method, path in requests)
+
+
+@pytest.mark.asyncio
 async def test_http_account_secret_retention_clear_folded_draft_and_mobile(tmp_path):
 	async with local_ui(tmp_path) as (page, service, _):
 		await page.get_by_role('button', name='+ 添加账号', exact=True).click()

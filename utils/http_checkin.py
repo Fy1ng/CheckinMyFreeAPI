@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from utils.acw_challenge import is_acw_challenge, solve_acw_sc_v2
+from utils.proxy_validation import valid_socks5_credentials
 
 ORIGINS = {'anyrouter': 'https://anyrouter.top', 'agentrouter': 'https://agentrouter.org'}
 _ACW_MAX_REQUESTS = 3
@@ -257,7 +258,7 @@ class HttpCheckinRuntime:
 				or parsed.path not in {'', '/'}
 				or parsed.query
 				or parsed.fragment
-				or (parsed.scheme == 'socks5' and (parsed.username is not None or parsed.password is not None))
+				or (parsed.scheme == 'socks5' and not valid_socks5_credentials(parsed))
 			):
 				raise ValueError
 		except (ValueError, UnicodeError):
@@ -335,6 +336,8 @@ class HttpCheckinRuntime:
 				'RequestError',
 			)
 			self._update(error_type=error_type)
+			if isinstance(exc, httpx.ProxyError) and str(exc) == 'Invalid username/password':
+				raise _Failure('failed', 'proxy_authentication_failed') from None
 			raise _Failure(
 				'uncertain' if mutation else 'failed', 'request_result_unknown' if mutation else 'network_error'
 			) from None
