@@ -68,7 +68,11 @@ Any 密码登录会优先复用已验证、加密保存的 HTTP 会话; 失效�
 
 ## Linux 容器
 
-Dockerfile 的生产依赖只有 HTTP、加密和 WebUI 库, 没有 Playwright、Chromium、CloakBrowser、Xvfb、noVNC 或浏览器共享内存配置. 需先准备 `server-keys/master.key` 和 `server-keys/web-password`, 文件允许容器 UID/GID 10001 读取.
+Dockerfile 的生产依赖只有 HTTP、加密和 WebUI 库, 没有 Playwright、Chromium、CloakBrowser、Xvfb、noVNC 或浏览器共享内存配置. 单实例容器通过 bind mount 持久化数据和密钥. 需先准备 `server-keys/master.key` 和 `server-keys/web-password`, 文件允许容器 UID/GID 10001 读取.
+
+从本地迁移时先关闭定时任务并停止本地服务, 备份并复制完整 SQLite 数据目录、原 `master.key` 和管理密码文件, 保持原管理密码. 不要执行下面的新密钥生成命令覆盖原密钥. 初次服务器验证期间保持定时关闭, 确认配置、代理和手动运行结果后再启用. 站点代理通过 WebUI 配置并加密保存, 不将代理密码写入 Compose、环境变量或镜像.
+
+仅首次创建空白实例时生成新密钥:
 
 ```bash
 mkdir -p server-keys
@@ -80,13 +84,22 @@ sudo chown -R 10001:10001 server-keys
 docker compose up --build -d
 ```
 
+默认 Python 基础镜像为 `python:3.11-slim-bookworm`. 若服务器无法访问 Docker Hub, 可覆盖为兼容的 Python 3.11 基础镜像, 例如从 GHCR 构建. uv 二进制仍从固定版本 `ghcr.io/astral-sh/uv:0.11.10` 复制:
+
+```bash
+docker compose build --build-arg PYTHON_IMAGE=ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+docker compose up --no-build -d
+```
+
+正式部署可将已核验的基础镜像固定为 `镜像名@sha256:摘要`, 以便重复构建.
+
 Compose 将容器 8765 仅映射到宿主 127.0.0.1:8765. 在本机建立转发:
 
 ```bash
-ssh -N -L 18766:127.0.0.1:8765 your-server
+ssh -N -L 127.0.0.1:18765:127.0.0.1:8765 your-server
 ```
 
-然后通过 http://127.0.0.1:18766 管理. 不直接公开明文 WebUI. 默认服务只接受 loopback Host, 公网 HTTPS 暴露和认证模型不在本次实现范围内. 本轮仅准备容器配置, 未部署服务器或验收 Docker 运行.
+然后通过 http://127.0.0.1:18765 管理. 本机端口被占用时可更换转发左侧端口. 不直接公开明文 WebUI. 默认服务只接受 loopback Host, 公网 HTTPS 暴露和认证模型不在本次实现范围内.
 
 Windows 已有本地测试实例可手动运行 `scripts/restart_local_webui.ps1 -TestRoot <测试目录>`. 脚本先检查无任务且定时关闭, 核对监听进程归属, 才重启. 加 `-CheckOnly` 只检查. 不删除数据、不自动签到、不切换浏览器选项. 服务启动后按上述规则迁移旧配置.
 

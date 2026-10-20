@@ -1,5 +1,6 @@
+ARG PYTHON_IMAGE=python:3.11-slim-bookworm
 FROM ghcr.io/astral-sh/uv:0.11.10 AS uv
-FROM python:3.11-slim-bookworm
+FROM ${PYTHON_IMAGE}
 COPY --from=uv /uv /uvx /usr/local/bin/
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
