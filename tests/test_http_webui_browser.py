@@ -108,9 +108,20 @@ async def test_http_auth_choices_draft_switching_and_incomplete_disabled_account
 		await page.get_by_label(re.compile('^站点登录账号')).fill('fixture-user')
 		await page.get_by_label('站点密码', exact=True).fill('synthetic-draft-password')
 		await page.get_by_label(re.compile('^目标站点(?!用户)')).select_option('agentrouter')
-		assert await page.get_by_label('认证方式').locator('option').all_text_contents() == ['系统访问令牌']
-		await expect(page.get_by_label('系统访问令牌', exact=True)).to_have_value('')
+		assert await page.get_by_label('认证方式').locator('option').all_text_contents() == ['站点账号密码']
+		await expect(page.get_by_label('认证方式')).to_have_value('password')
+		assert await page.get_by_label('系统访问令牌', exact=True).count() == 0
+		assert await page.get_by_label('Cookie', exact=True).count() == 0
+		await expect(page.get_by_label(re.compile('^站点登录账号'))).to_have_value('')
+		await expect(page.get_by_label('站点密码', exact=True)).to_have_value('')
+		await expect(page.locator('.field-hint').filter(has_text='填写 AgentRouter')).to_be_visible()
+		await expect(page.locator('.field-hint').filter(has_text='不复用登录会话')).to_be_visible()
 		await expect(page.get_by_label(re.compile('^目标站点用户 ID'))).to_have_value('')
+		await page.get_by_role('button', name='保存配置', exact=True).click()
+		await expect(page.locator('#global-message')).to_contain_text('需要填写站点登录账号和密码')
+		assert not any(method == 'PUT' for method, _ in requests)
+		await page.get_by_label(re.compile('^站点登录账号')).fill('agent-fixture-user')
+		await page.get_by_label('站点密码', exact=True).fill('synthetic-agent-draft-password')
 		await page.get_by_label(re.compile('^目标站点(?!用户)')).select_option('anyrouter')
 		await expect(page.get_by_label('Cookie', exact=True)).to_have_value('')
 		await page.get_by_label('启用此账号', exact=True).uncheck()
@@ -162,14 +173,15 @@ async def test_http_account_secret_retention_clear_folded_draft_and_mobile(tmp_p
 	async with local_ui(tmp_path) as (page, service, _):
 		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
 		await page.get_by_label(re.compile('^目标站点(?!用户)')).select_option('agentrouter')
-		await page.get_by_label('系统访问令牌', exact=True).fill('synthetic-system-access-token')
+		await page.get_by_label(re.compile('^站点登录账号')).fill('agent-fixture-user')
+		await page.get_by_label('站点密码', exact=True).fill('synthetic-agent-password')
 		await page.get_by_label(re.compile('^目标站点用户 ID')).fill('42')
 		await page.get_by_label(re.compile('^账号名称')).fill('Agent fixture')
 		await page.get_by_role('button', name='保存配置', exact=True).click()
 		await expect(page.locator('#config-revision')).to_have_text('已保存版本 1')
-		await expect(page.get_by_label('系统访问令牌', exact=True)).to_have_value('')
-		assert service.store.public()['config']['accounts'][0]['system_access_token'] == SECRET_KEEP
-		assert b'synthetic-system-access-token' not in (tmp_path / 'webui.sqlite3').read_bytes()
+		await expect(page.get_by_label('站点密码', exact=True)).to_have_value('')
+		assert service.store.public()['config']['accounts'][0]['password'] == SECRET_KEEP
+		assert b'synthetic-agent-password' not in (tmp_path / 'webui.sqlite3').read_bytes()
 		await page.get_by_label(re.compile('^账号名称')).fill('草稿保持')
 		toggle = page.locator('.card-toggle')
 		await toggle.click()
@@ -184,13 +196,14 @@ async def test_http_account_secret_retention_clear_folded_draft_and_mobile(tmp_p
 		await expect(page.get_by_label(re.compile('^账号名称'))).to_have_value('草稿保持')
 		await page.get_by_role('button', name='保存配置', exact=True).click()
 		await expect(page.locator('#config-revision')).to_have_text('已保存版本 2')
-		assert service.store.load()[0]['accounts'][0]['system_access_token'] == 'synthetic-system-access-token'
+		assert service.store.load()[0]['accounts'][0]['password'] == 'synthetic-agent-password'
+		assert not service.store.load()[0]['accounts'][0].get('system_access_token')
 		await page.get_by_label('启用此账号', exact=True).uncheck()
-		secret = page.get_by_label('系统访问令牌', exact=True).locator('..')
+		secret = page.get_by_label('站点密码', exact=True).locator('..')
 		await secret.get_by_role('button', name='清除', exact=True).click()
 		await page.get_by_role('button', name='保存配置', exact=True).click()
 		await expect(page.locator('#config-revision')).to_have_text('已保存版本 3')
-		assert service.store.load()[0]['accounts'][0]['system_access_token'] == ''
+		assert service.store.load()[0]['accounts'][0]['password'] == ''
 		await page.set_viewport_size({'width': 390, 'height': 844})
 		assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 		await page.reload()
@@ -326,6 +339,56 @@ async def test_unknown_job_start_is_not_repeated_and_results_are_actionable(tmp_
 		await expect(page.locator('#runs-list')).to_contain_text('至少等待 120 秒')
 		await expect(page.locator('#runs-list')).to_contain_text('请先到站点核对是否已执行')
 		assert len(starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_login_results_only_confirm_verified_checkin_and_preserve_history(tmp_path):
+	cases = [
+		('verified', True, 'success', 'agent_checkin_verified', '签到成功', '登录响应已确认签到'),
+		('not-confirmed', False, 'failed', 'agent_checkin_not_confirmed', '失败', '登录响应未确认签到'),
+		('unknown', False, 'uncertain', 'agent_checkin_result_unknown', '结果待核对', '登录响应缺少有效的签到状态'),
+		('rejected', False, 'needs_credentials', 'password_login_rejected', '待更新凭据', '站点拒绝账号密码登录'),
+		('historical', True, 'success', 'user_info_requested_reward_unverified', '请求已完成', '用户信息请求已完成'),
+	]
+	accounts = [
+		{
+			'id': account_id,
+			'name': f'Agent {account_id}',
+			'provider': 'agentrouter',
+			'success': success,
+			'outcome': outcome,
+			'reason': reason,
+			'quota': 'synthetic-balance-must-not-display',
+			'reward': 'synthetic-reward-must-not-display',
+			**({'verification_reason': 'checkin_verified'} if account_id == 'historical' else {}),
+		}
+		for account_id, success, outcome, reason, _, _ in cases
+	]
+	run = {'id': 8, 'state': 'needs_attention', 'summary': {'accounts': accounts}}
+
+	async def intercept(route, origin):
+		if route.request.url == origin + '/api/runs':
+			await route.fulfill(json={'runs': [run]})
+			return True
+		return False
+
+	async with local_ui(tmp_path, intercept) as (page, _, requests):
+		await page.locator('.run-details summary').click()
+		for account_id, _, _, reason, label, explanation in cases:
+			result = page.locator('.run-account').filter(has_text=f'Agent {account_id}:')
+			await expect(result.locator('.run-account-title')).to_have_text(f'Agent {account_id}: {label}')
+			await expect(result).to_contain_text(explanation)
+			await expect(result).to_contain_text(reason)
+			if account_id != 'verified':
+				await expect(result).not_to_contain_text('签到成功')
+			if account_id == 'historical':
+				await expect(result).to_contain_text('历史用户信息请求未验证签到')
+				await expect(result).not_to_contain_text('签到接口已接受')
+			else:
+				await expect(result).not_to_contain_text('奖励请以站点记录为准')
+		await expect(page.locator('#runs-list')).not_to_contain_text('synthetic-balance-must-not-display')
+		await expect(page.locator('#runs-list')).not_to_contain_text('synthetic-reward-must-not-display')
+		assert not any(method == 'POST' and path == '/api/runs' for method, path in requests)
 
 
 @pytest.mark.asyncio

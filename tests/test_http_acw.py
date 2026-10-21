@@ -164,6 +164,10 @@ async def test_acw_markers_do_not_override_cf_rate_limits_service_errors_or_redi
 async def test_side_effecting_requests_returning_acw_are_uncertain_and_never_repeated(credentials):
 	def handler(request):
 		if credentials['provider'] == 'agentrouter' or request.method == 'POST':
+			if credentials['provider'] == 'agentrouter':
+				assert request.method == 'POST' and request.url.path == '/api/user/login'
+				assert request.url.query == b'turnstile='
+				assert 'authorization' not in request.headers and 'cookie' not in request.headers
 			return acw_response()
 		return user()
 
@@ -173,6 +177,28 @@ async def test_side_effecting_requests_returning_acw_are_uncertain_and_never_rep
 	assert result['reason'] == 'acw_challenge_requires_confirmation'
 	assert len(requests) == (1 if credentials['provider'] == 'agentrouter' else 2)
 	assert not store.writes
+	if credentials['provider'] == 'agentrouter':
+		assert not store.loads
+		assert all(step['stage'] != 'acw_verification' for step in result['steps'])
+
+
+@pytest.mark.parametrize(
+	'headers,body,reason',
+	[
+		({'Content-Type': 'text/html'}, '<html>Login page</html>', 'html_response_received'),
+		({'cf-mitigated': 'challenge'}, '<html>Verify access</html>', 'interactive_verification_required'),
+	],
+)
+async def test_agent_html_and_cloudflare_pause_without_retry_or_session_persistence(headers, body, reason):
+	runner, store, requests, _, clients = runtime(lambda request: httpx.Response(200, text=body, headers=headers))
+	result = await runner.execute(agent(api_user=''))
+	assert result['success'] is False and result['outcome'] == 'blocked' and result['reason'] == reason
+	assert len(requests) == 1
+	assert requests[0].method == 'POST' and requests[0].url.path == '/api/user/login'
+	assert requests[0].url.query == b'turnstile='
+	assert 'authorization' not in requests[0].headers and 'cookie' not in requests[0].headers
+	assert not store.loads and not store.writes
+	assert clients[0].is_closed
 
 
 async def test_network_failure_after_acw_is_not_retried_again():

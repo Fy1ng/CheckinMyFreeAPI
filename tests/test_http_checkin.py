@@ -49,8 +49,10 @@ def agent(**changes):
 	return account(
 		**{
 			'provider': 'agentrouter',
-			'auth_type': 'system_token',
-			'system_access_token': 'private-system-token',
+			'auth_type': 'password',
+			'cookies': '',
+			'username': 'alice',
+			'password': 'private-password',
 			**changes,
 		}
 	)
@@ -165,23 +167,68 @@ async def test_any_cookie_checkin_verifies_identity_and_persists_only_successful
 	assert 'private-cookie' not in json.dumps(result)
 
 
-async def test_agent_uses_only_one_info_request_without_session_cookies_or_fake_reward():
+async def test_agent_fresh_login_checks_business_flag_without_reusing_sessions_or_inventing_reward(capsys):
 	def handler(request):
-		assert request.url == 'https://agentrouter.org/api/user/self'
-		assert request.method == 'GET'
-		assert request.headers['Authorization'] == 'Bearer private-system-token'
-		assert request.headers['new-api-user'] == '42'
+		assert request.url == 'https://agentrouter.org/api/user/login?turnstile='
+		assert request.method == 'POST'
+		assert json.loads(request.content) == {'username': 'alice', 'password': 'private-password'}
+		assert 'authorization' not in request.headers and 'new-api-user' not in request.headers
 		assert 'cookie' not in request.headers
-		return user()
+		return httpx.Response(
+			200,
+			json={'success': True, 'data': {'id': 42, 'username': 'alice', 'checked_in': True, 'quota': 0}},
+			headers={'Set-Cookie': 'session=private-agent-session; Path=/; HttpOnly; Secure'},
+		)
 
-	runner, store, requests, _, _ = runtime(handler)
-	result = await runner.execute(agent())
-	assert result['success'] is True
-	assert result['reason'] == 'user_info_requested_reward_unverified'
-	assert result['balance_after'] == 1
-	assert 'reward' not in result and 'balance_before' not in result
-	assert len(requests) == 1
+	store = Sessions()
+	store.saved['account-1', account_binding(agent(), CONFIG)] = saved_session(value='old-agent-cookie')
+	runner, store, requests, _, clients = runtime(handler, store)
+	events = []
+	for _ in range(2):
+		result = await runner.execute(agent(), on_progress=lambda e: events.append(dict(e)))
+		assert result['success'] is True and result['outcome'] == 'success'
+		assert result['reason'] == 'agent_checkin_verified' and result['checked_in'] is True
+		assert not {'reward', 'balance_before', 'balance_after'} & result.keys()
+		assert [s['stage'] for s in result['steps']] == [
+			'prepare',
+			'password_login',
+			'verify_identity',
+			'verify_result',
+			'finished',
+		]
+		assert all(s['state'] == 'completed' for s in result['steps'])
+	assert len(requests) == 2 and len(clients) == 2 and all(c.is_closed for c in clients)
 	assert not store.loads and not store.writes
+	for secret in ['private-password', 'private-agent-session', 'old-agent-cookie']:
+		assert secret not in json.dumps(result) and secret not in json.dumps(events)
+	assert capsys.readouterr().out == ''
+
+
+@pytest.mark.parametrize('flag', [False, None, 0, 1, 'true', 'private-password', {}, []])
+async def test_agent_successful_login_without_strict_true_checkin_flag_is_not_checkin_success(flag):
+	runner, store, requests, _, _ = runtime(lambda request: user(checked_in=flag))
+	result = await runner.execute(agent())
+	assert result['success'] is False
+	assert result['outcome'] == ('failed' if flag is False else 'uncertain')
+	assert result['reason'] == ('agent_checkin_not_confirmed' if flag is False else 'agent_checkin_result_unknown')
+	assert len(requests) == 1 and not store.loads and not store.writes
+	assert 'private-password' not in json.dumps(result)
+
+
+async def test_agent_login_missing_checkin_flag_cannot_be_treated_as_already_checked_in():
+	runner, _, requests, _, _ = runtime(lambda request: user())
+	result = await runner.execute(agent(api_user=''))
+	assert result['outcome'] == 'uncertain' and result['reason'] == 'agent_checkin_result_unknown'
+	assert result['success'] is False and len(requests) == 1
+
+
+async def test_agent_password_rejection_never_retries_or_exposes_login_response():
+	runner, _, requests, _, _ = runtime(
+		lambda request: httpx.Response(200, json={'success': False, 'message': 'private-password'})
+	)
+	result = await runner.execute(agent())
+	assert result['outcome'] == 'needs_credentials' and result['reason'] == 'password_login_rejected'
+	assert len(requests) == 1 and 'private-password' not in json.dumps(result)
 
 
 async def test_password_login_binds_first_returned_uid_then_reuses_verified_session():
@@ -463,7 +510,7 @@ async def test_http_failure_diagnostics_include_status_without_response_body():
 
 
 @pytest.mark.parametrize('failure', ['timeout', 'network', 'server', 'malformed', 'array', 'invalid_user', 'empty'])
-async def test_agent_side_effecting_info_request_unknown_result_is_not_retryable(failure):
+async def test_agent_login_unknown_result_is_not_retryable(failure):
 	def handler(request):
 		if failure == 'timeout':
 			raise httpx.ReadTimeout('private-system-token', request=request)
@@ -482,8 +529,8 @@ async def test_agent_side_effecting_info_request_unknown_result_is_not_retryable
 	runner, store, requests, _, clients = runtime(handler)
 	result = await runner.execute(agent())
 	assert result['success'] is False and result['outcome'] == 'uncertain'
-	assert result['reason'] in {'request_result_unknown', 'invalid_json_response', 'invalid_user_info'}
-	assert len(requests) == 1 and requests[0].method == 'GET'
+	assert result['reason'] in {'request_result_unknown', 'invalid_json_response', 'agent_checkin_result_unknown'}
+	assert len(requests) == 1 and requests[0].method == 'POST'
 	assert not store.loads and not store.writes and clients[0].is_closed
 	assert 'private-system-token' not in json.dumps(result)
 
@@ -550,13 +597,14 @@ async def test_already_checked_in_is_verified_before_saving():
 		account(cookies='broken'),
 		account(cookies={'bad\r\nname': 'secret'}),
 		account(cookies={'session': 'bad\r\nvalue'}),
-		agent(system_access_token=''),
+		agent(password=''),
 		agent(api_user='0'),
 		password(username=''),
 		password(password=''),
 		account(provider='unknown'),
 		account(auth_type='github'),
 		agent(auth_type='cookie'),
+		agent(auth_type='system_token', system_access_token='old-private-system-token'),
 		account(proxy='default'),
 	],
 )
@@ -568,7 +616,7 @@ async def test_invalid_or_unsupported_credentials_do_not_send_network_request(cr
 
 
 async def test_explicit_proxy_is_used_without_environment_inheritance():
-	runner, _, _, options, _ = runtime(lambda request: user())
+	runner, _, _, options, _ = runtime(lambda request: user(checked_in=True))
 	assert (await runner.execute(agent(proxy='default')))['success'] is True
 	assert options[0]['proxy'] == CONFIG['proxy_url']
 	assert options[0]['trust_env'] is False
@@ -579,7 +627,7 @@ async def test_unset_or_default_proxy_inherits_configured_route(route):
 	credentials = agent(proxy=route)
 	if route == 'missing':
 		del credentials['proxy']
-	runner, _, _, options, _ = runtime(lambda request: user())
+	runner, _, _, options, _ = runtime(lambda request: user(checked_in=True))
 	assert (await runner.execute(credentials))['success'] is True
 	assert options[0]['proxy'] == CONFIG['proxy_url']
 	assert options[0]['trust_env'] is False
@@ -590,7 +638,7 @@ async def test_unset_proxy_without_global_route_is_direct(route):
 	credentials = agent(proxy=route)
 	if route == 'missing':
 		del credentials['proxy']
-	runner, _, _, options, _ = runtime(lambda request: user(), config={'http': {}})
+	runner, _, _, options, _ = runtime(lambda request: user(checked_in=True), config={'http': {}})
 	assert (await runner.execute(credentials))['success'] is True
 	assert options[0]['proxy'] is None
 
@@ -607,7 +655,7 @@ async def test_unset_proxy_without_global_route_is_direct(route):
 	],
 )
 async def test_explicit_custom_proxy_is_supported_and_not_exposed(route):
-	runner, _, _, options, _ = runtime(lambda request: user())
+	runner, _, _, options, _ = runtime(lambda request: user(checked_in=True))
 	result = await runner.execute(agent(proxy=route))
 	assert result['success'] is True and options[0]['proxy'] == route
 	assert 'private-proxy-password' not in json.dumps(result)
@@ -717,7 +765,7 @@ async def test_session_save_failure_is_reported_without_exposing_exception():
 
 
 async def test_successful_username_containing_challenge_word_is_not_blocked():
-	runner, _, _, _, _ = runtime(lambda request: user(username='cloudflare'))
+	runner, _, _, _, _ = runtime(lambda request: user(username='cloudflare', checked_in=True))
 	result = await runner.execute(agent(expected_username='cloudflare'))
 	assert result['success'] is True
 

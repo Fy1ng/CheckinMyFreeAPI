@@ -163,7 +163,7 @@ class HttpCheckinRuntime:
 			auth_type = account.get('auth_type')
 			if (
 				provider not in ORIGINS
-				or (provider == 'agentrouter' and auth_type != 'system_token')
+				or (provider == 'agentrouter' and auth_type != 'password')
 				or (provider == 'anyrouter' and auth_type not in {'cookie', 'password'})
 			):
 				raise _Failure('failed', 'unsupported_account_configuration')
@@ -402,29 +402,41 @@ class HttpCheckinRuntime:
 		return data
 
 	async def _agent(self, client: httpx.AsyncClient, account: dict) -> dict:
-		self._stage('verify_identity')
-		user_id = _uid(account.get('api_user'))
-		token = account.get('system_access_token')
-		if not user_id or not isinstance(token, str) or not token.strip() or '\r' in token or '\n' in token:
-			raise _Failure('needs_credentials', 'system_token_and_user_id_required')
-		payload = await self._request(
+		username, password = account.get('username'), account.get('password')
+		if not isinstance(username, str) or not username or not isinstance(password, str) or not password:
+			raise _Failure('needs_credentials', 'username_and_password_required')
+		if account.get('api_user') and not _uid(account['api_user']):
+			raise _Failure('needs_credentials', 'login_identity_unverified')
+		# Signing in is the write operation. A fresh client never restores a prior
+		# session, and an ambiguous response must not cause another login attempt.
+		self._stage('password_login')
+		login = await self._request(
 			client,
-			'GET',
-			'/api/user/self',
-			side_effect=True,
-			headers={'Authorization': 'Bearer ' + token, 'new-api-user': user_id},
+			'POST',
+			'/api/user/login',
+			params={'turnstile': ''},
+			json={'username': username, 'password': password},
+			headers={'X-Requested-With': 'XMLHttpRequest'},
 		)
+		if login.get('success') is False:
+			raise _Failure('needs_credentials', 'password_login_rejected')
+		self._stage('verify_identity')
 		try:
-			user = self._verify(payload, account)
+			user = self._verify(login, account)
 		except _Failure as exc:
 			if exc.reason == 'invalid_user_info':
-				raise _Failure('uncertain', 'invalid_user_info') from None
+				raise _Failure('uncertain', 'agent_checkin_result_unknown') from None
 			raise
-		details: dict[str, Any] = {'outcome': 'success', 'reason': 'user_info_requested_reward_unverified'}
-		balance = _money(user.get('quota'))
-		if balance is not None:
-			details['balance_after'] = balance
-		return details
+		self._stage('verify_result')
+		checked_in = user.get('checked_in')
+		if type(checked_in) is not bool:
+			raise _Failure('uncertain', 'agent_checkin_result_unknown')
+		self._update(checked_in=checked_in)
+		if not checked_in:
+			raise _Failure('failed', 'agent_checkin_not_confirmed', checked_in=False)
+		# Login responses contain placeholder quota fields on the live site; do
+		# not present them as an observed balance or invent a reward amount.
+		return {'outcome': 'success', 'reason': 'agent_checkin_verified', 'checked_in': True}
 
 	def _load(self, account: dict, binding: str) -> dict | None:
 		try:

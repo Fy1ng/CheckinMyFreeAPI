@@ -26,10 +26,12 @@ from utils.http_checkin import HttpCheckinRuntime
 PROXY_USERNAME = 'proxy:name@/用户'
 PROXY_PASSWORD = 'synthetic-p@ss: /%密码'
 SITE_COOKIE = 'synthetic-site-session'
-SITE_TOKEN = 'synthetic-site-token'
+SITE_PASSWORD = 'synthetic-site-password'
 
 
-def _tls_contexts(tmp_path: Path) -> tuple[ssl.SSLContext, ssl.SSLContext]:
+def _tls_contexts(
+	tmp_path: Path, certificate_hosts=('anyrouter.top', 'agentrouter.org')
+) -> tuple[ssl.SSLContext, ssl.SSLContext]:
 	"""Trust only an ephemeral self-signed test certificate, with hostname checks."""
 	key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 	name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'Synthetic SOCKS test')])
@@ -44,7 +46,7 @@ def _tls_contexts(tmp_path: Path) -> tuple[ssl.SSLContext, ssl.SSLContext]:
 		.not_valid_after(now + timedelta(days=1))
 		.add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
 		.add_extension(
-			x509.SubjectAlternativeName([x509.DNSName('anyrouter.top'), x509.DNSName('agentrouter.org')]),
+			x509.SubjectAlternativeName([x509.DNSName(host) for host in certificate_hosts]),
 			critical=False,
 		)
 		.sign(key, hashes.SHA256())
@@ -118,6 +120,9 @@ class _LoopbackNetwork:
 				}
 			elif path == '/api/user/sign_in' and method == 'POST':
 				payload = {'success': True}
+			elif path == '/api/user/login?turnstile=' and method == 'POST':
+				assert json.loads(body) == {'username': 'alice', 'password': SITE_PASSWORD}
+				payload = {'success': True, 'data': {'id': 42, 'username': 'alice', 'checked_in': True}}
 			else:
 				self.errors.append('Unexpected synthetic site request')
 				payload = {'success': False}
@@ -216,8 +221,10 @@ class _LoopbackNetwork:
 
 
 @asynccontextmanager
-async def _local_network(tmp_path, monkeypatch, *, authenticate=True, reject=False):
-	server_context, client_context = _tls_contexts(tmp_path)
+async def _local_network(
+	tmp_path, monkeypatch, *, authenticate=True, reject=False, certificate_hosts=('anyrouter.top', 'agentrouter.org')
+):
+	server_context, client_context = _tls_contexts(tmp_path, certificate_hosts)
 	network = _LoopbackNetwork(server_context, authenticate=authenticate, reject=reject)
 	await network.start()
 	connections = []
@@ -256,9 +263,11 @@ async def _local_network(tmp_path, monkeypatch, *, authenticate=True, reject=Fal
 
 class _Sessions:
 	def __init__(self):
+		self.loads: list[tuple[str, str]] = []
 		self.saved: list[tuple[str, str, dict]] = []
 
-	def load(self, _account_id, _binding):
+	def load(self, account_id, binding):
+		self.loads.append((account_id, binding))
 		return None
 
 	def save(self, account_id, binding, state):
@@ -270,11 +279,12 @@ def _account(provider, route):
 		'id': 'synthetic-account',
 		'name': 'Synthetic account',
 		'provider': provider,
-		'auth_type': 'system_token' if provider == 'agentrouter' else 'cookie',
+		'auth_type': 'password' if provider == 'agentrouter' else 'cookie',
 		'api_user': '42',
 		'expected_username': 'alice',
 		'cookies': f'session={SITE_COOKIE}' if provider == 'anyrouter' else '',
-		'system_access_token': SITE_TOKEN if provider == 'agentrouter' else '',
+		'username': 'alice' if provider == 'agentrouter' else '',
+		'password': SITE_PASSWORD if provider == 'agentrouter' else '',
 		'proxy': route,
 	}
 
@@ -293,7 +303,7 @@ def _assert_no_secrets(result, events, output):
 		quote(PROXY_USERNAME, safe=''),
 		quote(PROXY_PASSWORD, safe=''),
 		SITE_COOKIE,
-		SITE_TOKEN,
+		SITE_PASSWORD,
 	):
 		assert secret not in text
 
@@ -320,8 +330,8 @@ async def test_authenticated_socks5_routes_runtime_requests_with_proxy_dns_and_v
 		assert network.destinations == [(3, host, 443)] * count
 		assert network.server_names == [host] * count
 		assert not network.errors
-		assert all(request['headers']['new-api-user'] == '42' for request in network.site_requests)
 		if provider == 'anyrouter':
+			assert all(request['headers']['new-api-user'] == '42' for request in network.site_requests)
 			assert result['reason'] == 'checkin_verified' and result['reward'] == 1
 			assert [(request['method'], request['path']) for request in network.site_requests] == [
 				('GET', '/api/user/self'),
@@ -331,12 +341,14 @@ async def test_authenticated_socks5_routes_runtime_requests_with_proxy_dns_and_v
 			assert all(request['headers']['cookie'] == f'session={SITE_COOKIE}' for request in network.site_requests)
 			assert len(store.saved) == 1
 		else:
-			assert result['reason'] == 'user_info_requested_reward_unverified'
+			assert result['reason'] == 'agent_checkin_verified' and result['checked_in'] is True
 			assert [(request['method'], request['path']) for request in network.site_requests] == [
-				('GET', '/api/user/self')
+				('POST', '/api/user/login?turnstile=')
 			]
-			assert network.site_requests[0]['headers']['authorization'] == f'Bearer {SITE_TOKEN}'
-			assert not store.saved
+			assert json.loads(network.site_requests[0]['body']) == {'username': 'alice', 'password': SITE_PASSWORD}
+			assert 'authorization' not in network.site_requests[0]['headers']
+			assert 'cookie' not in network.site_requests[0]['headers']
+			assert not store.loads and not store.saved
 		_assert_no_secrets(result, events, capsys.readouterr().out)
 
 
@@ -375,3 +387,20 @@ async def test_unauthenticated_socks5_remains_compatible_with_real_transport(tmp
 		assert network.server_names == ['agentrouter.org']
 		assert len(network.site_requests) == len(connections) == 1
 		assert not network.errors
+
+
+async def test_agent_socks5_rejects_certificate_for_another_hostname_without_retry(tmp_path, monkeypatch):
+	async with _local_network(tmp_path, monkeypatch, certificate_hosts=('unrelated.test',)) as (
+		network,
+		factory,
+		connections,
+	):
+		config, route = _routing('default', network.proxy_url())
+		store = _Sessions()
+		result = await HttpCheckinRuntime(config, store, client_factory=factory).execute(_account('agentrouter', route))
+		assert result['success'] is False
+		assert result['outcome'] == 'uncertain' and result['reason'] == 'request_result_unknown'
+		assert len(connections) == 1
+		assert network.destinations == [(3, 'agentrouter.org', 443)]
+		assert network.server_names == ['agentrouter.org']
+		assert not network.site_requests and not store.loads and not store.saved

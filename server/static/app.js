@@ -289,6 +289,9 @@
       cookie_user_id_required: 'Cookie 认证需要填写目标站点用户 ID',
       username_and_password_required: '需要填写站点登录账号和密码',
       password_login_rejected: '站点拒绝账号密码登录, 请核对凭据',
+      agent_checkin_verified: '登录响应已确认签到, 身份核验通过',
+      agent_checkin_not_confirmed: '登录响应未确认签到, 请到站点核对后再决定是否重试',
+      agent_checkin_result_unknown: '登录响应缺少有效的签到状态, 请先到站点核对结果',
       login_identity_unverified: '登录接口未返回可核验的用户 ID, 请补充用户 ID 后重试',
       checkin_rejected: '站点拒绝签到请求, 请核对站点状态',
       checkin_verification_failed: '签到请求后未能核验账号结果, 请先到站点核对后再决定是否重试',
@@ -389,9 +392,10 @@
   function updateAccountResult(view, account) {
     const outcome = account.pending_outcome || account.outcome || (account.success ? 'succeeded' : 'failed');
     const reason = account.pending_reason || account.reason || account.error;
-    setText(view.title, `${account.name || account.id || '账号'}: ${account.pending_outcome ? '已暂停, ' : ''}${runLabel(outcome)}`);
+    const agentVerified = account.provider === 'agentrouter' && account.success && reason === 'agent_checkin_verified';
+    setText(view.title, `${account.name || account.id || '账号'}: ${account.pending_outcome ? '已暂停, ' : ''}${agentVerified ? '签到成功' : runLabel(outcome)}`);
     setText(view.reason, reasonText(reason));
-    const verification = account.verification_reason ? `结果核验: ${reasonText(account.verification_reason)}` : account.provider === 'agentrouter' && account.success && reason !== 'user_info_requested_reward_unverified' ? '已完成用户信息请求, 奖励请以站点记录为准' : '';
+    const verification = account.provider === 'agentrouter' && reason === 'user_info_requested_reward_unverified' ? '历史用户信息请求未验证签到, 请以站点记录为准.' : account.verification_reason ? `结果核验: ${reasonText(account.verification_reason)}` : '';
     setText(view.verification, verification);
     const diagnostic = account.diagnostic;
     setText(view.diagnostic, diagnostic ? `诊断: ${stageLabel(diagnostic.stage)}${requestDetail(diagnostic) ? ` / ${requestDetail(diagnostic)}` : ''}` : '');
@@ -748,11 +752,11 @@
       markDirty(); renderForm();
     }));
     const cards = el('div', 'cards');
-    if (!state.config.accounts.length) empty(cards, '添加第一个账号', 'AnyRouter 支持 Cookie 或站点账号密码. AgentRouter 仅使用系统访问令牌.');
+    if (!state.config.accounts.length) empty(cards, '添加第一个账号', 'AnyRouter 支持 Cookie 或站点账号密码. AgentRouter 仅支持站点账号密码.');
     state.config.accounts.forEach((account, index) => {
       const { outer, grid, content } = card(() => account.name || account.id || '新账号', index, () => { state.expanded.delete(`account:${account.id}`); state.config.accounts.splice(index, 1); markDirty(); renderForm(); }, {
         key: () => `account:${account.id}`, saved: state.savedIds.has(account.id),
-        summary: () => `${account.provider === 'agentrouter' ? 'agentrouter.org' : 'anyrouter.top'} / ${({ cookie: 'Cookie', password: '站点账号密码', system_token: '系统访问令牌' })[account.auth_type] || '待重新配置'} / ${account.enabled ? '已启用' : '已停用'}`,
+        summary: () => `${account.provider === 'agentrouter' ? 'agentrouter.org' : 'anyrouter.top'} / ${({ cookie: 'Cookie', password: '站点账号密码' })[account.auth_type] || '待重新配置'} / ${account.enabled ? '已启用' : '已停用'}`,
       });
       outer.dataset.accountId = account.id;
       const runAccount = button('签到此账号', 'button secondary account-run', () => taskAction(false, account.id));
@@ -764,25 +768,24 @@
         field('账号名称', account.name, (value) => { account.name = value; }, { placeholder: '例如: 主账号', optional: true }),
         selectField('目标站点', account.provider, [['anyrouter', 'AnyRouter - anyrouter.top'], ['agentrouter', 'AgentRouter - agentrouter.org']], (value) => {
           account.provider = value;
-          resetAccountAuth(account, value === 'agentrouter' ? 'system_token' : 'cookie', true);
+          resetAccountAuth(account, value === 'agentrouter' ? 'password' : 'cookie', true);
           renderForm();
         }, { hint: '切换站点会移除当前草稿中不兼容的凭据, 保存后才会应用.' }),
         field('稳定 ID', account.id, (value) => { moveExpanded(`account:${account.id}`, `account:${value}`); account.id = value; }, { required: true, readOnly: state.savedIds.has(account.id), hint: '首次保存后固定, 不随名称变化.' }),
         checkField('启用此账号', account.enabled, (value) => { account.enabled = value; }, '停用时可先保留未完成的配置, 不参与签到.'),
-        selectField('认证方式', account.auth_type, account.provider === 'agentrouter' ? [['system_token', '系统访问令牌']] : [['cookie', '已有 Cookie'], ['password', '站点账号密码']], (value) => { resetAccountAuth(account, value); renderForm(); }),
+        selectField('认证方式', account.auth_type, account.provider === 'agentrouter' ? [['password', '站点账号密码']] : [['cookie', '已有 Cookie'], ['password', '站点账号密码']], (value) => { resetAccountAuth(account, value); renderForm(); }),
       );
       if (account.auth_type === 'password') {
-        grid.append(field('站点登录账号', account.username, (value) => { account.username = value; }, { autocomplete: 'off', hint: '填写 AnyRouter 的用户名或邮箱.' }));
-        grid.append(secretField('站点密码', account.password, (value) => { account.password = value; }, { hint: '已知 acw 访问验证可自动处理, 其他验证码或未知验证会暂停并通知, 请在本机处理后更新凭据.' }));
-      } else if (account.auth_type === 'system_token') {
-        grid.append(secretField('系统访问令牌', account.system_access_token, (value) => { account.system_access_token = value; }, { wide: true, hint: '填写站点控制台的系统访问令牌, 不是模型调用 API Key.' }));
-      } else {
+        const agent = account.provider === 'agentrouter';
+        grid.append(field('站点登录账号', account.username, (value) => { account.username = value; }, { autocomplete: 'off', hint: agent ? '填写 AgentRouter 的站点用户名或邮箱.' : '填写 AnyRouter 的用户名或邮箱.' }));
+        grid.append(secretField('站点密码', account.password, (value) => { account.password = value; }, { hint: agent ? '每次运行重新登录 AgentRouter, 不复用登录会话. 仅确认站点返回已签到才显示签到成功.' : '已知 acw 访问验证可自动处理, 其他验证码或未知验证会暂停并通知, 请在本机处理后更新凭据.' }));
+      } else if (account.auth_type === 'cookie' && account.provider === 'anyrouter') {
         const cookie = secretField('Cookie', account.cookies, (value) => { account.cookies = value; }, { wide: true, placeholder: 'session=...; other=...', hint: '输入完整 Cookie header. 已保存值留空保留, 点击清除才删除.' });
         cookie.append(el('p', 'field-hint', '先登录 https://anyrouter.top, 按 F12 -> Application -> Cookies -> https://anyrouter.top, 找到 session 并复制其 Value, 在上方手动粘贴 session=复制的值. 也可从 Network 的 Request Headers 复制包含 session 的完整 Cookie 值. acw_sc__v2 只是访问验证 Cookie, 不能替代登录 Cookie.'));
         grid.append(cookie);
       }
       grid.append(
-        field('目标站点用户 ID', account.api_user, (value) => { account.api_user = value; }, { optional: account.auth_type === 'password', placeholder: '例如: 12345', hint: 'Cookie 和系统访问令牌认证必须填写站点用户 ID, 用于 new-api-user 请求头及账号核对.' }),
+        field('目标站点用户 ID', account.api_user, (value) => { account.api_user = value; }, { optional: account.auth_type === 'password', placeholder: '例如: 12345', hint: 'Cookie 认证必须填写站点用户 ID. 账号密码认证可选填, 用于核对登录账号.' }),
         field('目标站点用户名', account.expected_username, (value) => { account.expected_username = value; }, { optional: true, hint: '可额外核对服务器返回的用户名, 不匹配时暂停.' }),
       );
       content.append(advanced('账号代理', [proxyField('代理', account, 'proxy', '沿用上级时使用默认代理; 默认代理未配置时直连. 支持 HTTP/HTTPS 和 SOCKS5, 认证格式: socks5://用户名:密码@主机:端口. 特殊字符需进行 URL 编码.')]));
@@ -899,12 +902,12 @@
       ids.add(account.id);
       const name = account.name || account.id;
       if (!['anyrouter', 'agentrouter'].includes(account.provider)) return `账号 ${name} 的站点不受支持.`;
-      if (account.provider === 'agentrouter' ? account.auth_type !== 'system_token' : !['cookie', 'password'].includes(account.auth_type)) return `账号 ${name} 的认证方式不受此站点支持.`;
+      if (account.provider === 'agentrouter' ? account.auth_type !== 'password' : !['cookie', 'password'].includes(account.auth_type)) return `账号 ${name} 的认证方式不受此站点支持.`;
       if (!account.enabled) continue;
       if (account.auth_type === 'password') {
         if (!account.username || !account.password) return `账号 ${name} 需要填写站点登录账号和密码.`;
       } else {
-        if (!(account.auth_type === 'cookie' ? account.cookies : account.system_access_token)) return `账号 ${name} 需要填写${account.auth_type === 'cookie' ? 'Cookie' : '系统访问令牌'}.`;
+        if (!account.cookies) return `账号 ${name} 需要填写Cookie.`;
         if (account.auth_type === 'cookie' && typeof account.cookies === 'string' && account.cookies !== SECRET && !account.cookies.split(';').some((part) => part.trim().startsWith('session=') && part.trim().slice(8).trim())) return `账号 ${name} 的 Cookie 缺少非空 session. acw_sc__v2 只是访问验证 Cookie, 请按 Cookie 输入框下方说明获取登录 Cookie.`;
         if (!account.api_user || !/^\d+$/.test(String(account.api_user)) || Number(account.api_user) < 1) return `账号 ${name} 需要填写有效的目标站点用户 ID.`;
       }

@@ -42,6 +42,10 @@ def cookie_account(account_id='cookie'):
 	}
 
 
+def agent_account(account_id='agent'):
+	return {**password_account(account_id, 'synthetic-agent-password'), 'provider': 'agentrouter'}
+
+
 def token_account(account_id='token'):
 	return {
 		'id': account_id,
@@ -54,7 +58,7 @@ def token_account(account_id='token'):
 
 def populated_config():
 	config = default_config()
-	config['accounts'] = [password_account(), cookie_account(), token_account()]
+	config['accounts'] = [password_account(), cookie_account(), agent_account()]
 	config['accounts'][0]['proxy'] = 'http://user:synthetic-proxy-password@proxy.example.test:8080'
 	config['proxy_url'] = 'https://global:synthetic-global-password@proxy.example.test:444'
 	config['notifications'] = {'EMAIL_PASS': 'synthetic-notify-password', 'EMAIL_TO': 'recipient@example.test'}
@@ -99,13 +103,14 @@ def test_encrypted_database_has_no_plaintext_and_reopens(tmp_path):
 	config = populated_config()
 	result = store.save(config, 0)
 	assert result == {'revision': 1, 'config': redact_config(validate_config(config))}
+	assert store.migration_info() is None
 	store.close()
 	for file in path.parent.iterdir():
 		data = file.read_bytes()
 		for secret in (
 			b'synthetic-password-one',
 			b'synthetic-cookie',
-			b'synthetic-system-token',
+			b'synthetic-agent-password',
 			b'synthetic-proxy-password',
 			b'synthetic-global-password',
 			b'synthetic-notify-password',
@@ -160,13 +165,13 @@ def test_explicit_empty_and_omission_delete_secrets(tmp_path):
 	try:
 		public = store.save(populated_config(), 0)['config']
 		public['accounts'][0].update(password='', enabled=False, proxy='direct')
-		public['accounts'][2].update(system_access_token='', enabled=False)
+		public['accounts'][2].update(password='', enabled=False)
 		public['proxy_url'] = ''
 		public['notifications'] = {}
 		store.save(public, 1)
 		loaded, _ = store.load()
 		assert loaded['accounts'][0]['password'] == ''
-		assert loaded['accounts'][2]['system_access_token'] == ''
+		assert loaded['accounts'][2]['password'] == ''
 		assert loaded['proxy_url'] == ''
 		assert loaded['notifications'] == {}
 		loaded['accounts'][0].pop('password')
@@ -203,7 +208,7 @@ def test_redaction_keeps_nonsecret_flags_and_does_not_mutate():
 	assert config == before
 	assert public['accounts'][0]['password'] == SECRET_KEEP
 	assert public['accounts'][1]['cookies'] == SECRET_KEEP
-	assert public['accounts'][2]['system_access_token'] == SECRET_KEEP
+	assert public['accounts'][2]['password'] == SECRET_KEEP
 	assert public['accounts'][0]['proxy'] == SECRET_KEEP
 	assert public['accounts'][1]['proxy'] == 'direct'
 	assert public['notifications']['EMAIL_PASS'] == SECRET_KEEP
@@ -279,7 +284,7 @@ def test_unknown_notification_environment_is_rejected(name):
 	[
 		('anyrouter', 'system_token'),
 		('agentrouter', 'cookie'),
-		('agentrouter', 'password'),
+		('agentrouter', 'system_token'),
 		('anyrouter', 'github'),
 		('anyrouter', 'linuxdo'),
 		('custom', 'cookie'),
@@ -304,16 +309,41 @@ def test_legacy_settings_are_rejected_in_new_documents(field, value):
 		validate_config(config)
 
 
-@pytest.mark.parametrize('account', [cookie_account(), token_account(), password_account()])
+@pytest.mark.parametrize('account', [cookie_account(), agent_account(), password_account()])
 def test_enabled_account_requires_complete_credentials_and_disabled_can_be_incomplete(account):
 	config = default_config()
-	secret = {'cookie': 'cookies', 'system_token': 'system_access_token', 'password': 'password'}[account['auth_type']]
+	secret = {'cookie': 'cookies', 'password': 'password'}[account['auth_type']]
 	account.pop(secret)
 	config['accounts'] = [account]
 	with pytest.raises(ConfigError):
 		validate_config(config)
 	account['enabled'] = False
 	assert validate_config(config)['accounts'][0]['enabled'] is False
+
+
+@pytest.mark.parametrize('api_user', [None, '', '9', 9])
+def test_agent_password_authentication_accepts_optional_api_user(api_user):
+	account = agent_account()
+	if api_user is not None:
+		account['api_user'] = api_user
+	config = {**default_config(), 'accounts': [account]}
+	validated = validate_config(config)['accounts'][0]
+	assert validated['auth_type'] == 'password' and validated['enabled']
+	assert validated.get('api_user') == (None if api_user is None else str(api_user))
+
+
+@pytest.mark.parametrize('field', ['username', 'password'])
+def test_enabled_agent_password_authentication_requires_both_fields(field):
+	account = agent_account()
+	account.pop(field)
+	with pytest.raises(ConfigError, match='username and password'):
+		validate_config({**default_config(), 'accounts': [account]})
+
+
+@pytest.mark.parametrize('field,value', [('cookies', 'session=synthetic'), ('system_access_token', 'synthetic-token')])
+def test_agent_password_authentication_rejects_incompatible_credentials(field, value):
+	with pytest.raises(ConfigError, match='cannot combine'):
+		validate_config({**default_config(), 'accounts': [{**agent_account(), field: value}]})
 
 
 @pytest.mark.parametrize(
@@ -348,7 +378,7 @@ def test_cookie_and_numeric_binding_are_normalized_without_mutating_input():
 @pytest.mark.parametrize('value', ['x\r\nAuthorization:x', 'Bearer token', ' token ', 'é', SECRET_KEEP, {}, None])
 def test_system_access_token_rejects_invalid_values_without_reflection(value):
 	config = default_config()
-	config['accounts'] = [{**token_account(), 'system_access_token': value}]
+	config['accounts'] = [{**agent_account(), 'system_access_token': value}]
 	with pytest.raises(ConfigError) as error:
 		validate_config(config)
 	assert 'Authorization' not in str(error.value)
@@ -366,7 +396,7 @@ def test_system_access_token_rejects_invalid_values_without_reflection(value):
 		lambda config: config.update(proxy_url='http://user:secret-value@proxy.test:99999'),
 		lambda config: config.update(proxy_url='socks5://user@proxy.test:88'),
 		lambda config: config.update(accounts=[{**cookie_account(), 'password': 'secret-value'}]),
-		lambda config: config.update(accounts=[{**token_account(), 'api_user': 'x\r\nx'}]),
+		lambda config: config.update(accounts=[{**agent_account(), 'api_user': 'x\r\nx'}]),
 	],
 )
 def test_invalid_values_rejected_without_reflecting_credentials(change):
@@ -397,7 +427,7 @@ def test_invalid_global_proxy_types_are_not_silently_treated_as_empty(value):
 def test_authenticated_socks5_is_valid_for_global_and_account_routes(proxy):
 	config = default_config()
 	config['proxy_url'] = proxy
-	config['accounts'] = [{**token_account(), 'proxy': proxy}]
+	config['accounts'] = [{**agent_account(), 'proxy': proxy}]
 	assert validate_config(config)['proxy_url'] == proxy
 	assert validate_config(config)['accounts'][0]['proxy'] == proxy
 
@@ -426,7 +456,7 @@ def test_socks5_rejects_invalid_auth_without_reflecting_secrets(userinfo, target
 	if target == 'global':
 		config['proxy_url'] = proxy
 	else:
-		config['accounts'] = [{**token_account(), 'proxy': proxy}]
+		config['accounts'] = [{**agent_account(), 'proxy': proxy}]
 	with pytest.raises(ConfigError) as error:
 		validate_config(config)
 	assert userinfo not in str(error.value)
@@ -438,7 +468,7 @@ def test_socks5_proxy_credentials_are_encrypted_and_preserved_as_secrets(tmp_pat
 	proxy = 'socks5://synthetic-user:synthetic%40proxy%3Apassword@127.0.0.1:1080'
 	config = default_config()
 	config['proxy_url'] = proxy
-	config['accounts'] = [{**token_account(), 'proxy': proxy}]
+	config['accounts'] = [{**agent_account(), 'proxy': proxy}]
 	store = ConfigStore(path, key)
 	try:
 		public = store.save(config, 0)
@@ -485,7 +515,15 @@ def test_migration_archives_original_ciphertext_and_disables_unsupported_account
 			{'id': 'password', 'email': 'name@example.test', 'password': 'synthetic-old-password'},
 			{'id': 'cookie', 'cookies': {'session': 'synthetic-old-cookie'}, 'api_user': 7},
 			{'id': 'oauth', 'provider': 'anyrouter', 'auth': {'type': 'github', 'identity': 'main'}, 'api_user': '8'},
-			{'id': 'agent', 'provider': 'agentrouter', 'cookies': 'session=old', 'api_user': '9'},
+			{
+				'id': 'agent',
+				'provider': 'agentrouter',
+				'cookies': 'session=old',
+				'api_user': '9',
+				'system_access_token': 'synthetic-legacy-token',
+				'username': 'legacy-agent',
+				'password': 'synthetic-legacy-agent-password',
+			},
 			{'id': 'custom', 'provider': 'custom', 'cookies': 'session=old', 'api_user': '10'},
 		],
 		'identities': {'main': {'type': 'github'}},
@@ -508,8 +546,8 @@ def test_migration_archives_original_ciphertext_and_disables_unsupported_account
 		assert by_id['password']['enabled'] and by_id['cookie']['enabled']
 		assert by_id['oauth']['auth_type'] == 'cookie' and not by_id['oauth']['enabled']
 		assert not by_id['oauth']['cookies']
-		assert by_id['agent']['auth_type'] == 'system_token' and not by_id['agent']['enabled']
-		assert 'cookies' not in by_id['agent']
+		assert by_id['agent']['auth_type'] == 'password' and not by_id['agent']['enabled']
+		assert not {'cookies', 'system_access_token', 'username', 'password'} & by_id['agent'].keys()
 		assert 'custom' not in by_id
 		assert store.migration_info() == {
 			'from_schema': 1,
@@ -535,6 +573,121 @@ def test_migration_archives_original_ciphertext_and_disables_unsupported_account
 		reopened.close()
 
 
+def test_schema2_agent_token_migration_preserves_other_configuration_history_and_ciphertext(tmp_path):
+	path, key = tmp_path / 'config.db', os.urandom(32)
+	document = validate_config(populated_config())
+	document['schedule'] = {'enabled': True, 'interval_minutes': 60}
+	document['accounts'][2] = {
+		**token_account('agent'),
+		'name': 'Agent account',
+		'proxy': 'socks5://proxy:synthetic-agent-proxy@proxy.example.test:1080',
+		'expected_username': 'agent-identity',
+		'username': 'obsolete-agent-name',
+		'password': 'synthetic-obsolete-password',
+		'cookies': 'session=synthetic-obsolete-cookie',
+		'enabled': True,
+	}
+	original = legacy_database(path, key, document)
+	store = ConfigStore(path, key)
+	prior_archive = (1, b'synthetic-prior-ciphertext', '{}')
+	try:
+		with sqlite3.connect(path) as db:
+			db.execute('CREATE TABLE run_history (id INTEGER PRIMARY KEY, result TEXT NOT NULL)')
+			db.execute('INSERT INTO run_history VALUES (1, ?)', ('synthetic-past-result',))
+			db.execute('INSERT INTO config_archive VALUES (?, ?, ?)', prior_archive)
+		config, revision = store.load()
+		assert revision == 5 and config['schema_version'] == 2
+		assert config['accounts'][:2] == document['accounts'][:2]
+		assert {key: value for key, value in config.items() if key != 'accounts'} == {
+			key: value for key, value in document.items() if key != 'accounts'
+		}
+		assert config['accounts'][2] == {
+			'id': 'agent',
+			'name': 'Agent account',
+			'provider': 'agentrouter',
+			'auth_type': 'password',
+			'api_user': '8',
+			'proxy': document['accounts'][2]['proxy'],
+			'expected_username': 'agent-identity',
+			'enabled': False,
+		}
+		assert store.migration_info() == {
+			'from_schema': 2,
+			'source_revision': 4,
+			'converted_accounts': 1,
+			'disabled_accounts': 1,
+			'omitted_accounts': 0,
+			'schedule_disabled': False,
+		}
+		for secret in ('synthetic-system-token', 'synthetic-obsolete-password', 'synthetic-obsolete-cookie'):
+			assert secret not in json.dumps(store.public())
+			assert secret.encode() not in path.read_bytes()
+		assert store.load() == (config, 5)
+		with pytest.raises(ConflictError):
+			store.save(config, 4)
+		with sqlite3.connect(path) as db:
+			assert db.execute('SELECT id, result FROM run_history').fetchall() == [(1, 'synthetic-past-result')]
+			rows = db.execute(
+				'SELECT source_revision, document, migration FROM config_archive ORDER BY source_revision'
+			).fetchall()
+			assert rows[0] == prior_archive and rows[1][:2] == (4, original)
+			assert len(rows) == 2
+	finally:
+		store.close()
+	reopened = ConfigStore(path, key)
+	try:
+		assert reopened.load() == (config, 5)
+		account = config['accounts'][2]
+		account.update(enabled=True, username='new-agent-name', password='synthetic-new-agent-password')
+		account.pop('api_user')
+		assert reopened.save(config, 5)['revision'] == 6
+		assert reopened.load()[0]['accounts'][2]['enabled']
+		with sqlite3.connect(path) as db:
+			assert db.execute('SELECT count(*) FROM config_archive').fetchone() == (2,)
+	finally:
+		reopened.close()
+
+
+@pytest.mark.parametrize('schedule_enabled', [False, True])
+def test_agent_token_migration_disables_schedule_only_when_no_enabled_accounts_remain(tmp_path, schedule_enabled):
+	path, key = tmp_path / 'config.db', os.urandom(32)
+	document = default_config()
+	document['accounts'] = [token_account()]
+	document['schedule']['enabled'] = schedule_enabled
+	legacy_database(path, key, document)
+	store = ConfigStore(path, key)
+	try:
+		config, revision = store.load()
+		assert revision == 5 and config['schedule']['enabled'] is False
+		assert config['accounts'][0]['auth_type'] == 'password'
+		assert config['accounts'][0]['enabled'] is False
+		information = store.migration_info()
+		assert information is not None and information['schedule_disabled'] is schedule_enabled
+	finally:
+		store.close()
+
+
+def test_stale_save_cannot_bypass_agent_migration_or_reintroduce_token(tmp_path):
+	path, key = tmp_path / 'config.db', os.urandom(32)
+	document = {**default_config(), 'accounts': [token_account()]}
+	original = legacy_database(path, key, document)
+	store = ConfigStore(path, key)
+	try:
+		with pytest.raises(ConflictError):
+			store.save(document, 4)
+		with sqlite3.connect(path) as db:
+			assert db.execute('SELECT revision, document FROM config').fetchone() == (4, original)
+			assert db.execute('SELECT count(*) FROM config_archive').fetchone() == (0,)
+		assert store.public()['revision'] == 5
+		with pytest.raises(ConfigError):
+			store.save(document, 5)
+		assert store.load()[1] == 5
+		with sqlite3.connect(path) as db:
+			assert db.execute('SELECT count(*) FROM config_archive').fetchone() == (1,)
+	finally:
+		store.close()
+
+
 def test_migration_never_relabels_custom_origin_as_fixed_provider(tmp_path):
 	path, key = tmp_path / 'config.db', os.urandom(32)
 	legacy_database(
@@ -556,9 +709,13 @@ def test_migration_never_relabels_custom_origin_as_fixed_provider(tmp_path):
 		store.close()
 
 
-def test_failed_migration_is_atomic_and_preserves_original(tmp_path):
+@pytest.mark.parametrize('schema', [1, 2])
+def test_failed_migration_is_atomic_and_preserves_original(tmp_path, schema):
 	path, key = tmp_path / 'config.db', os.urandom(32)
-	original = legacy_database(path, key, {'accounts': [], 'notifications': {'PATH': 'synthetic-secret'}})
+	document: dict = {'accounts': [], 'notifications': {'PATH': 'synthetic-secret'}}
+	if schema == 2:
+		document.update(schema_version=2, accounts=[token_account()])
+	original = legacy_database(path, key, document)
 	store = ConfigStore(path, key)
 	try:
 		with pytest.raises(ConfigError):
@@ -570,9 +727,11 @@ def test_failed_migration_is_atomic_and_preserves_original(tmp_path):
 		store.close()
 
 
-def test_migration_archive_and_rewrite_share_one_transaction(tmp_path, monkeypatch):
+@pytest.mark.parametrize('schema', [1, 2])
+def test_migration_archive_and_rewrite_share_one_transaction(tmp_path, monkeypatch, schema):
 	path, key = tmp_path / 'config.db', os.urandom(32)
-	original = legacy_database(path, key, {'accounts': []})
+	document = {'accounts': []} if schema == 1 else {**default_config(), 'accounts': [token_account()]}
+	original = legacy_database(path, key, document)
 	store = ConfigStore(path, key)
 	try:
 
@@ -589,17 +748,37 @@ def test_migration_archive_and_rewrite_share_one_transaction(tmp_path, monkeypat
 		store.close()
 
 
-def test_two_connections_migrate_only_once(tmp_path):
+@pytest.mark.parametrize('schema', [1, 2])
+def test_two_connections_migrate_only_once(tmp_path, schema):
 	path, key = tmp_path / 'config.db', os.urandom(32)
-	legacy_database(path, key, {'accounts': []})
+	document = {'accounts': []} if schema == 1 else {**default_config(), 'accounts': [token_account()]}
+	legacy_database(path, key, document)
 	first, second = ConfigStore(path, key), ConfigStore(path, key)
 	try:
-		assert first.load() == second.load() == (default_config(), 5)
+		config, revision = first.load()
+		assert revision == 5 and second.load() == (config, revision)
 		with sqlite3.connect(path) as db:
 			assert db.execute('SELECT count(*) FROM config_archive').fetchone() == (1,)
 	finally:
 		first.close()
 		second.close()
+
+
+@pytest.mark.parametrize('schema', [1, 2])
+def test_migration_does_not_overflow_revision_or_archive_without_rewrite(tmp_path, schema):
+	path, key = tmp_path / 'config.db', os.urandom(32)
+	document = {'accounts': []} if schema == 1 else {**default_config(), 'accounts': [token_account()]}
+	revision = 2**63 - 1
+	original = legacy_database(path, key, document, revision)
+	store = ConfigStore(path, key)
+	try:
+		with pytest.raises(ConfigError):
+			store.load()
+		with sqlite3.connect(path) as db:
+			assert db.execute('SELECT revision, document FROM config').fetchone() == (revision, original)
+			assert db.execute('SELECT count(*) FROM config_archive').fetchone() == (0,)
+	finally:
+		store.close()
 
 
 def test_failed_validation_rolls_back_and_preserves_previous_config(tmp_path):

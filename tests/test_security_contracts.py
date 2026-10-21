@@ -28,10 +28,13 @@ def test_proxy_userinfo_and_oauth_queries_are_redacted():
 
 def test_account_json_secrets_are_collected(monkeypatch):
 	monkeypatch.setenv(
-		'ANYROUTER_ACCOUNTS', '[{"password":"synthetic-pass","cookies":{"session":"synthetic-session"}}]'
+		'ANYROUTER_ACCOUNTS',
+		'[{"password":"synthetic-pass","cookies":{"session":"synthetic-session"}},'
+		'{"provider":"agentrouter","auth_type":"password","username":"synthetic-agent-user",'
+		'"password":"synthetic-agent-password"}]',
 	)
 	values = sensitive_values()
-	assert {'synthetic-pass', 'synthetic-session'} <= values
+	assert {'synthetic-pass', 'synthetic-session', 'synthetic-agent-password'} <= values
 
 
 def test_actions_never_run_real_checkin_or_receive_login_configuration():

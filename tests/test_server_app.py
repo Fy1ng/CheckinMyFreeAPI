@@ -115,8 +115,9 @@ async def test_pause_resolution_requires_auth_csrf_revision_and_saved_account(we
 		{
 			'id': 'fixture',
 			'provider': 'agentrouter',
-			'auth_type': 'system_token',
-			'system_access_token': 'synthetic-token',
+			'auth_type': 'password',
+			'username': 'synthetic-agent-user',
+			'password': 'synthetic-agent-password',
 			'api_user': '42',
 		}
 	]

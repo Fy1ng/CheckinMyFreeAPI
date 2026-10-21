@@ -307,7 +307,7 @@ def _validate_accounts(value, proxy_url: str) -> list:
 		if not isinstance(provider, str) or provider not in _FIXED_ORIGINS:
 			raise ConfigError('Only AnyRouter and AgentRouter are supported')
 		auth_type = account.get('auth_type')
-		allowed = {'cookie', 'password'} if provider == 'anyrouter' else {'system_token'}
+		allowed = {'cookie', 'password'} if provider == 'anyrouter' else {'password'}
 		if not isinstance(auth_type, str) or auth_type not in allowed:
 			raise ConfigError('Account authentication is not supported by this provider')
 		account['enabled'] = _boolean(account.get('enabled', True), 'Account enabled')
@@ -317,14 +317,9 @@ def _validate_accounts(value, proxy_url: str) -> list:
 			account['api_user'] = _api_user(account['api_user'])
 		if 'cookies' in account:
 			account['cookies'] = _cookies(account['cookies'])
-		if account.get('system_access_token'):
-			token = account['system_access_token']
-			if not token.isascii() or any(char.isspace() for char in token):
-				raise ConfigError('System access token must be an ASCII token without whitespace')
 		mode_fields = {
 			'cookie': {'cookies'},
 			'password': {'username', 'password'},
-			'system_token': {'system_access_token'},
 		}
 		if any(
 			account.get(field)
@@ -339,10 +334,8 @@ def _validate_accounts(value, proxy_url: str) -> list:
 			if auth_type == 'password':
 				if not account.get('username') or not account.get('password'):
 					raise ConfigError('Password authentication requires username and password')
-			elif not account.get('api_user') or not account.get(
-				'cookies' if auth_type == 'cookie' else 'system_access_token'
-			):
-				raise ConfigError('Cookie and system token authentication require credentials and API user ID')
+			elif not account.get('api_user') or not account.get('cookies'):
+				raise ConfigError('Cookie authentication requires credentials and API user ID')
 		accounts.append(account)
 	return accounts
 
@@ -486,13 +479,14 @@ def _migrate_legacy(document: dict, revision: int) -> tuple[dict, dict]:
 			'name': name,
 			'provider': provider,
 			'enabled': old.get('enabled', True) is True,
-			'auth_type': 'system_token' if provider == 'agentrouter' else 'cookie',
+			'auth_type': 'password' if provider == 'agentrouter' else 'cookie',
 		}
 		for field in ('api_user', 'expected_username', 'proxy'):
 			if old.get(field) is not None:
 				account[field] = copy.deepcopy(old[field])
 		if provider == 'agentrouter':
-			account['system_access_token'] = old.get('system_access_token', '')
+			# Legacy Agent credentials must be replaced explicitly in the password-only flow.
+			account['enabled'] = False
 		elif old.get('auth'):
 			# OAuth snapshots belong to the old browser flow and must never become HTTP cookies.
 			account.update(enabled=False, cookies='')
@@ -546,6 +540,44 @@ def _migrate_legacy(document: dict, revision: int) -> tuple[dict, dict]:
 		'disabled_accounts': sum(not account['enabled'] for account in data['accounts']),
 		'omitted_accounts': omitted,
 		'schedule_disabled': True,
+	}
+
+
+def _migrate_agent_password(document: dict, revision: int) -> tuple[dict, dict | None]:
+	"""Disable obsolete Agent token accounts; only their original ciphertext retains credentials."""
+	source_accounts = document.get('accounts', [])
+	if not isinstance(source_accounts, list):
+		return document, None
+	data = copy.deepcopy(document)
+	converted = 0
+	for account in data.get('accounts', []):
+		if (
+			not isinstance(account, dict)
+			or account.get('provider') != 'agentrouter'
+			or account.get('auth_type') != 'system_token'
+		):
+			continue
+		account.update(auth_type='password', enabled=False)
+		for field in ('cookies', 'system_access_token', 'username', 'password'):
+			account.pop(field, None)
+		converted += 1
+	if not converted:
+		return document, None
+	schedule = data.get('schedule', {})
+	schedule_disabled = (
+		isinstance(schedule, dict)
+		and schedule.get('enabled') is True
+		and not any(isinstance(account, dict) and account.get('enabled', True) is True for account in data['accounts'])
+	)
+	if schedule_disabled:
+		schedule['enabled'] = False
+	return validate_config(data), {
+		'from_schema': 2,
+		'source_revision': revision,
+		'converted_accounts': converted,
+		'disabled_accounts': converted,
+		'omitted_accounts': 0,
+		'schedule_disabled': schedule_disabled,
 	}
 
 
@@ -605,10 +637,14 @@ class ConfigStore:
 			) from None
 		try:
 			document = json.loads(plaintext)
+			information = None
 			if isinstance(document, dict) and 'schema_version' not in document:
+				document, information = _migrate_legacy(document, revision)
+			elif isinstance(document, dict) and document.get('schema_version') == 2:
+				document, information = _migrate_agent_password(document, revision)
+			if information is not None:
 				if revision >= 2**63 - 1:
 					raise ConfigError('Configuration revision cannot be migrated')
-				document, information = _migrate_legacy(document, revision)
 				self._connection.execute(
 					'INSERT INTO config_archive (source_revision, document, migration) VALUES (?, ?, ?)',
 					(revision, encrypted, json.dumps(information, separators=(',', ':'))),
@@ -631,7 +667,7 @@ class ConfigStore:
 				raise
 
 	def migration_info(self) -> dict | None:
-		"""Return credential-free migration counts, or None for a fresh schema 2 database."""
+		"""Return credential-free migration counts, or None when no migration was needed."""
 		with self._lock:
 			self.load()
 			row = self._connection.execute(
@@ -652,7 +688,9 @@ class ConfigStore:
 					not isinstance(information, dict)
 					or set(information) != {*fields, 'schedule_disabled'}
 					or any(type(information[field]) is not int or information[field] < 0 for field in fields)
-					or information['schedule_disabled'] is not True
+					or information['from_schema'] not in {1, 2}
+					or type(information['schedule_disabled']) is not bool
+					or (information['from_schema'] == 1 and information['schedule_disabled'] is not True)
 				):
 					raise ValueError
 			except (TypeError, ValueError, RecursionError):

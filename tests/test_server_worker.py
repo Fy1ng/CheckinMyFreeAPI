@@ -7,12 +7,15 @@ import json
 import os
 from unittest.mock import Mock
 
+import httpx
 import pytest
 
 from server import worker
 from server.config_store import default_config
 from server.execution_state import ExecutionState
-from utils.http_checkin import account_binding
+from utils.http_checkin import HttpCheckinRuntime, account_binding
+
+AGENT_PASSWORD = 'synthetic-private-password'
 
 
 @pytest.fixture
@@ -27,8 +30,9 @@ def fixture(monkeypatch, tmp_path):
 		{
 			'id': 'main',
 			'provider': 'agentrouter',
-			'auth_type': 'system_token',
-			'system_access_token': 'synthetic-private-token',
+			'auth_type': 'password',
+			'username': 'synthetic-agent-user',
+			'password': AGENT_PASSWORD,
 			'api_user': '42',
 			'name': 'Fixture',
 		}
@@ -80,8 +84,8 @@ async def test_http_worker_result_categories_and_private_notifications(fixture, 
 	progress = json.loads(open(payload['event_file'], encoding='utf-8').read())
 	assert progress['state'] == expected
 	assert calls == ['main']
-	assert 'synthetic-private-token' not in json.dumps(progress)
-	assert 'synthetic-private-token' not in str(notify.call_args_list)
+	assert AGENT_PASSWORD not in json.dumps(progress)
+	assert AGENT_PASSWORD not in str(notify.call_args_list)
 	if outcome != 'success':
 		assert 'https://console.example.test/?account=main' in notify.call_args.args[1]
 
@@ -103,7 +107,7 @@ async def test_scheduled_accounts_stay_paused_and_uncertain_requires_explicit_re
 				'provider': 'agentrouter',
 				'success': False,
 				'outcome': 'uncertain',
-				'reason': 'request_result_unknown',
+				'reason': 'agent_checkin_result_unknown',
 			}
 
 	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
@@ -114,7 +118,7 @@ async def test_scheduled_accounts_stay_paused_and_uncertain_requires_explicit_re
 	assert await worker.execute(payload) == 1
 	assert calls == ['main']
 	assert notify.call_count == 1
-	payload['config']['accounts'][0]['system_access_token'] = 'changed-token-still-requires-confirmation'
+	payload['config']['accounts'][0]['password'] = 'changed-password-still-requires-confirmation'
 	await worker.execute(payload)
 	assert calls == ['main']
 	state = ExecutionState(worker.Path(payload['data_dir']) / 'webui.sqlite3')
@@ -125,7 +129,16 @@ async def test_scheduled_accounts_stay_paused_and_uncertain_requires_explicit_re
 
 
 @pytest.mark.asyncio
-async def test_credential_update_releases_old_pause(fixture, monkeypatch):
+@pytest.mark.parametrize(
+	'field,value',
+	[
+		('username', 'replacement-agent-user'),
+		('password', 'replacement-private-password'),
+		('api_user', '43'),
+		('proxy', 'http://127.0.0.1:8081'),
+	],
+)
+async def test_credential_or_route_update_releases_old_pause(fixture, monkeypatch, field, value):
 	payload, _ = fixture
 	state = ExecutionState(worker.Path(payload['data_dir']) / 'webui.sqlite3')
 	state.record(
@@ -134,7 +147,7 @@ async def test_credential_update_releases_old_pause(fixture, monkeypatch):
 		{'outcome': 'blocked', 'reason': 'interactive_verification_required'},
 	)
 	state.close()
-	payload['config']['accounts'][0]['system_access_token'] = 'replacement-private-token'
+	payload['config']['accounts'][0][field] = value
 	payload['trigger'] = 'scheduled'
 	calls = []
 
@@ -150,7 +163,7 @@ async def test_credential_update_releases_old_pause(fixture, monkeypatch):
 				'provider': 'agentrouter',
 				'success': True,
 				'outcome': 'success',
-				'reason': 'user_info_requested_reward_unverified',
+				'reason': 'agent_checkin_verified',
 			}
 
 	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
@@ -213,11 +226,11 @@ async def test_worker_single_account_scope_reports_live_stages_and_stable_notifi
 		async def execute(self, account, *, on_progress=None):
 			calls.append(account['id'])
 			event = {
-				'stage': 'verify_identity',
+				'stage': 'password_login',
 				'state': 'running',
 				'at': str(len(calls)),
-				'method': 'GET',
-				'path': '/api/user/self',
+				'method': 'POST',
+				'path': '/api/user/login',
 			}
 			on_progress(event)
 			observed.append(json.loads(open(payload['event_file'], encoding='utf-8').read()))
@@ -227,18 +240,18 @@ async def test_worker_single_account_scope_reports_live_stages_and_stable_notifi
 				'provider': account['provider'],
 				'success': True,
 				'outcome': 'success',
-				'reason': 'user_info_requested_reward_unverified',
+				'reason': 'agent_checkin_verified',
 				'steps': [event],
 			}
 
 	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
 	assert await worker.execute(payload) == 0
 	assert calls == ['other']
-	assert observed[0]['summary']['progress']['active_account']['stage'] == 'verify_identity'
+	assert observed[0]['summary']['progress']['active_account']['stage'] == 'password_login'
 	assert observed[0]['active_account'] == 'other'
 	assert observed[0]['summary']['progress']['completed'] == 0
 	assert observed[0]['summary']['progress']['total'] == 1
-	assert 'synthetic-private-token' not in json.dumps(observed)
+	assert AGENT_PASSWORD not in json.dumps(observed)
 	final = json.loads(open(payload['event_file'], encoding='utf-8').read())
 	assert [result['id'] for result in final['summary']['accounts']] == ['other']
 	assert final['summary']['progress'] == {'total': 1, 'completed': 1, 'active_account': None}
@@ -262,3 +275,61 @@ async def test_worker_rejects_invalid_single_account_before_any_execution(fixtur
 	with pytest.raises(ValueError):
 		await worker.execute(payload)
 	notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+	'checked_in,outcome,reason,state',
+	[
+		(True, 'success', 'agent_checkin_verified', 'succeeded'),
+		(False, 'failed', 'agent_checkin_not_confirmed', 'failed'),
+		(None, 'uncertain', 'agent_checkin_result_unknown', 'uncertain'),
+		('true', 'uncertain', 'agent_checkin_result_unknown', 'uncertain'),
+	],
+)
+async def test_agent_login_result_flows_through_worker_and_unknown_results_stay_paused(
+	fixture, monkeypatch, checked_in, outcome, reason, state
+):
+	payload, notify = fixture
+	payload['config']['accounts'][0]['api_user'] = ''
+	requests = []
+
+	def handler(request):
+		requests.append(request)
+		assert request.method == 'POST' and request.url == 'https://agentrouter.org/api/user/login?turnstile='
+		assert json.loads(request.content) == {'username': 'synthetic-agent-user', 'password': AGENT_PASSWORD}
+		assert 'authorization' not in request.headers and 'cookie' not in request.headers
+		data = {'id': 42}
+		if checked_in is not None:
+			data['checked_in'] = checked_in
+		return httpx.Response(
+			200,
+			json={'success': True, 'data': data},
+			headers={'Set-Cookie': 'session=ignored-agent-session; Path=/; Secure; HttpOnly'},
+		)
+
+	def runtime_factory(config, sessions):
+		def client_factory(**kwargs):
+			assert kwargs.pop('proxy') is None
+			assert kwargs['verify'] is True and kwargs['trust_env'] is False
+			assert kwargs['follow_redirects'] is False
+			return httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs)
+
+		return HttpCheckinRuntime(config, sessions, client_factory=client_factory)
+
+	monkeypatch.setattr(worker, 'HttpCheckinRuntime', runtime_factory)
+	assert await worker.execute(payload) == (0 if outcome == 'success' else 1)
+	progress = json.loads(open(payload['event_file'], encoding='utf-8').read())
+	assert progress['state'] == state
+	result = progress['summary']['accounts'][0]
+	assert result['outcome'] == outcome and result['reason'] == reason
+	assert len(requests) == 1
+	assert AGENT_PASSWORD not in json.dumps(progress) + str(notify.call_args_list)
+	assert 'ignored-agent-session' not in json.dumps(progress) + str(notify.call_args_list)
+	if outcome == 'uncertain':
+		payload['trigger'] = 'scheduled'
+		assert await worker.execute(payload) == 1
+		payload['trigger'] = 'manual'
+		payload['config']['accounts'][0]['password'] = 'updated-password-needs-confirmation'
+		assert await worker.execute(payload) == 1
+		assert len(requests) == 1 and notify.call_count == 1
