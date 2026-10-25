@@ -34,6 +34,7 @@ type config struct {
 	passwordFile, backupFile, recoveryPasswordFile string
 	background, confirm, clearPasskeys, hidden     bool
 	page                                           string
+	localExplicit                                  bool
 }
 
 func env(name, fallback string) string {
@@ -79,6 +80,7 @@ func parse(args []string) (string, string, config, error) {
 	f.StringVar(&c.passwordFile, "password-file", os.Getenv("CHECKIN_WEB_PASSWORD_FILE"), "首次管理密码文件, 未设置时通过本机页面初始化")
 	f.BoolVar(&c.background, "background", false, "分离到后台, 不打开浏览器")
 	f.BoolVar(&c.hidden, "hidden", false, "桌面启动时隐藏到托盘")
+	f.BoolVar(&c.launch.LocalMode, "local", false, "本机免管理认证模式, 桌面本机模式默认开启")
 	f.StringVar(&c.page, "page", "/", "桌面初始页面: /, /status, /backups, /security")
 	f.BoolVar(&c.confirm, "confirm", false, "确认离线安全恢复")
 	f.BoolVar(&c.clearPasskeys, "clear-passkeys", false, "安全恢复时删除所有Passkey")
@@ -90,6 +92,7 @@ func parse(args []string) (string, string, config, error) {
 		fmt.Fprintln(f.Output(), "      checkin autostart install|remove|status [选项]")
 		fmt.Fprintln(f.Output(), "      checkin service install|uninstall|start|stop|status [选项]")
 		fmt.Fprintln(f.Output(), "      checkin security reset --confirm [--clear-passkeys] [选项]")
+		fmt.Fprintln(f.Output(), "      checkin security set-password --confirm [--password-file 文件] [选项]")
 		fmt.Fprintln(f.Output(), "      checkin backup inspect|restore --file backup.nab [选项]")
 		fmt.Fprintln(f.Output())
 		f.PrintDefaults()
@@ -100,6 +103,16 @@ func parse(args []string) (string, string, config, error) {
 	if f.NArg() != 0 {
 		return command, action, c, errors.New("存在无法识别的参数")
 	}
+	localExplicit := false
+	f.Visit(func(value *flag.Flag) {
+		if value.Name == "local" {
+			localExplicit = true
+		}
+	})
+	if !localExplicit && command == "app" && c.launch.PublicURL == "" && c.launch.TrustedProxyIPs == "" {
+		c.launch.LocalMode = true
+	}
+	c.localExplicit = localExplicit
 	var e error
 	if c.launch.Executable, e = platform.Executable(); e != nil {
 		return command, action, c, e
@@ -165,6 +178,9 @@ func run(args []string) error {
 		return platform.OpenBrowser("http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(c.launch.Port)))
 	case "autostart":
 		c.launch.Desktop = desktop.Available()
+		if c.launch.Desktop && !c.localExplicit && c.launch.PublicURL == "" && c.launch.TrustedProxyIPs == "" {
+			c.launch.LocalMode = true
+		}
 		enabled, e := platform.Autostart(c.launch, action)
 		if e != nil {
 			return e
@@ -177,6 +193,9 @@ func run(args []string) error {
 		}
 		return e
 	case "security":
+		if action == "set-password" {
+			return setAdminPassword(c)
+		}
 		if action != "reset" || !c.confirm {
 			return errors.New("离线恢复需要 security reset --confirm, 并先停止服务")
 		}

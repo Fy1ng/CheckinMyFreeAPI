@@ -30,6 +30,9 @@ func (b *backendSession) Stop() error { b.cancel(); <-b.Done; return b.err }
 func (b *backendSession) Err() error  { <-b.Done; return b.err }
 
 func startOwnedBackend(parent context.Context, c config) (result *backendSession, err error) {
+	if err = c.launch.Validate(); err != nil {
+		return nil, err
+	}
 	if err = platform.PrivateDir(c.launch.DataDir); err != nil {
 		return nil, err
 	}
@@ -66,8 +69,11 @@ func startOwnedBackend(parent context.Context, c config) (result *backendSession
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC)
 	log.SetPrefix("[UTC] ")
 	cleanup = append(cleanup, func() { log.SetOutput(previous); _ = logger.Close() })
-	password := os.Getenv("CHECKIN_WEB_PASSWORD")
-	if c.passwordFile != "" {
+	password := ""
+	if !c.launch.LocalMode {
+		password = os.Getenv("CHECKIN_WEB_PASSWORD")
+	}
+	if !c.launch.LocalMode && c.passwordFile != "" {
 		password, e = readSecretFile(c.passwordFile)
 		if e != nil {
 			return nil, e
@@ -89,7 +95,7 @@ func startOwnedBackend(parent context.Context, c config) (result *backendSession
 		return nil, errors.New("无法创建私有本机实例记录")
 	}
 	cleanup = append(cleanup, func() { _ = identity.Close() })
-	application, e := app.New(ctx, app.Options{DataDir: c.launch.DataDir, Key: key, Password: password, Launch: c.launch, Shutdown: cancel, DesktopIdentity: identity.Handler()})
+	application, e := app.New(ctx, app.Options{DataDir: c.launch.DataDir, Key: key, Password: password, Launch: c.launch, LocalMode: c.launch.LocalMode, Shutdown: cancel, DesktopIdentity: identity.Handler()})
 	if e != nil {
 		log.Print("服务初始化失败")
 		return nil, e

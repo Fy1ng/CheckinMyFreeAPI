@@ -262,6 +262,9 @@ func (s *Service) complete(kind, ticket string, credential json.RawMessage, orig
 }
 
 func (s *Service) issueProof(r *http.Request, method, credentialID string) (string, error) {
+	if s.opts.LocalMode {
+		return "", failure(403, "本地版已停用身份验证凭据")
+	}
 	origin, err := s.Origin(r)
 	if err != nil {
 		return "", err
@@ -284,6 +287,9 @@ func (s *Service) issueProof(r *http.Request, method, credentialID string) (stri
 // ConsumeReauth is single-use and binds the proof to this session, exact origin,
 // current security revision and the current authentication mode.
 func (s *Service) ConsumeReauth(r *http.Request, token string, requirePasskey bool) (Proof, error) {
+	if s.opts.LocalMode {
+		return Proof{}, failure(403, "本地版已停用身份验证凭据")
+	}
 	origin, err := s.Origin(r)
 	if err != nil {
 		return Proof{}, err

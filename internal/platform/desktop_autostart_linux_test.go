@@ -38,3 +38,16 @@ func TestDesktopAutostartUsesSessionEntryAndHiddenGUI(t *testing.T) {
 		t.Fatal("newline accepted")
 	}
 }
+
+func TestLocalHeadlessUnitRetainsExplicitLocalPolicy(t *testing.T) {
+	root := t.TempDir()
+	c := Launch{Executable: filepath.Join(root, "checkin"), DataDir: root, KeyFile: filepath.Join(root, "master.key"), Host: "127.0.0.1", Port: 8765, LocalMode: true}
+	content, e := unit(c, true)
+	if e != nil || !strings.Contains(content, " --local\n") {
+		t.Fatal("local policy omitted from systemd unit", content, e)
+	}
+	c.Host = "0.0.0.0"
+	if _, e = unit(c, true); e == nil {
+		t.Fatal("unsafe local unit accepted")
+	}
+}

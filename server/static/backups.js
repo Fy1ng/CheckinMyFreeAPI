@@ -2,19 +2,24 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { csrf: '', config: null, revision: null, busy: false, dirty: false, ticket: null, uncertain: false, reauthMethod: 'password' };
+  const state = { csrf: '', config: null, revision: null, busy: false, dirty: false, ticket: null, uncertain: false, reauthMethod: 'password', localMode: false };
   function loginPolicy(policy) {
+    state.localMode = policy.local_mode === true;
+    document.querySelectorAll('a[href="/security"]').forEach((item) => { item.hidden = state.localMode; });
     const password = policy.password_login_allowed ?? (policy.auth_mode !== 'passkey' || policy.reauth_method === 'password');
     state.reauthMethod = policy.reauth_method || (policy.auth_mode === 'passkey' ? 'passkey' : 'password');
     $('backup-password-login').hidden = !password;
     $('backup-login-password').required = password;
     $('backup-passkey-login').hidden = !policy.passkey_available;
     $('backup-passkey-login').disabled = !window.CheckinPasskeys?.supported();
-    $('restore-password-reauth').hidden = state.reauthMethod === 'passkey';
-    $('restore-admin-password').required = state.reauthMethod !== 'passkey';
+    $('restore-password-reauth').hidden = state.reauthMethod !== 'password';
+    $('restore-admin-password').required = state.reauthMethod === 'password';
+    $('restore-admin-password').disabled = state.localMode;
     $('restore-passkey-reauth').hidden = state.reauthMethod !== 'passkey';
-    if (!password && !policy.passkey_available) message('此入口没有可用的 Passkey. 请通过 SSH 恢复管理入口.', true);
-    else if (!password && !window.CheckinPasskeys?.supported()) message('当前浏览器不支持 Passkey, 请使用支持 WebAuthn 的浏览器.', true);
+    $('restore-completion-hint').textContent = state.localMode ? '当前数据会先自动备份, 再替换为此备份的数据. 恢复前快照使用已保存的恢复密码; 尚未设置时使用本次输入的恢复密码. 本地版无需管理员身份验证, 恢复后请核对配置.' : '当前数据会先自动备份, 再替换为此备份的数据. 恢复前快照使用已保存的恢复密码; 尚未设置时使用本次输入的恢复密码. 完成后需要重新登录.';
+    $('restore-description').textContent = state.localMode ? '先校验备份并预览内容, 再确认替换数据. 本地版恢复不要求管理员身份验证. 恢复后自动签到、采集、通知和备份均停用, 核对后可重新启用.' : '先校验备份并预览内容, 再确认替换数据. 同一实例恢复保留当前管理员密码和公网设置. 恢复后自动签到、采集、通知和备份均停用, 核对后可重新启用.';
+    if (!state.localMode && !password && !policy.passkey_available) message('此入口没有可用的 Passkey. 请通过 SSH 恢复管理入口.', true);
+    else if (!state.localMode && !password && !window.CheckinPasskeys?.supported()) message('当前浏览器不支持 Passkey, 请使用支持 WebAuthn 的浏览器.', true);
   }
   function message(text, error = false) {
     $('backup-message').textContent = text;
@@ -40,7 +45,7 @@
     if (options.body !== undefined && !form) headers['Content-Type'] = 'application/json';
     if (options.method && options.method !== 'GET' && path !== '/api/login') headers['X-CSRF-Token'] = state.csrf;
     const response = await fetch(path, { ...options, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error', body: options.body === undefined || form ? options.body : JSON.stringify(options.body) });
-    if (response.status === 401) {
+    if (response.status === 401 && !state.localMode) {
       state.config = null; state.ticket = null;
       $('backup-workspace').hidden = true; $('backup-login').hidden = false;
     }
@@ -147,7 +152,7 @@
       if (state.reauthMethod === 'passkey') {
         try { body.reauth_token = await window.CheckinPasskeys.reauth(api); }
         catch (error) { error.status ||= 400; throw error; }
-      } else body.admin_password = $('restore-admin-password').value;
+      } else if (state.reauthMethod === 'password') body.admin_password = $('restore-admin-password').value;
       await api('/api/backups/restore', { method: 'POST', body });
       $('restore-admin-password').value = ''; state.ticket = null; state.dirty = false;
       window.location.assign('/backups?restored=1');
@@ -159,6 +164,9 @@
     $('backup-login').hidden = session.authenticated; $('backup-workspace').hidden = !session.authenticated;
     loginPolicy(session);
     if (session.authenticated) await load();
-    if (new URLSearchParams(location.search).has('restored')) $('backup-login-message').textContent = '恢复完成, 自动任务已停用. 请使用当前管理认证方式重新登录并核对配置.';
+    if (new URLSearchParams(location.search).has('restored')) {
+      if (state.localMode) message('恢复完成, 自动任务已停用. 本地版无需重新登录, 请核对配置后再启用任务.');
+      else $('backup-login-message').textContent = '恢复完成, 自动任务已停用. 请使用当前管理认证方式重新登录并核对配置.';
+    }
   });
 })();

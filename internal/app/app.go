@@ -36,6 +36,7 @@ type Options struct {
 	DisableScheduler bool
 	Shutdown         func()
 	DesktopIdentity  http.Handler
+	LocalMode        bool
 }
 type restoreContext struct {
 	password, binding string
@@ -69,6 +70,9 @@ type App struct {
 }
 
 func New(ctx context.Context, options Options) (*App, error) {
+	if options.LocalMode && (options.Launch.PublicURL != "" || options.Launch.TrustedProxyIPs != "" || (options.Launch.Host != "" && options.Launch.Host != "127.0.0.1" && options.Launch.Host != "::1")) {
+		return nil, errors.New("本地免认证模式不能使用公网监听或反向代理")
+	}
 	if e := platform.PrivateDir(options.DataDir); e != nil {
 		return nil, e
 	}
@@ -109,7 +113,7 @@ func New(ctx context.Context, options Options) (*App, error) {
 			return fail(e)
 		}
 	}
-	if configured > 0 || options.Password != "" {
+	if options.LocalMode || configured > 0 || options.Password != "" {
 		if e = a.initializeAuth(options.Password); e != nil {
 			return fail(e)
 		}
@@ -153,7 +157,7 @@ func (a *App) Close() error {
 }
 
 func (a *App) initializeAuth(password string) error {
-	s, e := auth.New(a.Store.DB, auth.Options{Password: password, PublicOrigin: a.opts.Launch.PublicURL, TrustedProxyIPs: splitPeers(a.opts.Launch.TrustedProxyIPs), Maintenance: a.maintenance.Load, SecurityBusy: a.backupBusy.Load})
+	s, e := auth.New(a.Store.DB, auth.Options{Password: password, LocalMode: a.opts.LocalMode, PublicOrigin: a.opts.Launch.PublicURL, TrustedProxyIPs: splitPeers(a.opts.Launch.TrustedProxyIPs), Maintenance: a.maintenance.Load, SecurityBusy: a.backupBusy.Load})
 	if e != nil {
 		return e
 	}

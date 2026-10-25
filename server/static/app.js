@@ -58,8 +58,9 @@
       try { payload = await response.json(); }
       catch (_) { throw new ApiError('服务返回了无法读取的响应. 请重新读取状态确认结果.', response.status); }
       if (!response.ok) {
-        const message = typeof payload.error === 'string' ? payload.error : `请求失败, HTTP ${response.status}.`;
-        if (response.status === 401 && path !== '/api/login' && !path.startsWith('/api/passkey/login/')) { showLogin('登录已失效. 请重新登录.'); refreshLoginPolicy(); }
+        let message = typeof payload.error === 'string' ? payload.error : `请求失败, HTTP ${response.status}.`;
+        if (response.status === 401 && path !== '/api/login' && !path.startsWith('/api/passkey/login/')) { showLogin(state.authPolicy.local_mode ? '本地服务暂时不可用. 请重新读取状态.' : '登录已失效. 请重新登录.'); refreshLoginPolicy(); }
+        else if (response.status === 403 && state.authPolicy.local_mode && path !== '/api/session') { message = '本地页面状态已更新. 请重新读取后再操作.'; refreshLoginPolicy(); }
         throw new ApiError(message, response.status);
       }
       return payload;
@@ -160,6 +161,10 @@
 
   function renderLoginPolicy(session = state.authPolicy) {
     state.authPolicy = { ...state.authPolicy, ...(session || {}) };
+    state.authPolicy.local_mode = session.local_mode === true;
+    const local = state.authPolicy.local_mode === true;
+    document.querySelectorAll('a[href="/security"]').forEach((item) => { item.hidden = local; });
+    $('logout-button').hidden = local || !state.authenticated;
     state.authPolicy.setup_required = session.setup_required === true;
     const setup = state.authPolicy.setup_required;
     $('login-confirm-controls').hidden = !setup;
@@ -184,11 +189,21 @@
   }
 
   async function refreshLoginPolicy() {
-    try { renderLoginPolicy(await api('/api/session')); }
+    try {
+      const wasLocal = state.authPolicy.local_mode;
+      const session = await api('/api/session'); renderLoginPolicy(session);
+      if (session.local_mode && session.csrf) state.csrf = session.csrf;
+      else if (wasLocal && !session.authenticated) showLogin('此服务需要管理身份验证.');
+    }
     catch (_) { /* Keep the last known mode until the session endpoint is reachable. */ }
   }
 
   function showLogin(message = '') {
+    if (state.authPolicy.local_mode) {
+      $('login-view').hidden = true; $('workspace').hidden = false; $('logout-button').hidden = true;
+      notice(message || '本地服务暂时不可用. 请重新读取状态.', 'error');
+      return;
+    }
     state.authenticated = false;
     state.csrf = '';
     stopPolling();
@@ -208,7 +223,7 @@
     $('login-confirm-password').value = '';
     $('login-view').hidden = true;
     $('workspace').hidden = false;
-    $('logout-button').hidden = false;
+    $('logout-button').hidden = session.local_mode === true;
     renderWorkspaceView();
     if (state.uncertain === 'logout') state.uncertain = null;
     const configTask = state.config && state.dirty ? Promise.resolve(renderForm()) : loadConfig(false);

@@ -3,7 +3,9 @@
 Run this script explicitly from the repository's Python environment. The desktop
 executable must be built with desktop,desktoptest,production; --build creates
 that test executable in a private temporary directory. It never installs an
-autostart entry, sends notifications, or configures a real account.
+autostart entry, sends notifications, or configures a real account. Local owned
+desktops enter directly without an administrator setup or verification request;
+an attached server must keep its existing administrator authentication.
 """
 
 import argparse
@@ -225,6 +227,19 @@ async def connect(playwright, base, debug_port, evidence):
 		if request.url.startswith(('http:', 'https:')) and not request.url.startswith(base + '/')
 		else None,
 	)
+	page.on(
+		'request',
+		lambda request: evidence.setdefault('management_requests', []).append(request.url.removeprefix(base))
+		if request.url.startswith(base + '/api/')
+		else None,
+	)
+	evidence.setdefault('management_requests', []).extend(
+		await page.evaluate(
+			"""origin => performance.getEntriesByType('resource').map(entry => entry.name)
+            .filter(url => url.startsWith(origin + '/api/')).map(url => url.slice(origin.length))""",
+			base,
+		)
+	)
 	return browser, page
 
 
@@ -254,6 +269,19 @@ async def login_page(page, setup=False):
 		await page.locator('#login-confirm-password').fill(PASSWORD)
 	await page.locator('#login-button').click()
 	await expect(page.locator('#workspace')).to_be_visible()
+	await page.wait_for_function('() => window.__checkinDesktopGuard === true')
+
+
+async def local_workspace(page):
+	await expect(page.locator('#workspace')).to_be_visible()
+	await expect(page.locator('#login-view')).to_be_hidden()
+	await expect(page.locator('#logout-button')).to_be_hidden()
+	await expect(page.locator('.workspace-nav a[href="/security"]')).to_be_hidden()
+	policy = await page.evaluate("async () => (await fetch('/api/session')).json()")
+	assert policy['authenticated'] is True and policy['local_mode'] is True
+	assert policy['auth_mode'] == 'local' and policy['reauth_method'] == 'none'
+	assert not policy['password_login_allowed'] and not policy['passkey_available']
+	assert policy['csrf'] and not policy.get('setup_required', False)
 	await page.wait_for_function('() => window.__checkinDesktopGuard === true')
 
 
@@ -289,13 +317,22 @@ async def owned_scenario(playwright, binary, report, processes, root):
 	args = ['app', '--data-dir', str(data), '--port', str(backend_port)]
 	evidence: dict[str, list] = {'page_errors': [], 'console': [], 'external_requests': []}
 	process = processes.start(binary, args, debug_port)
-	await wait_for(lambda: json_get(base + '/healthz').get('setup_required'), 'new product backend')
+	await wait_for(lambda: json_get(base + '/healthz').get('ok'), 'new local product backend')
+	assert not json_get(base + '/healthz').get('setup_required', False), 'local startup requested password setup'
 	await wait_for(lambda: visible_windows(process.pid), 'new native product window')
 	first_instance = instance(data)
 	key_digest = hashlib.sha256((data / 'master.key').read_bytes()).hexdigest()
 	browser, page = await connect(playwright, base, debug_port, evidence)
 	try:
-		await login_page(page, setup=True)
+		await local_workspace(page)
+		await page.goto(base + '/security')
+		await expect(page.locator('#security-login')).to_be_hidden()
+		await expect(page.locator('#security-current-password')).to_be_hidden()
+		await expect(page.locator('#security-register')).to_be_hidden()
+		await expect(page.locator('main')).to_contain_text('本地')
+		await page.screenshot(path=str(report / 'windows-local-security.png'), full_page=True)
+		await page.goto(base + '/')
+		await local_workspace(page)
 		await runtime_panel(page, True)
 		await expect(page.locator('.go-runtime-panel')).to_contain_text('关闭窗口后隐藏到托盘')
 		await page.locator('#runtime-startup-checkin').uncheck()
@@ -345,8 +382,7 @@ async def owned_scenario(playwright, binary, report, processes, root):
 	browser, page = await connect(playwright, base, debug_port, evidence)
 	try:
 		await expect(page).to_have_url(base + '/status')
-		await login_page(page)
-		await expect(page.locator('#workspace')).to_be_visible()
+		await local_workspace(page)
 		assert instance(data) == hidden_instance
 		await inspect(page, report, 'windows-hidden-restored-status')
 		await page.goto(base + '/')
@@ -362,9 +398,16 @@ async def owned_scenario(playwright, binary, report, processes, root):
 	assert_no_runs(data)
 	assert not evidence['page_errors'], evidence['page_errors']
 	assert not evidence['external_requests'], evidence['external_requests']
+	assert not [
+		path
+		for path in evidence['management_requests']
+		if path.startswith(('/api/login', '/api/setup', '/api/passkey/', '/api/security/reauth'))
+	], 'local UI attempted administrator verification'
 	assert_console(evidence)
 	return {
-		'first_setup': True,
+		'first_launch_without_password_setup': True,
+		'no_admin_verification_requests': True,
+		'local_security_controls_hidden': True,
 		'desktop_runtime': True,
 		'close_hides': True,
 		'primary_hidden': True,

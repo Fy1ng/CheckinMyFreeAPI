@@ -207,7 +207,7 @@ func (a *App) backupRestore(w http.ResponseWriter, r *http.Request) error {
 	if e != nil {
 		return e
 	}
-	if len(body) != 3 || text(body["ticket"]) == "" {
+	if text(body["ticket"]) == "" {
 		return bad("恢复字段无效")
 	}
 	if !a.operation.TryLock() {
@@ -230,7 +230,14 @@ func (a *App) backupRestore(w http.ResponseWriter, r *http.Request) error {
 	if security.Session(r) == nil {
 		return &auth.HTTPError{Status: 401, Message: "管理会话已失效, 请重新登录"}
 	}
-	if proof, ok := body["reauth_token"]; ok {
+	localAccess := security.LocalAccess(r)
+	if localAccess {
+		if len(body) != 2 {
+			return bad("本地恢复字段无效")
+		}
+	} else if len(body) != 3 {
+		return bad("恢复字段无效")
+	} else if proof, ok := body["reauth_token"]; ok {
 		if _, e = security.ConsumeReauth(r, text(proof), security.RequirePasskeyReauth(r)); e != nil {
 			return e
 		}
@@ -279,7 +286,7 @@ func (a *App) backupRestore(w http.ResponseWriter, r *http.Request) error {
 	security.Invalidate()
 	a.previews = map[string]restoreContext{}
 	a.Jobs.Notify()
-	writeJSON(w, 200, Document{"restored": true, "authenticated": false, "automatic_tasks_disabled": true})
+	writeJSON(w, 200, Document{"restored": true, "authenticated": localAccess, "automatic_tasks_disabled": true})
 	return nil
 }
 

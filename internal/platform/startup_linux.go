@@ -13,6 +13,9 @@ import (
 )
 
 func unit(c Launch, system bool) (string, error) {
+	if e := c.Validate(); e != nil {
+		return "", e
+	}
 	text, e := SystemdUnit(c.Executable, c.DataDir, c.KeyFile, c.Host, c.Port)
 	if e != nil {
 		return "", e
@@ -26,6 +29,9 @@ func unit(c Launch, system bool) (string, error) {
 		}
 	}
 	extra := ""
+	if c.LocalMode {
+		extra += " --local"
+	}
 	if c.PublicURL != "" {
 		extra += " --public-url " + quote(c.PublicURL)
 	}

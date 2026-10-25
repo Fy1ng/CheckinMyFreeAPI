@@ -14,6 +14,16 @@
 
   function renderLogin() {
     const policy = state.policy;
+    const local = policy.local_mode === true;
+    $('security-local').hidden = !local;
+    document.querySelectorAll('a[href="/security"]').forEach((item) => { item.hidden = local; });
+    if (local) {
+      $('security-login').hidden = true; $('security-workspace').hidden = true; $('security-logout').hidden = true;
+      document.title = '本地管理 | NewAPI';
+      document.querySelector('.brand-caption').textContent = '本地应用';
+      document.querySelector('footer span').textContent = '本机控制台直接访问, 无需管理身份验证.';
+      return;
+    }
     const password = policy.password_login_allowed ?? (policy.auth_mode !== 'passkey' || policy.reauth_method === 'password');
     $('security-login').hidden = state.authenticated;
     $('security-workspace').hidden = !state.authenticated;
@@ -30,6 +40,7 @@
   }
 
   function controls() {
+    if (state.policy.local_mode) { renderLogin(); return; }
     const info = state.security;
     const blocked = state.busy || state.uncertain || !info;
     $('security-register-form').inert = state.busy;
@@ -108,6 +119,7 @@
   }
 
   async function load() {
+    if (state.policy.local_mode) { state.security = null; renderLogin(); return; }
     const result = await api('/api/security');
     if (!Array.isArray(result.passkeys)) throw new Error('安全状态格式无效, 请重新读取.');
     state.security = result; state.uncertain = false;

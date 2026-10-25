@@ -4,6 +4,8 @@ Run this file explicitly, never against a user's desktop. It only creates local
 empty application data. No account, notification, real browser profile, autostart
 item or production server is used. GTK window close is sent as WM_DELETE_WINDOW;
 tray actions use the application's real exported DBusMenu interface.
+Owned local desktops need no administrator password file or verification;
+attaching to an independent server must preserve its existing authentication.
 """
 
 import argparse
@@ -180,8 +182,6 @@ class Scenario:
 		self.data = Path(self.temp.name) / 'data'
 		self.data.mkdir(mode=0o700)
 		self.password_file = self.data / 'admin-password.txt'
-		self.password_file.write_text(PASSWORD, encoding='utf-8')
-		self.password_file.chmod(0o600)
 		self.port = free_port()
 		self.base = f'http://localhost:{self.port}'
 		self.processes, self.logs = [], []
@@ -212,9 +212,11 @@ class Scenario:
 			str(self.data),
 			'--port',
 			str(self.port),
-			'--password-file',
-			str(self.password_file),
 		]
+		if mode == 'serve':
+			self.password_file.write_text(PASSWORD, encoding='utf-8')
+			self.password_file.chmod(0o600)
+			args.extend(['--password-file', str(self.password_file)])
 		if hidden:
 			args.append('--hidden')
 		environment = dict(os.environ)
@@ -240,6 +242,19 @@ class Scenario:
 	def healthy(self):
 		return self.api('/healthz').get('runtime') == 'go'
 
+	def authenticate(self, local_expected):
+		policy = self.api('/api/session')
+		if local_expected:
+			assert policy['authenticated'] is True and policy['local_mode'] is True
+			assert policy['auth_mode'] == 'local' and policy['reauth_method'] == 'none'
+			assert not policy.get('setup_required', False)
+			assert not policy['password_login_allowed'] and not policy['passkey_available']
+			self.csrf = policy['csrf']
+			assert not self.password_file.exists(), 'local desktop needed an initial password file'
+		else:
+			assert not policy['authenticated'] and not policy.get('local_mode', False)
+			self.csrf = self.api('/api/login', {'password': PASSWORD})['csrf']
+
 	def instance(self):
 		return json.loads((self.data / 'desktop-control.json').read_text(encoding='utf-8'))['instance']
 
@@ -252,7 +267,10 @@ class Scenario:
 		return capture_xwd(self.xwd, self.report / f'{self.label}-{state}.png')
 
 	def stop_backend(self):
-		self.csrf = self.api('/api/login', {'password': PASSWORD})['csrf']
+		policy = self.api('/api/session')
+		self.csrf = (
+			policy['csrf'] if policy.get('local_mode') else self.api('/api/login', {'password': PASSWORD})['csrf']
+		)
 		self.api('/api/runtime/shutdown', {})
 
 	def close(self):
@@ -278,6 +296,7 @@ def check_lifecycle(binary, report, xwd, hidden):
 	try:
 		primary = scenario.start(hidden=hidden)
 		wait_for(scenario.healthy, 'native desktop backend')
+		scenario.authenticate(local_expected=True)
 		original = scenario.instance()
 		if hidden:
 			time.sleep(1)
@@ -304,6 +323,7 @@ def check_lifecycle(binary, report, xwd, hidden):
 		assert primary.wait(timeout=15) == 0, 'real tray exit did not stop the desktop cleanly'
 		scenario.no_runs()
 		return {
+			'local_without_password_or_passkey': True,
 			'hidden_start': hidden,
 			'reactivated_primary': True,
 			'same_backend_instance': True,
@@ -320,6 +340,7 @@ def check_attachment(binary, report, xwd):
 	try:
 		server = scenario.start(mode='serve')
 		wait_for(scenario.healthy, 'headless native server')
+		scenario.authenticate(local_expected=False)
 		original = scenario.instance()
 		gui = scenario.start()
 		wait_for(lambda: visible_windows(gui.pid), 'attached desktop window')
@@ -332,6 +353,7 @@ def check_attachment(binary, report, xwd):
 		scenario.stop_backend()
 		assert server.wait(timeout=15) == 0
 		return {
+			'headless_kept_authentication': True,
 			'attached_existing_backend': True,
 			'same_backend_instance': True,
 			'tray_exit_kept_server': True,

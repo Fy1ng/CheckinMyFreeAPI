@@ -35,8 +35,11 @@ type Options struct {
 	Password        string
 	PublicOrigin    string
 	TrustedProxyIPs []string
-	Maintenance     func() bool
-	SecurityBusy    func() bool
+	// LocalMode is selected by the native application's startup policy, never by
+	// a request header. It removes management identity prompts on direct loopback.
+	LocalMode    bool
+	Maintenance  func() bool
+	SecurityBusy func() bool
 }
 
 type Session struct {
@@ -69,14 +72,28 @@ type Service struct {
 	passkeyAttempts  map[string][]time.Time
 	passwordBusy     chan struct{}
 	salt, digest     []byte
+	localToken       []byte
 }
 
 func New(db *sql.DB, opts Options) (*Service, error) {
+	if opts.LocalMode && (opts.PublicOrigin != "" || len(opts.TrustedProxyIPs) > 0) {
+		return nil, errors.New("本地免认证模式不能配置公网入口或可信代理")
+	}
 	a, err := NewAccess(opts.PublicOrigin, opts.TrustedProxyIPs)
 	if err != nil {
 		return nil, err
 	}
-	if err = initialize(db, opts.Password); err != nil {
+	password := opts.Password
+	if opts.LocalMode {
+		// Keep the established backup schema without introducing a usable local
+		// management password. initialize preserves every existing auth row.
+		placeholder := make([]byte, 48)
+		if _, err = rand.Read(placeholder); err != nil {
+			return nil, err
+		}
+		password = base64.RawURLEncoding.EncodeToString(placeholder)
+	}
+	if err = initialize(db, password); err != nil {
 		return nil, err
 	}
 	if _, err = readPolicy(db); err != nil {
@@ -84,6 +101,12 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 	}
 	opts.Password = ""
 	s := &Service{db: db, Access: a, opts: opts, sessions: map[string]Session{}, pending: map[string]ceremony{}, proofs: map[string]proofRecord{}, passwordAttempts: map[string][]time.Time{}, passkeyAttempts: map[string][]time.Time{}, passwordBusy: make(chan struct{}, 1)}
+	if opts.LocalMode {
+		s.localToken = make([]byte, 32)
+		if _, err = rand.Read(s.localToken); err != nil {
+			return nil, err
+		}
+	}
 	if err = db.QueryRow("SELECT salt,digest FROM web_auth WHERE id=1").Scan(&s.salt, &s.digest); err != nil {
 		return nil, err
 	}
@@ -113,6 +136,9 @@ func (s *Service) Session(r *http.Request) *Session {
 	if err != nil {
 		return nil
 	}
+	if s.opts.LocalMode {
+		return s.localSession(r, origin)
+	}
 	p, err := readPolicy(s.db)
 	if err != nil {
 		return nil
@@ -140,6 +166,12 @@ func (s *Service) Invalidate() {
 	s.sessions = map[string]Session{}
 	s.pending = map[string]ceremony{}
 	s.proofs = map[string]proofRecord{}
+	if s.opts.LocalMode {
+		// Derive a new generation from the unpredictable per-process key. Local
+		// session invalidation never needs to persist or reveal a capability.
+		next := sha256.Sum256(append(s.localToken, []byte("\x00invalidate")...))
+		s.localToken = next[:]
+	}
 }
 
 // Exclusive waits for any in-flight credential mutation. Backup/restore callers
@@ -162,6 +194,12 @@ func (s *Service) capabilities(r *http.Request) (map[string]any, error) {
 	origin, err := s.Origin(r)
 	if err != nil {
 		return nil, err
+	}
+	if s.opts.LocalMode {
+		if !s.LocalAccess(r) {
+			return nil, failure(403, "本地免认证模式仅允许直接本机访问")
+		}
+		return localCapabilities(), nil
 	}
 	p, err := readPolicy(s.db)
 	if err != nil {
@@ -216,6 +254,16 @@ func (s *Service) Guard(next http.Handler) http.Handler {
 		if err != nil {
 			WriteError(w, err)
 			return
+		}
+		if s.opts.LocalMode {
+			if !s.LocalAccess(r) {
+				WriteError(w, failure(403, "本地免认证模式仅允许直接本机访问"))
+				return
+			}
+			if localIdentityPath(r.URL.Path) && (r.Method != "GET" || r.URL.Path != "/api/security") {
+				WriteError(w, failure(403, "本地版无需登录验证, 此认证操作已停用"))
+				return
+			}
 		}
 		if origin == s.Access.PublicOrigin {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
@@ -432,6 +480,9 @@ func (s *Service) verifyPassword(r *http.Request, password string) error {
 }
 
 func (s *Service) Reauthenticate(r *http.Request, password string) error {
+	if s.opts.LocalMode {
+		return failure(403, "本地版无需管理员身份重验")
+	}
 	before, err := readPolicy(s.db)
 	if err != nil {
 		return err
@@ -492,6 +543,23 @@ func (s *Service) logout(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (s *Service) securityStatus(w http.ResponseWriter, r *http.Request) error {
+	if s.opts.LocalMode {
+		if !s.LocalAccess(r) {
+			return failure(403, "本地免认证模式仅允许直接本机访问")
+		}
+		result := localCapabilities()
+		result["mode"] = "local"
+		result["passkeys"] = []any{}
+		result["can_register"] = false
+		result["private_recovery_access"] = true
+		if p, err := readPolicy(s.db); err == nil {
+			result["revision"] = p.Revision
+		} else {
+			return err
+		}
+		writeJSON(w, 200, result)
+		return nil
+	}
 	origin, err := s.Origin(r)
 	if err != nil {
 		return err

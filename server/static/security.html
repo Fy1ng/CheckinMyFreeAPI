@@ -22,6 +22,11 @@
           <p id="security-login-message" class="inline-message" role="status" aria-live="polite">正在检查登录状态...</p>
         </form>
       </section>
+      <section id="security-local" hidden>
+        <nav class="workspace-nav" aria-label="控制台页面"><a href="/status">Status</a><a href="/">管理面板</a><a href="/backups">备份与恢复</a></nav>
+        <section class="page-heading"><div><p class="eyebrow">LOCAL APPLICATION</p><h1>本地管理</h1><p class="muted">本地版直接进入控制台, 无需管理密码或 Passkey.</p></div><a class="button secondary" href="/">打开管理面板</a></section>
+        <p class="hint-box">账号凭据和备份仍加密保存. 站点账号核验与加密备份的恢复密码继续用于对应操作.</p>
+      </section>
       <div id="security-workspace" hidden>
         <nav class="workspace-nav" aria-label="控制台页面"><a href="/status">Status</a><a href="/">管理面板</a><a href="/backups">备份与恢复</a><a href="/security" aria-current="page">登录与安全</a></nav>
         <section class="page-heading"><div><p class="eyebrow">LOGIN AND SECURITY</p><h1>登录与安全</h1><p class="muted">先绑定并验证密钥, 再选择适合你的登录模式.</p></div><button id="security-reload" class="button quiet" type="button">重新读取</button></section>
