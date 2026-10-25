@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sqlite3
 import time
@@ -13,6 +14,8 @@ from pathlib import Path
 
 from aiohttp import web
 
+from server.backup import MAX_BACKUP_BYTES, BackupError
+from server.backup_runtime import BackupRuntime
 from server.config_store import ConfigError, ConfigStore, ConflictError
 from server.jobs import BusyError, JobManager, acquire_file_lock
 from server.web_access import WebAccess
@@ -31,6 +34,10 @@ class WebService:
 		scheduler: bool = True,
 		access: WebAccess | None = None,
 	):
+		self.data_dir, self.key = data_dir, key
+		self.maintenance = False
+		self.backup_operation = asyncio.Lock()
+		self.restore_context: dict[str, dict] = {}
 		self.access = access or WebAccess()
 		lease = acquire_file_lock(data_dir / 'service.lock')
 		try:
@@ -61,6 +68,7 @@ class WebService:
 		self.client_attempts: dict[str, list[float]] = {}
 		self._login_busy = False
 		self.scheduler_enabled = scheduler
+		self.backups = BackupRuntime(self.store, data_dir, key, self.jobs)
 
 	def session(self, request: web.Request) -> dict | None:
 		token = request.cookies.get('checkin_web_session', '')
@@ -74,6 +82,10 @@ class WebService:
 	@web.middleware
 	async def guard(self, request: web.Request, handler):
 		try:
+			if self.maintenance:
+				return web.json_response(
+					{'error': '正在恢复数据, 请稍后重新登录'}, status=503, headers={'Retry-After': '5'}
+				)
 			origin = self.access.origin(request)
 			request[WEB_ORIGIN] = origin
 			mutating = request.method not in {'GET', 'HEAD', 'OPTIONS'}
@@ -82,7 +94,17 @@ class WebService:
 				if request.headers.get('Origin') != origin:
 					raise web.HTTPForbidden(text='请求来源不匹配')
 			session = self.session(request)
-			public = request.path in {'/', '/status', '/app.js', '/style.css', '/api/login', '/api/session', '/healthz'}
+			public = request.path in {
+				'/',
+				'/status',
+				'/backups',
+				'/app.js',
+				'/backups.js',
+				'/style.css',
+				'/api/login',
+				'/api/session',
+				'/healthz',
+			}
 			if not public and session is None:
 				return web.json_response({'error': '请先登录'}, status=401)
 			if mutating and request.path != '/api/login':
@@ -201,6 +223,8 @@ class WebService:
 		return web.json_response(result)
 
 	async def save_config(self, request):
+		if self.backup_operation.locked():
+			raise BusyError('请等待备份操作结束后保存配置')
 		body = await request.json()
 		if (
 			not isinstance(body, dict)
@@ -210,6 +234,7 @@ class WebService:
 			raise ValueError
 		result = self.store.save(body['config'], body['revision'])
 		self.jobs.schedule_changed()
+		self.backups.schedule_changed()
 		return web.json_response(result)
 
 	async def start_run(self, request):
@@ -248,6 +273,194 @@ class WebService:
 	async def balances(self, request):
 		return web.json_response(self.jobs.balance_snapshot())
 
+	async def automation(self, request):
+		return web.json_response(self.jobs.automation_snapshot())
+
+	async def send_summary(self, request):
+		body = await request.json()
+		if (
+			not isinstance(body, dict)
+			or set(body) != {'revision'}
+			or type(body.get('revision')) is not int
+			or body['revision'] < 0
+		):
+			raise ValueError
+		return web.json_response({'run': await self.jobs.start_summary(body['revision'])}, status=202)
+
+	async def backup_status(self, request):
+		if self.backup_operation.locked():
+			raise BusyError('备份操作正在处理中, 请稍后重新读取')
+		return web.json_response(self.backups.status())
+
+	async def create_backup(self, request):
+		body = await request.json()
+		if not isinstance(body, dict) or set(body) != {'revision'} or type(body.get('revision')) is not int:
+			raise ValueError
+		if self.backup_operation.locked():
+			raise BusyError('已有备份操作正在处理')
+		async with self.backup_operation:
+			return web.json_response({'backup': await self.backups.create(body['revision'])}, status=201)
+
+	async def download_backup(self, request):
+		path = self.backups.manager.read(request.match_info['backup_id'])
+		return web.FileResponse(
+			path,
+			headers={
+				'Content-Type': 'application/octet-stream',
+				'Content-Disposition': 'attachment; filename="' + path.name + '"',
+			},
+		)
+
+	async def preview_backup(self, request):
+		if self.backup_operation.locked() or self.jobs.active_id is not None or self.jobs._lock.locked():
+			raise BusyError('请等待当前任务结束后再预览恢复')
+		async with self.backup_operation, self.jobs._lock:
+			reader = await request.clone(client_max_size=MAX_BACKUP_BYTES + 8192).multipart()
+			fields: dict[str, bytes] = {}
+			async for part in reader:
+				if part.name not in {'revision', 'password', 'file'} or part.name in fields:
+					raise BackupError('恢复上传字段无效')
+				limit = MAX_BACKUP_BYTES if part.name == 'file' else 4096
+				value = bytearray()
+				while chunk := await part.read_chunk(65536):
+					value.extend(chunk)
+					if len(value) > limit:
+						raise BackupError('备份文件或字段超出大小限制')
+				fields[part.name] = bytes(value)
+			if set(fields) != {'revision', 'password', 'file'}:
+				raise BackupError('请提供备份文件和恢复密码')
+			try:
+				revision = int(fields['revision'].decode('ascii'))
+				password = fields['password'].decode('utf-8')
+			except (ValueError, UnicodeError):
+				raise BackupError('恢复上传字段无效') from None
+			operation = asyncio.create_task(
+				asyncio.to_thread(self.backups.manager.preview, fields['file'], password, revision)
+			)
+			try:
+				preview = await asyncio.shield(operation)
+			except asyncio.CancelledError:
+				await operation
+				raise
+			self.restore_context = {
+				key: context for key, context in self.restore_context.items() if context['expires'] > time.monotonic()
+			}
+			self.restore_context[preview['ticket']] = {'password': password, 'expires': time.monotonic() + 600}
+			return web.json_response(preview)
+
+	async def reauthenticate(self, request, password: object) -> None:
+		if not isinstance(password, str) or not 1 <= len(password) <= 512:
+			raise BackupError('当前管理员密码错误')
+		now = time.monotonic()
+		self.attempts = [value for value in self.attempts if now - value < 60]
+		ip = self.access.client_ip(request)
+		attempts = [value for value in self.client_attempts.get(ip, []) if now - value < 60]
+		if self._login_busy or len(self.attempts) >= 30 or len(attempts) >= 5:
+			raise web.HTTPTooManyRequests(
+				text=json.dumps({'error': '验证次数过多, 请在 60 秒后重试'}),
+				content_type='application/json',
+				headers={'Retry-After': '60'},
+			)
+		self.attempts.append(now)
+		self.client_attempts[ip] = [*attempts, now]
+		self._login_busy = True
+		verification = asyncio.create_task(
+			asyncio.to_thread(hashlib.scrypt, password.encode(), salt=self.salt, n=16384, r=8, p=1)
+		)
+		verification.add_done_callback(self.password_check_finished)
+		digest = await asyncio.shield(verification)
+		if not hmac.compare_digest(digest, self.digest):
+			raise BackupError('当前管理员密码错误, 未替换数据')
+
+	async def restore_backup(self, request):
+		body = await request.json()
+		if (
+			not isinstance(body, dict)
+			or set(body) != {'revision', 'ticket', 'admin_password'}
+			or type(body.get('revision')) is not int
+			or not isinstance(body.get('ticket'), str)
+		):
+			raise ValueError
+		if self.backup_operation.locked() or self.jobs.active_id is not None or self.jobs._lock.locked():
+			raise BusyError('请等待当前任务结束后再恢复')
+		await self.reauthenticate(request, body['admin_password'])
+		context = self.restore_context.pop(body['ticket'], None)
+		if context is None or context['expires'] <= time.monotonic():
+			raise BackupError('恢复预览已失效, 请重新上传并预览')
+		async with self.backup_operation, self.jobs._lock:
+			if self.jobs.active_id is not None:
+				raise BusyError('请等待当前任务结束后再恢复')
+			config, revision = self.store.load()
+			if revision != body['revision']:
+				raise ConflictError('配置已更新, 请重新预览恢复')
+			# A pre-restore snapshot is independently encrypted and remains downloadable.
+			password = config['backups']['password'] or context['password']
+
+			async def commit_restore():
+				staged = await asyncio.to_thread(self.backups.manager.prepare_restore, body['ticket'], revision)
+				try:
+					before = await asyncio.to_thread(
+						self.backups.manager.create, password, config['backups']['retain_count']
+					)
+					await self.install_restore(staged)
+					return before
+				finally:
+					staged.unlink(missing_ok=True)
+
+			operation = asyncio.create_task(commit_restore(), name='restore-database')
+			try:
+				before = await asyncio.shield(operation)
+			except asyncio.CancelledError:
+				await operation
+				raise
+		return web.json_response({'restored': True, 'before_backup': before['id'], 'automatic_tasks_disabled': True})
+
+	async def install_restore(self, staged: Path) -> None:
+		self.maintenance = True
+		original = self.data_dir / ('.restore-rollback-' + secrets.token_hex(16) + '.sqlite3')
+		lease = self.jobs._instance_lock
+		self.jobs._instance_lock = None
+		installed = False
+		moved_original = False
+		try:
+			await self.backups.close()
+			await self.jobs.close()
+			self.store.close()
+			self.db.close()
+			os.replace(self.data_dir / 'webui.sqlite3', original)
+			moved_original = True
+			os.replace(staged, self.data_dir / 'webui.sqlite3')
+			await self.open_restored(lease)
+			installed = True
+		except BaseException:
+			# Close partial replacement connections before rolling back, including on Windows.
+			await self.backups.close()
+			self.jobs._instance_lock = None
+			await self.jobs.close()
+			self.store.close()
+			self.db.close()
+			if moved_original:
+				os.replace(original, self.data_dir / 'webui.sqlite3')
+			await self.open_restored(lease)
+			raise BackupError('恢复失败, 已恢复替换前的数据') from None
+		finally:
+			if installed:
+				original.unlink(missing_ok=True)
+			self.sessions.clear()
+			self.restore_context.clear()
+			self.maintenance = False
+
+	async def open_restored(self, lease) -> None:
+		self.store = ConfigStore(self.data_dir / 'webui.sqlite3', self.key)
+		self.store.load()
+		self.jobs = JobManager(self.store, self.data_dir, self.key, instance_lock=lease)
+		self.db = sqlite3.connect(self.data_dir / 'webui.sqlite3')
+		self.salt, self.digest = self.db.execute('SELECT salt,digest FROM web_auth WHERE id=1').fetchone()
+		self.backups = BackupRuntime(self.store, self.data_dir, self.key, self.jobs)
+		if self.scheduler_enabled:
+			await self.jobs.open()
+			await self.backups.open()
+
 	async def refresh_balances(self, request):
 		body = await request.json()
 		if (
@@ -270,7 +483,13 @@ class WebService:
 		return web.json_response({'runs': self.jobs.history()})
 
 	async def static(self, request):
-		name = 'index.html' if request.path in {'/', '/status'} else request.path.lstrip('/')
+		name = (
+			'index.html'
+			if request.path in {'/', '/status'}
+			else 'backups.html'
+			if request.path == '/backups'
+			else request.path.lstrip('/')
+		)
 		return web.FileResponse(STATIC_ROOT / name)
 
 	async def health(self, request):
@@ -279,11 +498,13 @@ class WebService:
 	async def lifecycle(self, app):
 		if self.scheduler_enabled:
 			await self.jobs.open()
+			await self.backups.open()
 		try:
 			yield
 		finally:
 			for token in tuple(self.sessions):
 				await self.revoke(token)
+			await self.backups.close()
 			await self.jobs.close()
 			self.store.close()
 			self.db.close()
@@ -309,7 +530,7 @@ def create_app(
 	app.on_response_prepare.append(service.headers)
 	app.cleanup_ctx.append(service.lifecycle)
 	app.router.add_get('/healthz', service.health)
-	for path in ('/', '/status', '/app.js', '/style.css'):
+	for path in ('/', '/status', '/backups', '/app.js', '/backups.js', '/style.css'):
 		app.router.add_get(path, service.static)
 	app.router.add_get('/api/session', service.session_status)
 	app.router.add_post('/api/login', service.login)
@@ -318,6 +539,13 @@ def create_app(
 	app.router.add_put('/api/config', service.save_config)
 	app.router.add_get('/api/status', service.status)
 	app.router.add_get('/api/balances', service.balances)
+	app.router.add_get('/api/automation', service.automation)
+	app.router.add_post('/api/automation/summary', service.send_summary)
+	app.router.add_get('/api/backups', service.backup_status)
+	app.router.add_post('/api/backups', service.create_backup)
+	app.router.add_post('/api/backups/preview', service.preview_backup)
+	app.router.add_post('/api/backups/restore', service.restore_backup)
+	app.router.add_get('/api/backups/{backup_id}', service.download_backup)
 	app.router.add_post('/api/balances/refresh', service.refresh_balances)
 	app.router.add_get('/api/runs', service.runs)
 	app.router.add_post('/api/runs', service.start_run)

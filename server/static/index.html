@@ -27,7 +27,7 @@
       </section>
 
       <div id="workspace" hidden>
-        <nav class="workspace-nav" aria-label="控制台页面"><a href="/status" data-view="status">Status</a><a href="/" data-view="manage" aria-current="page">管理面板</a></nav>
+        <nav class="workspace-nav" aria-label="控制台页面"><a href="/status" data-view="status">Status</a><a href="/" data-view="manage" aria-current="page">管理面板</a><a href="/backups">备份与恢复</a></nav>
         <section class="page-heading"><div><p class="eyebrow" id="page-eyebrow">OVERVIEW</p><h1 id="page-title">签到控制台</h1><p class="muted" id="page-description">先保存配置, 再执行签到. 任务与配置分别管理.</p></div><span id="connection-status" class="connection-state">连接中</span></section>
         <div id="global-message" class="notice" role="status" aria-live="polite" hidden></div>
 
@@ -38,6 +38,7 @@
           <div id="balance-summary" class="balance-summary" aria-label="余额汇总"><p class="muted">正在读取余额...</p></div>
           <section class="balance-panel" aria-labelledby="balance-accounts-title"><div class="panel-title"><h2 id="balance-accounts-title">账户余额</h2><span id="balance-day" class="muted small"></span></div><div id="balance-accounts" class="balance-accounts"><p class="muted small">尚未读取账户状态.</p></div></section>
           <section class="balance-panel" aria-labelledby="balance-history-title"><div class="panel-title"><h2 id="balance-history-title">最近 30 天</h2><span class="muted small">每日最后已知余额</span></div><p class="muted small">账户覆盖和更新时间可能不同. 缺少数据的日期保留空白, 历史从启用采集后积累.</p><div id="balance-chart" class="balance-chart"></div><details id="balance-history-details" class="balance-history-details"><summary>查看每日数据</summary><div class="balance-table-wrap"><table class="balance-table"><caption class="sr-only">最近 30 天余额和每日变化</caption><thead><tr><th scope="col">日期, UTC+8</th><th scope="col">余额</th><th scope="col">新增</th><th scope="col">净变化</th><th scope="col">余额覆盖</th></tr></thead><tbody id="balance-history"></tbody></table></div></details></section>
+          <section class="balance-panel" aria-labelledby="automation-title"><div class="panel-title"><h2 id="automation-title">自动提醒</h2><button type="button" class="button secondary" data-send-summary disabled>发送今日日报</button></div><p class="muted small">日报读取已有数据, 并通过已配置的通知渠道发送. 服务端接收不代表手机已送达.</p><p id="daily-summary-status" class="muted small"></p><div id="automation-error" class="load-error" role="status" hidden><span></span><button id="retry-automation" class="text-button" type="button">重新读取通知状态</button></div><div id="automation-events" class="automation-events"><p class="muted small">尚无通知记录.</p></div></section>
         </section>
 
         <div id="management-view">

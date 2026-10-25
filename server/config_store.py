@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import ipaddress
 import json
+import math
 import os
 import re
 import sqlite3
@@ -19,6 +20,7 @@ from urllib.parse import urlsplit
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from utils.cron_schedule import CronSchedule, next_daily_time
 from utils.fy1push import fy1push_channel, fy1push_endpoint, validate_fy1push_token
 from utils.proxy_validation import valid_socks5_credentials
 
@@ -67,7 +69,18 @@ SECRET_NOTIFICATION_ENV_NAMES = frozenset(
 	}
 )
 _TOP_LEVEL_FIELDS = frozenset(
-	{'schema_version', 'accounts', 'proxy_url', 'notifications', 'schedule', 'monitoring', 'http', 'webui_url'}
+	{
+		'schema_version',
+		'accounts',
+		'proxy_url',
+		'notifications',
+		'schedule',
+		'monitoring',
+		'automation',
+		'backups',
+		'http',
+		'webui_url',
+	}
 )
 _ACCOUNT_FIELDS = frozenset(
 	{
@@ -83,6 +96,7 @@ _ACCOUNT_FIELDS = frozenset(
 		'api_user',
 		'expected_username',
 		'proxy',
+		'low_balance_threshold',
 	}
 )
 _ACCOUNT_SECRETS = ('password', 'cookies', 'system_access_token')
@@ -106,8 +120,14 @@ def default_config() -> dict:
 		'accounts': [],
 		'proxy_url': '',
 		'notifications': {},
-		'schedule': {'enabled': False, 'interval_minutes': 360},
+		'schedule': {'enabled': False, 'mode': 'interval', 'interval_minutes': 360, 'cron': '0 8 * * *'},
 		'monitoring': {'enabled': True, 'interval_minutes': 60},
+		'automation': {
+			'low_balance': {'enabled': False, 'threshold': 1, 'cooldown_minutes': 360},
+			'recovery': {'enabled': False, 'cooldown_minutes': 60},
+			'daily_summary': {'enabled': False, 'time': '23:55'},
+		},
+		'backups': {'enabled': False, 'time': '03:00', 'retain_count': 7, 'password': str()},
 		'http': {'timeout_seconds': 30},
 		'webui_url': '',
 	}
@@ -147,6 +167,17 @@ def _boolean(value, label: str) -> bool:
 def _integer(value, label: str, lower: int, upper: int) -> int:
 	if type(value) is not int or not lower <= value <= upper:
 		raise ConfigError(f'{label} must be an integer between {lower} and {upper}')
+	return value
+
+
+def _threshold(value, label: str):
+	if (
+		isinstance(value, bool)
+		or not isinstance(value, (int, float))
+		or not math.isfinite(value)
+		or not 0 <= value <= 1e12
+	):
+		raise ConfigError(f'{label} must be a finite amount between 0 and 1000000000000')
 	return value
 
 
@@ -312,6 +343,8 @@ def _validate_accounts(value, proxy_url: str) -> list:
 		if not isinstance(auth_type, str) or auth_type not in allowed:
 			raise ConfigError('Account authentication is not supported by this provider')
 		account['enabled'] = _boolean(account.get('enabled', True), 'Account enabled')
+		if account.get('low_balance_threshold') is not None:
+			account['low_balance_threshold'] = _threshold(account['low_balance_threshold'], 'Account balance threshold')
 		for field in {'username', 'password', 'system_access_token', 'expected_username'} & account.keys():
 			account[field] = _text(account[field], 'Account field', maximum=8192, empty=True)
 		if 'api_user' in account:
@@ -369,6 +402,14 @@ def validate_config(config: dict) -> dict:
 	schedule.update(_object(data['schedule'], set(schedule), 'Schedule'))
 	schedule['enabled'] = _boolean(schedule['enabled'], 'Schedule enabled')
 	schedule['interval_minutes'] = _integer(schedule['interval_minutes'], 'Schedule interval', 30, 10080)
+	if not isinstance(schedule['mode'], str) or schedule['mode'] not in {'interval', 'cron'}:
+		raise ConfigError('Schedule mode must be interval or cron')
+	try:
+		CronSchedule(schedule['cron'])
+	except (ValueError, TypeError):
+		raise ConfigError(
+			'Cron must be a valid numeric five-field expression with at least 30 minutes between runs'
+		) from None
 	if schedule['enabled'] and not any(account['enabled'] for account in data['accounts']):
 		raise ConfigError('An enabled schedule requires at least one enabled account')
 	data['schedule'] = schedule
@@ -377,6 +418,36 @@ def validate_config(config: dict) -> dict:
 	monitoring['enabled'] = _boolean(monitoring['enabled'], 'Balance monitoring enabled')
 	monitoring['interval_minutes'] = _integer(monitoring['interval_minutes'], 'Balance monitoring interval', 30, 10080)
 	data['monitoring'] = monitoring
+	automation = default_config()['automation']
+	automation_input = _object(data['automation'], set(automation), 'Automation')
+	for name, defaults in automation.items():
+		settings = {**defaults, **_object(automation_input.get(name, {}), set(defaults), 'Automation settings')}
+		settings['enabled'] = _boolean(settings['enabled'], 'Automation enabled')
+		if 'cooldown_minutes' in settings:
+			settings['cooldown_minutes'] = _integer(settings['cooldown_minutes'], 'Notification cooldown', 1, 10080)
+		if name == 'low_balance':
+			settings['threshold'] = _threshold(settings['threshold'], 'Low balance threshold')
+		if name == 'daily_summary':
+			try:
+				next_daily_time(settings['time'], 0)
+			except (TypeError, ValueError):
+				raise ConfigError('Daily summary time must use HH:MM in UTC+8') from None
+		automation[name] = settings
+	data['automation'] = automation
+	backups = default_config()['backups']
+	backups.update(_object(data['backups'], set(backups), 'Backups'))
+	backups['enabled'] = _boolean(backups['enabled'], 'Automatic backups enabled')
+	backups['retain_count'] = _integer(backups['retain_count'], 'Backup retention', 1, 90)
+	backups['password'] = _text(backups['password'], 'Backup recovery password', maximum=512, empty=True)
+	if backups['password'] and len(backups['password']) < 16:
+		raise ConfigError('Backup recovery password must contain at least 16 characters')
+	if backups['enabled'] and not backups['password']:
+		raise ConfigError('Automatic backups require a recovery password')
+	try:
+		next_daily_time(backups['time'], 0)
+	except (ValueError, TypeError):
+		raise ConfigError('Backup time must use HH:MM in UTC+8') from None
+	data['backups'] = backups
 	http = default_config()['http']
 	http.update(_object(data['http'], set(http), 'HTTP settings'))
 	http['timeout_seconds'] = _integer(http['timeout_seconds'], 'HTTP timeout', 5, 120)
@@ -399,6 +470,8 @@ def redact_config(config: dict) -> dict:
 	for name in SECRET_NOTIFICATION_ENV_NAMES:
 		if data.get('notifications', {}).get(name):
 			data['notifications'][name] = SECRET_KEEP
+	if data.get('backups', {}).get('password'):
+		data['backups']['password'] = SECRET_KEEP
 	return data
 
 
@@ -428,6 +501,8 @@ def _restore_secrets(config: dict, old: dict) -> dict:
 	if isinstance(data.get('notifications'), dict):
 		for name in SECRET_NOTIFICATION_ENV_NAMES:
 			_restore_secret(data['notifications'], old['notifications'], name)
+	if isinstance(data.get('backups'), dict):
+		_restore_secret(data['backups'], old.get('backups', {}), 'password')
 	return data
 
 

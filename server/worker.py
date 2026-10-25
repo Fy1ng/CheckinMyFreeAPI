@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
+from server.automation_store import AutomationStore, build_daily_summary
 from server.balance_store import BalanceStore
 from server.config_store import validate_config
 from server.execution_state import ExecutionState
@@ -22,10 +23,71 @@ from utils.http_checkin import HttpCheckinRuntime, account_binding
 from utils.secure_state import atomic_write
 
 
+async def deliver_automation(store: AutomationStore, notifier, ids: list[int]) -> list[dict]:
+	results = []
+	groups: dict[str, list[dict]] = {}
+	for notification_id in ids:
+		pending = store.pending(notification_id)
+		if pending is not None:
+			groups.setdefault(pending['title'], []).append(pending)
+	for title, group in groups.items():
+		message = '\n\n'.join(item['message'] for item in group)
+		if len(group) > 1:
+			message = f'本次共 {len(group)} 个账户事件. 请在管理面板查看各账户详情.\n\n' + message
+		try:
+			delivery = await asyncio.to_thread(notifier.deliver_message, title, message, msg_type='text')
+		except Exception:
+			delivery = {'state': 'unknown', 'channels': []}
+		for pending in group:
+			store.finish(pending['id'], delivery)
+			results.append(
+				{
+					'id': pending['id'],
+					'state': delivery.get('state', 'unknown') if isinstance(delivery, dict) else 'unknown',
+				}
+			)
+	return results
+
+
+async def execute_summary(payload: dict, config: dict, notifier) -> int:
+	data_dir = Path(payload['data_dir'])
+	store = AutomationStore(data_dir / 'webui.sqlite3', run_id=payload.get('run_id'))
+	try:
+		day = payload.get('summary_day') or store.snapshot(config)['day']
+		title, message = build_daily_summary(data_dir / 'webui.sqlite3', config, day=day)
+		claim = store.claim('summary:' + day, 'daily_summary', title, message)
+		delivery = await deliver_automation(store, notifier, [claim] if claim is not None else [])
+		success = claim is None or bool(delivery and delivery[0]['state'] == 'accepted')
+		summary = {
+			'accounts': [],
+			'total_count': int(claim is not None),
+			'success_count': int(claim is not None and success),
+			'day': day,
+			'notification_state': delivery[0]['state'] if delivery else 'already_recorded',
+			'notifications': delivery,
+			'trigger': payload.get('trigger', 'manual'),
+		}
+		atomic_write(
+			Path(payload['event_file']),
+			json.dumps(
+				{
+					'state': 'succeeded' if success else 'needs_attention',
+					'active_account': None,
+					'summary': summary,
+					'error': None if success else '日报通知未全部确认接收, 请查看自动化通知记录',
+				},
+				ensure_ascii=False,
+			).encode(),
+		)
+		return 0 if success else 1
+	finally:
+		store.close()
+
+
 async def execute(payload: dict) -> int:
 	config = validate_config(payload['config'])
 	kind = payload.get('kind', 'checkin')
-	if kind not in {'checkin', 'balance'}:
+	if kind not in {'checkin', 'balance', 'summary'}:
 		raise ValueError('Unsupported task kind')
 	trigger = payload.get('trigger', 'manual')
 	if trigger not in {'manual', 'scheduled'}:
@@ -47,9 +109,13 @@ async def execute(payload: dict) -> int:
 	from utils.notify import notify
 
 	install_redaction()
+	if kind == 'summary':
+		return await execute_summary(payload, config, notify)
 	sessions = HttpSessionStore(data_dir / 'webui.sqlite3', session_key)
 	attention = ExecutionState(data_dir / 'webui.sqlite3')
 	balances = BalanceStore(data_dir / 'webui.sqlite3')
+	automation = AutomationStore(data_dir / 'webui.sqlite3', run_id=payload.get('run_id'))
+	notification_ids: list[int] = []
 	runtime = HttpCheckinRuntime(config, sessions)
 	results: list[dict] = []
 	total = sum(account.get('enabled', True) for account in accounts)
@@ -146,17 +212,26 @@ async def execute(payload: dict) -> int:
 				}
 			if kind == 'checkin':
 				attention.record(account['id'], binding, result)
+			balance_result = None
 			if kind == 'balance' or config['monitoring']['enabled']:
 				try:
 					observations = getattr(runtime, 'balance_observations', [])
 					for observation in observations:
 						valid = balances.record(account, config, observation)
+						balance_result = {
+							'success': valid,
+							'outcome': 'success' if valid else 'failed',
+							'reason': 'balance_refreshed' if valid else 'invalid_balance_data',
+						}
 						if kind == 'balance' and not valid:
 							result.update(success=False, outcome='failed', reason='invalid_balance_data')
-					error = getattr(runtime, 'balance_error', None)
-					if error is None and not result['success']:
+					metric_error = getattr(runtime, 'balance_error', None)
+					error = metric_error
+					if error is None and kind == 'balance' and not result['success']:
 						error = result
 					if error:
+						if kind == 'balance' or metric_error is not None:
+							balance_result = error
 						balances.failure(account, config, error['outcome'], error['reason'])
 						if error['outcome'] == 'rate_limited':
 							balances.rate_limit(account, config, error.get('retry_after_seconds', 3600))
@@ -166,12 +241,30 @@ async def execute(payload: dict) -> int:
 						result.update(success=False, outcome='failed', reason='balance_storage_failed')
 					else:
 						result['balance_warning'] = 'balance_storage_failed'
+			try:
+				if kind == 'checkin':
+					notification_ids.extend(automation.record_health(account, config, 'checkin', result))
+				if kind == 'balance':
+					balance_result = result
+				if balance_result is not None:
+					notification_ids.extend(automation.record_health(account, config, 'balance', balance_result))
+					if balance_result.get('success'):
+						row = next(a for a in balances.snapshot(config)['accounts'] if a['id'] == account['id'])
+						notification_ids.extend(automation.check_low_balance(account, config, row))
+			except Exception:
+				result['automation_warning'] = 'automation_state_unavailable'
 			results.append(result)
 			publish(state='running', active_account=None, summary=snapshot())
 	finally:
 		sessions.close()
 		attention.close()
 		balances.close()
+	try:
+		deliveries = await deliver_automation(automation, notify, notification_ids)
+	except Exception:
+		deliveries = [{'state': 'unknown', 'error_code': 'automation_delivery_unconfirmed'}]
+	finally:
+		automation.close()
 	outcomes = {
 		result.get('pending_outcome', result['outcome']) for result in results if result['reason'] != 'ACCOUNT_DISABLED'
 	}
@@ -185,7 +278,7 @@ async def execute(payload: dict) -> int:
 		if outcomes & {'needs_credentials', 'blocked', 'rate_limited'}
 		else 'failed'
 	)
-	summary = {**snapshot(), 'trigger': trigger}
+	summary = {**snapshot(), 'trigger': trigger, 'automation_notifications': deliveries}
 	if kind == 'balance':
 		publish(
 			state=state,

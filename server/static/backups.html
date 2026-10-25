@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>备份与恢复 | NewAPI</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/backups.js" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    <header class="site-header"><a class="brand" href="/"><span class="brand-mark">N</span><span>NewAPI<span class="brand-caption">备份与恢复</span></span></a><span class="local-tag">私有管理</span></header>
+    <main>
+      <section id="backup-login" class="login-wrap" hidden>
+        <div class="login-intro"><p class="eyebrow">ENCRYPTED BACKUPS</p><h1>保存数据,<br>保留恢复的能力.</h1><p>请先使用当前管理密码登录.</p></div>
+        <form id="backup-login-form" class="login-card"><label class="field"><span class="field-label">管理密码</span><input id="backup-login-password" type="password" autocomplete="current-password" maxlength="512" required></label><button class="button primary" type="submit">登录</button><p id="backup-login-message" class="inline-message" role="status"></p></form>
+      </section>
+      <div id="backup-workspace" hidden>
+        <nav class="workspace-nav" aria-label="控制台页面"><a href="/status">Status</a><a href="/">管理面板</a><a href="/backups" aria-current="page">备份与恢复</a></nav>
+        <section class="page-heading"><div><p class="eyebrow">ENCRYPTED BACKUPS</p><h1>备份与恢复</h1><p class="muted">备份包含数据库和主密钥, 使用独立恢复密码加密.</p></div></section>
+        <p id="backup-message" class="notice" role="status" aria-live="polite" hidden></p>
+        <section class="balance-panel" aria-labelledby="backup-settings-title">
+          <div class="panel-title"><h2 id="backup-settings-title">自动备份</h2><button id="backup-reload" type="button" class="text-button">重新读取</button></div>
+          <form id="backup-settings-form">
+            <label class="field"><span class="field-label">启用每日自动备份</span><input id="backup-enabled" type="checkbox"></label>
+            <label class="field"><span class="field-label">每日备份时间, UTC+8</span><input id="backup-time" type="time" required></label>
+            <label class="field"><span class="field-label">保留份数</span><input id="backup-retention" type="number" min="1" max="90" step="1" required></label>
+            <label class="field"><span class="field-label">备份恢复密码</span><input id="backup-password" type="password" autocomplete="new-password" minlength="16" maxlength="512"><span id="backup-password-hint" class="muted small"></span></label>
+            <p class="muted small">请单独保管恢复密码. 服务器和主密钥丢失后, 需要备份文件与此密码恢复数据. 更改密码只影响新备份.</p>
+            <div class="task-actions"><button id="backup-save" type="submit" class="button primary">保存备份设置</button><button id="backup-create" type="button" class="button secondary">立即创建备份</button></div>
+          </form>
+          <p id="backup-schedule" class="muted small"></p>
+        </section>
+        <section class="balance-panel" aria-labelledby="backup-files-title"><div class="panel-title"><h2 id="backup-files-title">已保存备份</h2><button id="backup-refresh-list" type="button" class="text-button">刷新列表</button></div><p class="muted small">备份保存在服务器数据卷中. 下载并另存到其他设备, 可防止服务器磁盘丢失时一并丢失备份.</p><div id="backup-files" class="runs-list"></div></section>
+        <section class="balance-panel" aria-labelledby="restore-title">
+          <h2 id="restore-title">恢复备份</h2><p class="muted small">先校验备份并预览内容, 再确认替换数据. 同一实例恢复保留当前管理员密码和公网设置. 恢复后自动签到、采集、通知和备份均停用, 核对后可重新启用.</p>
+          <form id="backup-preview-form">
+            <label class="field"><span class="field-label">加密备份文件</span><input id="restore-file" type="file" accept=".nab,application/octet-stream" required></label>
+            <label class="field"><span class="field-label">此备份的恢复密码</span><input id="restore-password" type="password" autocomplete="off" maxlength="512" required></label>
+            <button id="backup-preview" type="submit" class="button secondary">校验并预览</button>
+          </form>
+          <div id="restore-preview" class="notice" hidden><div><h3>即将恢复的数据</h3><p id="restore-preview-detail"></p><p>当前数据会先自动备份, 再替换为此备份的数据. 恢复前快照使用已保存的恢复密码; 尚未设置时使用本次输入的恢复密码. 完成后需要重新登录.</p><form id="backup-restore-form"><label class="field"><span class="field-label">当前管理员密码</span><input id="restore-admin-password" type="password" autocomplete="current-password" maxlength="512" required></label><label class="field"><span><input id="restore-confirm" type="checkbox" required> 我确认已核对备份, 并替换当前账户配置和历史数据</span></label><button id="backup-restore" type="submit" class="button danger-soft">确认恢复</button></form></div></div>
+        </section>
+      </div>
+    </main>
+    <footer>NewAPI Check-in<span>恢复密码不进入执行记录.</span></footer>
+  </div>
+</body>
+</html>

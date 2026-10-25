@@ -87,8 +87,14 @@ def test_default_is_independent_and_does_not_read_environment(monkeypatch):
 		'accounts': [],
 		'proxy_url': '',
 		'notifications': {},
-		'schedule': {'enabled': False, 'interval_minutes': 360},
+		'schedule': {'enabled': False, 'mode': 'interval', 'interval_minutes': 360, 'cron': '0 8 * * *'},
 		'monitoring': {'enabled': True, 'interval_minutes': 60},
+		'automation': {
+			'low_balance': {'enabled': False, 'threshold': 1, 'cooldown_minutes': 360},
+			'recovery': {'enabled': False, 'cooldown_minutes': 60},
+			'daily_summary': {'enabled': False, 'time': '23:55'},
+		},
+		'backups': {'enabled': False, 'time': '03:00', 'retain_count': 7, 'password': ''},
 		'http': {'timeout_seconds': 30},
 		'webui_url': '',
 	}
@@ -539,7 +545,7 @@ def test_migration_archives_original_ciphertext_and_disables_unsupported_account
 	try:
 		config, revision = store.load()
 		assert revision == 5 and config['schema_version'] == 2
-		assert config['schedule'] == {'enabled': False, 'interval_minutes': 60}
+		assert config['schedule'] == {'enabled': False, 'mode': 'interval', 'interval_minutes': 60, 'cron': '0 8 * * *'}
 		by_id = {account['id']: account for account in config['accounts']}
 		assert by_id['password']['username'] == 'name@example.test'
 		assert by_id['password']['password'] == 'synthetic-old-password'
@@ -600,7 +606,9 @@ def test_schema2_agent_token_migration_preserves_other_configuration_history_and
 		assert revision == 5 and config['schema_version'] == 2
 		assert config['accounts'][:2] == document['accounts'][:2]
 		assert {key: value for key, value in config.items() if key != 'accounts'} == {
-			key: value for key, value in document.items() if key != 'accounts'
+			key: value
+			for key, value in {**document, 'schedule': {**default_config()['schedule'], **document['schedule']}}.items()
+			if key != 'accounts'
 		}
 		assert config['accounts'][2] == {
 			'id': 'agent',

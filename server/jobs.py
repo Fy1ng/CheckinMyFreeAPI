@@ -14,8 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
 
-from server.balance_store import BalanceStore
+from server.automation_store import AutomationStore
+from server.balance_store import BalanceStore, day_at
 from server.execution_state import ExecutionState
+from utils.cron_schedule import CronSchedule, next_daily_time
 from utils.http_checkin import account_binding
 from utils.process_env import child_environment
 
@@ -90,13 +92,18 @@ class JobManager:
 		if 'identity' not in columns:
 			self.db.execute('ALTER TABLE runs ADD COLUMN identity TEXT')
 		config, _ = self.config_store.load()
+		self._checkin_signature = json.dumps(config['schedule'], sort_keys=True)
+		self._balance_signature = self._monitoring_signature(config)
+		automation = AutomationStore(self.data_dir / 'webui.sqlite3')
+		automation.interrupt_pending()
+		automation.close()
 		for run_id, kind in self.db.execute(
 			"SELECT id,kind FROM runs WHERE state IN ('running','awaiting_login','stopping')"
 		).fetchall():
 			if kind == 'checkin':
 				self._record_interrupted_account(self._progress(self.data_dir / f'run-{run_id}.json'), config)
 		self.db.execute(
-			"UPDATE runs SET state='interrupted',finished_at=?,error=CASE WHEN kind='balance' THEN '服务重启, 余额刷新已中断' ELSE '服务重启, 请核对站点结果后再运行' END WHERE state IN ('running','awaiting_login','stopping')",
+			"UPDATE runs SET state='interrupted',finished_at=?,error=CASE WHEN kind='balance' THEN '服务重启, 余额刷新已中断' WHEN kind='summary' THEN '服务重启, 请核对日报通知记录' ELSE '服务重启, 请核对站点结果后再运行' END WHERE state IN ('running','awaiting_login','stopping')",
 			(time.time(),),
 		)
 		self.db.commit()
@@ -171,6 +178,9 @@ class JobManager:
 			result = store.snapshot(config)
 		finally:
 			store.close()
+		health = self.automation_snapshot()['health']
+		for account in result['accounts']:
+			account['health'] = {item['scope']: item for item in health if item['account_id'] == account['id']}
 		return {
 			**result,
 			'refreshing': self.active_id is not None,
@@ -178,6 +188,32 @@ class JobManager:
 				self.db.execute('SELECT next_at FROM balance_scheduler WHERE id=1').fetchone()[0]
 			),
 		}
+
+	def automation_snapshot(self) -> dict:
+		config, _ = self.config_store.load()
+		store = AutomationStore(self.data_dir / 'webui.sqlite3')
+		try:
+			return store.snapshot(config)
+		finally:
+			store.close()
+
+	@staticmethod
+	def _monitoring_signature(config: dict) -> str:
+		return json.dumps(
+			[config['monitoring'], any(account['enabled'] for account in config['accounts'])], sort_keys=True
+		)
+
+	def summary_schedule_changed(self) -> None:
+		config, _ = self.config_store.load()
+		settings = config['automation']['daily_summary']
+		signature = json.dumps(settings, sort_keys=True)
+		row = self.db.execute('SELECT signature,next_at FROM automation_scheduler WHERE id=1').fetchone()
+		if row[0] != signature or (settings['enabled'] and row[1] is None):
+			self.db.execute(
+				'UPDATE automation_scheduler SET signature=?,next_at=? WHERE id=1',
+				(signature, next_daily_time(settings['time'], time.time()) if settings['enabled'] else None),
+			)
+			self.db.commit()
 
 	def balance_schedule_changed(self) -> None:
 		config, _ = self.config_store.load()
@@ -189,18 +225,38 @@ class JobManager:
 		)
 		self.db.execute('UPDATE balance_scheduler SET next_at=? WHERE id=1', (next_at,))
 		self.db.commit()
+		self._balance_signature = self._monitoring_signature(config)
 
 	def schedule_changed(self, *, include_balance: bool = True) -> None:
 		config, _ = self.config_store.load()
 		schedule = config['schedule']
-		next_at = time.time() + schedule['interval_minutes'] * 60 if schedule['enabled'] else None
-		self.db.execute('UPDATE scheduler SET next_at=? WHERE id=1', (next_at,))
-		self.db.commit()
-		if include_balance:
+		signature = json.dumps(schedule, sort_keys=True)
+		if not include_balance or signature != self._checkin_signature:
+			next_at = None
+			if schedule['enabled']:
+				next_at = (
+					CronSchedule(schedule['cron']).next_after(time.time())
+					if schedule['mode'] == 'cron'
+					else time.time() + schedule['interval_minutes'] * 60
+				)
+			self.db.execute('UPDATE scheduler SET next_at=? WHERE id=1', (next_at,))
+			self.db.commit()
+			self._checkin_signature = signature
+		if include_balance and self._monitoring_signature(config) != self._balance_signature:
 			self.balance_schedule_changed()
+		self.summary_schedule_changed()
+
+	async def start_summary(self, revision: int) -> dict:
+		return await self.start(revision, kind='summary')
 
 	async def start(
-		self, revision: int, *, trigger: str = 'manual', account_id: str | None = None, kind: str = 'checkin'
+		self,
+		revision: int,
+		*,
+		trigger: str = 'manual',
+		account_id: str | None = None,
+		kind: str = 'checkin',
+		summary_day: str | None = None,
 	) -> dict:
 		async with self._lock:
 			if self.active_id is not None:
@@ -210,16 +266,16 @@ class JobManager:
 				raise BusyError('配置已更新, 请重新读取后运行')
 			if trigger not in {'manual', 'scheduled'}:
 				raise BusyError('任务来源无效')
-			if kind not in {'checkin', 'balance'}:
+			if kind not in {'checkin', 'balance', 'summary'}:
 				raise BusyError('任务类型无效')
 			if account_id is not None:
-				if not isinstance(account_id, str) or trigger != 'manual':
+				if not isinstance(account_id, str) or trigger != 'manual' or kind == 'summary':
 					raise BusyError('单账号任务参数无效')
 				selected = next((account for account in config['accounts'] if account['id'] == account_id), None)
 				if selected is None or not selected.get('enabled', True):
 					raise BusyError('请选择已保存且已启用的账号')
 				config['accounts'] = [selected]
-			if not any(account.get('enabled', True) for account in config['accounts']):
+			if kind != 'summary' and not any(account.get('enabled', True) for account in config['accounts']):
 				raise BusyError('请先保存至少一个已启用账号')
 			summary: dict = {
 				'account_id': account_id,
@@ -240,7 +296,9 @@ class JobManager:
 			self.active_kind = kind
 			self.stopping = False
 			self.task = asyncio.create_task(
-				self._execute(self.active_id, config, trigger=trigger, account_id=account_id, kind=kind),
+				self._execute(
+					self.active_id, config, trigger=trigger, account_id=account_id, kind=kind, summary_day=summary_day
+				),
 				name=kind + '-worker',
 			)
 			return self.history()[0]
@@ -253,6 +311,7 @@ class JobManager:
 		trigger: str = 'manual',
 		account_id: str | None = None,
 		kind: str = 'checkin',
+		summary_day: str | None = None,
 	) -> None:
 		event_file = self.data_dir / f'run-{run_id}.json'
 		try:
@@ -276,8 +335,10 @@ class JobManager:
 				start_new_session=os.name != 'nt',
 			)
 			assert self.process.stdin is not None
+			# Backup recovery credentials are unrelated to account execution or notifications.
+			worker_config = {**config, 'backups': {**config['backups'], 'enabled': False, 'password': str()}}
 			payload = {
-				'config': config,
+				'config': worker_config,
 				'key': base64.b64encode(self.key).decode(),
 				'data_dir': str(self.data_dir),
 				'event_file': str(event_file),
@@ -285,6 +346,7 @@ class JobManager:
 				'trigger': trigger,
 				'account_id': account_id,
 				'kind': kind,
+				'summary_day': summary_day,
 			}
 			self.process.stdin.write(json.dumps(payload).encode())
 			await self.process.stdin.drain()
@@ -320,7 +382,13 @@ class JobManager:
 				None
 				if state == 'succeeded'
 				else (
-					('余额刷新已停止' if kind == 'balance' else '任务已停止, 部分操作可能已完成, 请核对后再运行')
+					(
+						'余额刷新已停止'
+						if kind == 'balance'
+						else '日报通知已停止, 请核对通知记录'
+						if kind == 'summary'
+						else '任务已停止, 部分操作可能已完成, 请核对后再运行'
+					)
 					if self.stopping
 					else progress.get('error', '任务未正常完成, 请检查执行记录和配置')
 				)
@@ -335,7 +403,15 @@ class JobManager:
 				self._record_interrupted_account(self._progress(event_file), config)
 			self.db.execute(
 				"UPDATE runs SET state='interrupted',finished_at=?,error=? WHERE id=?",
-				(time.time(), '服务关闭, 余额刷新已中断' if kind == 'balance' else '服务关闭, 请核对站点结果', run_id),
+				(
+					time.time(),
+					'服务关闭, 余额刷新已中断'
+					if kind == 'balance'
+					else '服务关闭, 请核对日报通知记录'
+					if kind == 'summary'
+					else '服务关闭, 请核对站点结果',
+					run_id,
+				),
 			)
 			raise
 		except Exception:
@@ -347,12 +423,19 @@ class JobManager:
 				(
 					'cancelled' if self.stopping else 'failed',
 					time.time(),
-					'余额执行器启动或运行失败' if kind == 'balance' else '执行器启动或运行失败, 请核对后再运行',
+					'余额执行器启动或运行失败'
+					if kind == 'balance'
+					else '日报执行器启动或运行失败, 请核对通知记录'
+					if kind == 'summary'
+					else '执行器启动或运行失败, 请核对后再运行',
 					run_id,
 				),
 			)
 		finally:
 			self.db.commit()
+			automation = AutomationStore(self.data_dir / 'webui.sqlite3')
+			automation.interrupt_pending(run_id)
+			automation.close()
 			event_file.unlink(missing_ok=True)
 			self.process = None
 			self.active_id = None
@@ -461,6 +544,18 @@ class JobManager:
 						await self.start(revision, trigger='scheduled', kind='balance')
 					except BusyError:
 						pass
+			self.summary_schedule_changed()
+			summary_at = self.db.execute('SELECT next_at FROM automation_scheduler WHERE id=1').fetchone()[0]
+			if summary_at is not None and summary_at <= time.time() and self.active_id is None:
+				self.db.execute(
+					'UPDATE automation_scheduler SET next_at=? WHERE id=1',
+					(next_daily_time(config['automation']['daily_summary']['time'], time.time()),),
+				)
+				self.db.commit()
+				try:
+					await self.start(revision, trigger='scheduled', kind='summary', summary_day=day_at(summary_at))
+				except BusyError:
+					pass
 
 	async def open(self) -> None:
 		config, _ = self.config_store.load()
@@ -470,6 +565,14 @@ class JobManager:
 		balance_at = self.db.execute('SELECT next_at FROM balance_scheduler WHERE id=1').fetchone()[0]
 		if not config['monitoring']['enabled'] or balance_at is None or balance_at <= time.time():
 			self.balance_schedule_changed()
+		self.summary_schedule_changed()
+		summary_at = self.db.execute('SELECT next_at FROM automation_scheduler WHERE id=1').fetchone()[0]
+		if summary_at is not None and summary_at <= time.time():
+			self.db.execute(
+				'UPDATE automation_scheduler SET next_at=? WHERE id=1',
+				(next_daily_time(config['automation']['daily_summary']['time'], time.time()),),
+			)
+			self.db.commit()
 		self._scheduler_task = asyncio.create_task(self.scheduler(), name='scheduler')
 
 	async def close(self) -> None:

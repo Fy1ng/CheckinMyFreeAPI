@@ -53,6 +53,24 @@ class FakeInput:
 		self.closed = True
 
 
+async def test_account_worker_never_receives_backup_recovery_password(configured_store, tmp_path, fake_worker):
+	store, key = configured_store
+	config, revision = store.load()
+	config['backups'].update(enabled=True, password='synthetic-backup-recovery-secret')
+	revision = store.save(config, revision)['revision']
+	manager = JobManager(store, tmp_path, key)
+	process, launched, _ = fake_worker
+	try:
+		await manager.start(revision, kind='balance')
+		await launched.wait()
+		payload = bytes(process.stdin.data)
+		assert b'synthetic-backup-recovery-secret' not in payload
+		assert json.loads(payload)['config']['backups']['enabled'] is False
+		assert store.load()[0]['backups']['password'] == 'synthetic-backup-recovery-secret'
+	finally:
+		await manager.close()
+
+
 async def test_balance_tasks_share_checkin_lock_and_snapshot_never_starts_network(
 	configured_store, tmp_path, fake_worker
 ):
@@ -475,6 +493,106 @@ def one_scheduler_tick(monkeypatch):
 			raise asyncio.CancelledError
 
 	monkeypatch.setattr(jobs_module.asyncio, 'sleep', tick)
+
+
+async def test_notification_settings_save_does_not_shift_existing_checkin_or_balance_plan(configured_store, tmp_path):
+	store, key = configured_store
+	config, revision = store.load()
+	config['schedule']['enabled'] = True
+	store.save(config, revision)
+	manager = JobManager(store, tmp_path, key)
+	try:
+		await manager.open()
+		before = manager.status()['next_run_at']
+		balance = manager.balance_snapshot()['next_refresh_at']
+		config, revision = store.load()
+		config['automation']['low_balance']['enabled'] = True
+		store.save(config, revision)
+		manager.schedule_changed()
+		assert manager.status()['next_run_at'] == before
+		assert manager.balance_snapshot()['next_refresh_at'] == balance
+	finally:
+		await manager.close()
+
+
+async def test_cron_schedule_has_exact_utc8_next_occurrence(configured_store, tmp_path, monkeypatch):
+	from datetime import datetime
+
+	from utils.cron_schedule import LOCAL_TIMEZONE
+
+	store, key = configured_store
+	config, revision = store.load()
+	config['schedule'].update(enabled=True, mode='cron', cron='0 8 * * *')
+	store.save(config, revision)
+	now = datetime(2026, 10, 25, 7, 0, tzinfo=LOCAL_TIMEZONE).timestamp()
+	monkeypatch.setattr(jobs_module.time, 'time', lambda: now)
+	manager = JobManager(store, tmp_path, key)
+	try:
+		manager.schedule_changed(include_balance=False)
+		expected = datetime(2026, 10, 25, 8, 0, tzinfo=LOCAL_TIMEZONE).timestamp()
+		assert manager.db.execute('SELECT next_at FROM scheduler WHERE id=1').fetchone()[0] == expected
+	finally:
+		await manager.close()
+
+
+async def test_summary_uses_same_worker_lock_and_kind(configured_store, tmp_path, fake_worker):
+	store, key = configured_store
+	manager = JobManager(store, tmp_path, key)
+	process, launched, _ = fake_worker
+	try:
+		await manager.start_summary(1)
+		await launched.wait()
+		assert json.loads(bytes(process.stdin.data))['kind'] == 'summary'
+		with pytest.raises(BusyError):
+			await manager.start(1, kind='balance')
+	finally:
+		await manager.close()
+
+
+async def test_daily_summary_schedule_is_persistent_and_does_not_shift_on_restart(configured_store, tmp_path):
+	store, key = configured_store
+	config, revision = store.load()
+	config['automation']['daily_summary']['enabled'] = True
+	store.save(config, revision)
+	manager = JobManager(store, tmp_path, key)
+	await manager.open()
+	before = manager.automation_snapshot()['daily_summary']['next_at']
+	await manager.close()
+	restarted = JobManager(store, tmp_path, key)
+	try:
+		await restarted.open()
+		assert restarted.automation_snapshot()['daily_summary']['next_at'] == before
+	finally:
+		await restarted.close()
+
+
+async def test_due_summary_has_original_local_day_when_other_work_crossed_midnight(
+	configured_store, tmp_path, monkeypatch
+):
+	from datetime import datetime
+
+	from utils.cron_schedule import LOCAL_TIMEZONE
+
+	store, key = configured_store
+	config, revision = store.load()
+	config['automation']['daily_summary']['enabled'] = True
+	revision = store.save(config, revision)['revision']
+	manager = JobManager(store, tmp_path, key)
+	manager.summary_schedule_changed()
+	due = datetime(2026, 10, 20, 23, 55, tzinfo=LOCAL_TIMEZONE).timestamp()
+	now = datetime(2026, 10, 21, 0, 1, tzinfo=LOCAL_TIMEZONE).timestamp()
+	manager.db.execute('UPDATE automation_scheduler SET next_at=? WHERE id=1', (due,))
+	manager.db.commit()
+	monkeypatch.setattr(jobs_module.time, 'time', lambda: now)
+	start = AsyncMock()
+	monkeypatch.setattr(manager, 'start', start)
+	one_scheduler_tick(monkeypatch)
+	try:
+		with pytest.raises(asyncio.CancelledError):
+			await manager.scheduler()
+		start.assert_awaited_once_with(revision, trigger='scheduled', kind='summary', summary_day='2026-10-20')
+	finally:
+		await manager.close()
 
 
 async def test_balance_schedule_runs_independently_with_checkin_disabled(configured_store, tmp_path, monkeypatch):

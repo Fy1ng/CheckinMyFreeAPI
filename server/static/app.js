@@ -12,6 +12,7 @@
     pollTimer: null, polling: false, expanded: new Map(), cardHeaders: [], runViews: new Map(),
     view: window.location.pathname === '/status' ? 'status' : 'manage',
     balances: null, balancesLoading: false, balanceViews: new Map(),
+    automation: null, automationLoading: false,
   };
 
   class ApiError extends Error {
@@ -110,6 +111,11 @@
       item.disabled = balanceBlocked || item.dataset.enabled !== 'true';
       item.title = state.dirty ? '请先保存当前修改' : item.dataset.enabled !== 'true' ? '此账号已停用' : balanceBlocked ? '请等待当前任务结束并确认状态' : '仅查询此账号的余额';
     });
+    document.querySelectorAll('[data-send-summary]').forEach((item) => {
+      item.disabled = !available || blocked || state.dirty || !state.statusFresh || !!state.status?.running;
+      item.textContent = state.status?.running && state.status?.run?.kind === 'summary' ? '正在发送日报...' : '发送今日日报';
+      item.title = state.dirty ? '请先保存当前修改' : item.disabled ? '请等待当前操作完成并确认状态' : '通过已配置的通知渠道发送今日日报';
+    });
     $('dirty-status').textContent = !available ? '配置尚未就绪' : state.uncertain ? '请先确认上次操作结果' : state.dirty ? '有未保存的修改' : '所有修改已保存';
     $('dirty-status').className = `dirty-status${state.dirty ? ' unsaved' : ''}${state.uncertain ? ' uncertain-lock' : ''}`;
     $('config-revision').textContent = state.revision === null ? '尚未读取配置' : `已保存版本 ${state.revision}`;
@@ -172,7 +178,7 @@
     renderWorkspaceView();
     if (state.uncertain === 'logout') state.uncertain = null;
     const configTask = state.config && state.dirty ? Promise.resolve(renderForm()) : loadConfig(false);
-    await Promise.allSettled([configTask, loadStatus(), loadRuns(), ...(state.view === 'status' ? [loadBalances()] : [])]);
+    await Promise.allSettled([configTask, loadStatus(), loadRuns(), ...(state.view === 'status' ? [loadBalances(), loadAutomation()] : [])]);
     schedulePoll();
   }
 
@@ -184,9 +190,15 @@
     result.notifications ||= {};
     result.proxy_url ||= '';
     result.schedule ||= { enabled: false, interval_minutes: 360 };
+    result.schedule.mode ||= 'interval';
+    result.schedule.cron ||= '0 8 * * *';
     result.monitoring ||= { enabled: true, interval_minutes: 60 };
     result.http ||= { timeout_seconds: 30 };
     result.webui_url ||= '';
+    result.automation ||= {};
+    result.automation.low_balance = { enabled: false, threshold: 1, cooldown_minutes: 360, ...result.automation.low_balance };
+    result.automation.recovery = { enabled: false, cooldown_minutes: 60, ...result.automation.recovery };
+    result.automation.daily_summary = { enabled: false, time: '23:55', ...result.automation.daily_summary };
     return result;
   }
 
@@ -315,14 +327,19 @@
     })[code] || code;
   }
 
+  function taskKindLabel(kind) {
+    return ({ balance: '余额采集', summary: '每日摘要' })[kind] || '签到任务';
+  }
+
   function renderStatus(data) {
     const run = data.run;
     const currentBadge = badge(run?.state);
     currentBadge.id = 'task-badge';
     $('task-badge').replaceWith(currentBadge);
-    $('task-description').textContent = run ? `${run.kind === 'balance' ? '余额采集' : '签到任务'} #${run.id}, ${formatTime(run.started_at)} 开始.${run.error ? ` ${explainError(run.error)}` : ''}${run.state === 'needs_attention' ? run.kind === 'balance' ? ' 部分账号余额暂不可用, 请查看查询结果.' : ' 部分账号已暂停, 请查看近期记录并更新凭据.' : ''}${run.state === 'uncertain' ? ' 请先在站点核对结果, 避免重复执行.' : ''}` : '还没有运行中的任务. 配置完成后即可开始.';
+    $('task-description').textContent = run ? `${taskKindLabel(run.kind)} #${run.id}, ${formatTime(run.started_at)} 开始.${run.error ? ` ${explainError(run.error)}` : ''}${run.state === 'needs_attention' ? run.kind === 'summary' ? ' 摘要发送需要处理, 请查看自动通知记录.' : run.kind === 'balance' ? ' 部分账号余额暂不可用, 请查看查询结果.' : ' 部分账号已暂停, 请查看近期记录并更新凭据.' : ''}${run.state === 'uncertain' ? run.kind === 'summary' ? ' 通知发送结果待确认, 不会自动重发.' : ' 请先在站点核对结果, 避免重复执行.' : ''}` : '还没有运行中的任务. 配置完成后即可开始.';
     setText($('task-progress'), progressText(run?.summary?.progress, run?.state));
-    $('next-run').textContent = data.next_run_at ? `下次计划: ${formatTime(data.next_run_at)}` : '定时任务未启用, 或尚未安排下一次运行.';
+    $('next-run').textContent = data.next_run_at ? `下次签到: ${formatBalanceTime(data.next_run_at)}${state.config?.schedule?.mode === 'cron' ? ' / Cron 固定时间' : ''}` : '定时任务未启用, 或尚未安排下一次运行.';
+    document.querySelectorAll('[data-next-checkin]').forEach((item) => { item.textContent = $('next-run').textContent; });
     updateControls();
   }
 
@@ -430,7 +447,7 @@
     const root = el('div', 'run-row');
     root.dataset.runId = run.id;
     const main = el('div', 'run-main');
-    const title = el('p', 'run-title', `${run.kind === 'balance' ? '余额采集' : '签到任务'} #${run.id}`);
+    const title = el('p', 'run-title', `${taskKindLabel(run.kind)} #${run.id}`);
     const started = el('p', 'run-meta');
     const finished = el('p', 'run-meta');
     const error = el('p', 'run-meta run-diagnostic');
@@ -524,7 +541,7 @@
     state.view = view === 'status' ? 'status' : 'manage';
     if (push) window.history.pushState(null, '', state.view === 'status' ? '/status' : '/');
     renderWorkspaceView();
-    if (state.authenticated && state.view === 'status') loadBalances();
+    if (state.authenticated && state.view === 'status') Promise.allSettled([loadBalances(), loadAutomation()]);
   }
 
   function money(value, signed = false) {
@@ -554,8 +571,32 @@
 
   function balanceState(account) {
     if (!account.enabled || account.state === 'disabled') return '已停用';
-    if (account.stale) return '余额已过期';
+    if (account.stale && account.updated_at) return '余额已过期';
     return ({ ok: '已更新', unknown: '暂无数据', needs_credentials: '待更新会话', blocked: '访问受阻', rate_limited: '请求限流', failed: '查询失败' })[account.state] || '暂无数据';
+  }
+
+  function duration(since, until = Date.now()) {
+    const millis = (value) => typeof value === 'number' ? value < 1e12 ? value * 1000 : value : Date.parse(value);
+    const seconds = Math.max(0, Math.floor((millis(until) - millis(since)) / 1000));
+    if (!Number.isFinite(seconds)) return '时长未知';
+    if (seconds < 60) return `${seconds} 秒`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时 ${Math.floor(seconds % 3600 / 60)} 分钟`;
+    return `${Math.floor(seconds / 86400)} 天 ${Math.floor(seconds % 86400 / 3600)} 小时`;
+  }
+
+  function healthText(health, scope) {
+    const title = scope === 'checkin' ? '签到' : '余额查询';
+    if (!health) return `${title}: 尚无健康记录`;
+    const healthy = ['healthy', 'ok', 'success'].includes(health.state);
+    const label = healthy ? health.recovered_at ? '已恢复' : '正常' : ({ uncertain: '结果待核对', blocked: '访问受阻', rate_limited: '请求限流', needs_credentials: '待更新凭据', unknown: '尚无记录', disabled: '已停用' })[health.state] || '异常';
+    return `${title}: ${label}${!healthy && health.failure_since ? `, 持续 ${duration(health.failure_since)}` : ''}${healthy && health.recovered_at ? ` / 恢复于 ${formatBalanceTime(health.recovered_at)}` : ''}${healthy && health.recovered_at && health.failure_since ? ` / 此前异常 ${duration(health.failure_since, health.recovered_at)}` : ''}${!healthy && health.reason ? ` / ${reasonText(health.reason)}` : ''}`;
+  }
+
+  function accountHealth(account) {
+    const health = account.health || {};
+    const rows = Array.isArray(state.automation?.health) ? state.automation.health : [];
+    return ['checkin', 'balance'].map((scope) => healthText(health[scope] || rows.find((item) => item.account_id === account.id && item.scope === scope), scope)).join('\n');
   }
 
   function renderBalanceAccounts(accounts) {
@@ -580,13 +621,14 @@
         const changes = el('p', 'balance-changes');
         const source = el('p', 'balance-source muted small');
         const updated = el('p', 'muted small');
+        const health = el('p', 'account-health muted small');
         const details = el('details', 'balance-details');
         details.append(el('summary', '', '查看查询详情'));
         const reason = el('p', 'muted small');
         const used = el('p', 'muted small');
         details.append(reason, used);
-        root.append(heading, provider, amount, changes, source, updated, details);
-        view = { root, name, status, refresh, provider, amount, changes, source, updated, reason, used };
+        root.append(heading, provider, amount, changes, source, updated, health, details);
+        view = { root, name, status, refresh, provider, amount, changes, source, updated, health, reason, used };
         state.balanceViews.set(id, view);
       }
       view.name.textContent = account.name || id;
@@ -602,6 +644,7 @@
       const source = ({ site: '站点今日入账', checkin: '仅已核验签到收益', observed: '采集期间已观测入账' })[account.income_source];
       view.source.textContent = `${source ? `新增来源: ${source}` : '新增来源: 暂无可靠数据'}${incomePartial ? '. 新增仅覆盖采集期间, 不代表全天统计.' : ''}${netPartial ? '. 净变化以当日首次采集为基准.' : ''}${account.observed_since ? ` 采集基准: ${formatBalanceTime(account.observed_since)}` : ''}`;
       view.updated.textContent = `最后更新: ${formatBalanceTime(account.updated_at)}${account.stale && account.updated_at ? '. 保留上次已知余额.' : ''}`;
+      view.health.textContent = accountHealth(account);
       view.reason.textContent = balanceReason(account) || '查询完成. 余额监测不会自动重新登录.';
       view.used.textContent = `累计已用额度: ${money(account.used)}`;
       const position = list.children[index];
@@ -679,6 +722,72 @@
     finish(); chart.append(svg);
   }
 
+  function deliveryLabel(value) {
+    return ({ accepted: '服务端已接收, 设备送达待确认', sent: '服务端已接收, 设备送达待确认', succeeded: '服务端已接收, 设备送达待确认', partial: '部分渠道已接收, 其余结果请核对', delivered: '渠道已确认送达', failed: '发送失败', failure: '发送失败', unknown: '发送结果待确认, 不自动重发', uncertain: '发送结果待确认, 不自动重发', sending: '正在发送', pending: '等待发送', not_configured: '未配置通知渠道', suppressed: '已按冷却规则合并', skipped: '已跳过' })[value] || value || '状态未知';
+  }
+
+  function renderAutomation() {
+    const data = state.automation || {};
+    const daily = data.daily_summary || {};
+    $('daily-summary-status').textContent = `${daily.next_at ? `下次日报: ${formatBalanceTime(daily.next_at)}` : '定时日报尚未安排'}${daily.last_day ? `. 最近日报: ${daily.last_day}${daily.last_state ? ` / ${deliveryLabel(daily.last_state)}` : ''}` : ''}. 时间按 UTC+8 统计.`;
+    const list = $('automation-events');
+    const expanded = new Set(Array.from(list.querySelectorAll('details[open]')).map((item) => item.dataset.notificationId));
+    list.replaceChildren();
+    const rows = Array.isArray(data.notifications) ? data.notifications.slice(0, 20) : [];
+    rows.forEach((item) => {
+      const row = el('article', 'automation-event');
+      const title = ({ low_balance: '低余额告警', recovery: '故障恢复通知', daily_summary: '每日摘要', summary: '每日摘要' })[item.kind] || '自动通知';
+      row.append(el('p', 'automation-event-title', title), el('p', 'muted small', `${deliveryLabel(item.state)} / ${formatBalanceTime(item.finished_at || item.created_at)}`));
+      if (item.reason || item.error) row.append(el('p', 'muted small', reasonText(item.reason || item.error)));
+      const channels = Array.isArray(item.delivery?.channels) ? item.delivery.channels : [];
+      if (channels.length) {
+        const details = el('details', 'automation-delivery-details');
+        details.dataset.notificationId = String(item.id);
+        details.open = expanded.has(String(item.id));
+        details.append(el('summary', '', '查看渠道结果'));
+        channels.forEach((channel) => {
+          const error = ({ notification_rejected: '渠道拒绝通知', provider_acceptance_unconfirmed: '渠道未确认接收', notification_outcome_unknown: '网络或服务异常, 发送结果待确认' })[channel.error_code] || channel.error_code;
+          details.append(el('p', 'muted small', `${channel.channel}: ${deliveryLabel(channel.state)}${error ? ` / ${error}` : ''}`));
+        });
+        row.append(details);
+      }
+      list.append(row);
+    });
+    if (!rows.length) list.append(el('p', 'muted small', '尚无通知记录. 在通知渠道中启用需要的自动提醒.'));
+    if (state.balances) renderBalanceAccounts(state.balances.accounts || []);
+    updateControls();
+  }
+
+  async function loadAutomation() {
+    if (state.automationLoading || !state.authenticated) return;
+    state.automationLoading = true;
+    $('retry-automation').disabled = true;
+    try {
+      state.automation = await api('/api/automation');
+      renderAutomation();
+      $('automation-error').hidden = true;
+    } catch (error) {
+      $('automation-error').hidden = false;
+      $('automation-error').querySelector('span').textContent = `自动提醒状态读取失败. ${errorText(error)}${state.automation ? ' 已保留上次读取的记录.' : ''}`;
+    } finally {
+      state.automationLoading = false;
+      $('retry-automation').disabled = false;
+    }
+  }
+
+  async function sendDailySummary() {
+    if (!state.config || state.busy || state.uncertain || state.dirty || !state.statusFresh || state.status?.running) return;
+    setBusy(true);
+    try {
+      await api('/api/automation/summary', { method: 'POST', body: { revision: state.revision } });
+      notice('日报发送任务已启动. 请在自动通知记录中确认结果, 服务端接收不代表手机已送达.');
+      await Promise.allSettled([loadStatus(), loadRuns(), loadAutomation()]);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status >= 500 || error.status === 0 || (error.status >= 200 && error.status < 300)) setUncertain('summary', errorText(error));
+      else { notice(errorText(error), error.status === 409 ? 'warning' : 'error'); await loadStatus(); }
+    } finally { setBusy(false); }
+  }
+
   function renderBalances(data) {
     const summary = data.summary || {};
     const total = summary.account_count ?? 0;
@@ -746,7 +855,7 @@
   async function poll() {
     if (state.polling || !state.authenticated || document.hidden) return;
     state.polling = true;
-    try { await Promise.allSettled([loadStatus(), loadRuns(), ...(state.view === 'status' ? [loadBalances()] : [])]); }
+    try { await Promise.allSettled([loadStatus(), loadRuns(), ...(state.view === 'status' ? [loadBalances(), loadAutomation()] : [])]); }
     finally { state.polling = false; schedulePoll(); }
   }
 
@@ -769,7 +878,7 @@
       return;
     }
     const success = await loadStatus();
-    await loadRuns();
+    await Promise.allSettled([loadRuns(), ...(state.uncertain === 'summary' ? [loadAutomation()] : [])]);
     if (success && state.uncertain !== 'config') {
       const resolving = state.uncertain === 'resolve';
       const remainsPaused = resolving && state.status?.attention?.[state.resolveAccount];
@@ -793,7 +902,7 @@
     if (options.readOnly) input.readOnly = true;
     if (options.min !== undefined) input.min = options.min;
     if (options.max !== undefined) input.max = options.max;
-    if (options.type === 'number') input.step = '1';
+    if (options.type === 'number') input.step = options.step || '1';
     input.autocomplete = options.autocomplete || 'off';
     input.addEventListener('input', () => {
       change(options.type === 'number' ? (input.value === '' ? null : Number(input.value)) : input.value);
@@ -1026,6 +1135,7 @@
         field('目标站点用户名', account.expected_username, (value) => { account.expected_username = value; }, { optional: true, hint: '可额外核对服务器返回的用户名, 不匹配时暂停.' }),
       );
       content.append(advanced('账号代理', [proxyField('代理', account, 'proxy', '沿用上级时使用默认代理; 默认代理未配置时直连. 支持 HTTP/HTTPS 和 SOCKS5, 认证格式: socks5://用户名:密码@主机:端口. 特殊字符需进行 URL 编码.')]));
+      content.append(advanced('账号告警', [field('低余额阈值, 站内美元额度', account.low_balance_threshold, (value) => { account.low_balance_threshold = value; }, { type: 'number', min: 0, max: 1e12, step: 'any', optional: true, hint: '留空沿用通知设置中的全局阈值. 仅在低余额告警启用且本次采集成功时判断, 未知或过期余额不触发.' })]));
       const attention = el('div', 'hint-box');
       attention.dataset.accountAttention = account.id;
       attention.hidden = true;
@@ -1067,6 +1177,27 @@
 
   function renderNotifications(container) {
     container.append(heading('通知渠道', '填写需要启用的渠道, 留空则不发送. 通知可能在执行签到或需要更新凭据时发出, 保存不会发送测试通知.'));
+    const automation = state.config.automation;
+    const settings = el('section', 'automation-settings');
+    settings.append(el('h3', '', '自动提醒'));
+    const grid = el('div', 'form-grid');
+    grid.append(
+      checkField('启用低余额告警', automation.low_balance.enabled, (value) => { automation.low_balance.enabled = value; }, '仅对已启用账户的成功、新鲜余额判断. 未知、过期或停用账户不触发.'),
+      field('全局低余额阈值', automation.low_balance.threshold, (value) => { automation.low_balance.threshold = value; }, { type: 'number', min: 0, max: 1e12, step: 'any', required: true, hint: '站内美元额度. 单账户可在账号详情中的账号告警里覆盖此值.' }),
+      field('低余额提醒冷却, 分钟', automation.low_balance.cooldown_minutes, (value) => { automation.low_balance.cooldown_minutes = value; }, { type: 'number', min: 1, max: 10080, required: true, hint: '持续低余额时按冷却间隔提醒, 回升后重新判断. 重启服务会保留通知状态.' }),
+      checkField('启用故障恢复通知', automation.recovery.enabled, (value) => { automation.recovery.enabled = value; }, '账号在记录真实故障后恢复成功时通知. 签到与余额查询分别判断, 首次成功不会误报恢复.'),
+      field('恢复提醒冷却, 分钟', automation.recovery.cooldown_minutes, (value) => { automation.recovery.cooldown_minutes = value; }, { type: 'number', min: 1, max: 10080, required: true, hint: '同一账户频繁异常与恢复时合并提醒, 健康状态仍持续记录.' }),
+      checkField('启用每日日报', automation.daily_summary.enabled, (value) => { automation.daily_summary.enabled = value; }, '每日发送签到结果、余额、新增额度与异常账户摘要. 数据缺失或仅覆盖观察期时会标明.'),
+      field('每日日报时间, UTC+8', automation.daily_summary.time, (value) => { automation.daily_summary.time = value; }, { type: 'time', required: true, hint: '按 Asia/Singapore 时区执行. 日报读取已有记录, 不额外登录或签到.' }),
+    );
+    settings.append(grid);
+    const action = el('button', 'button secondary', '发送今日日报');
+    action.type = 'button';
+    action.dataset.sendSummary = '';
+    const actions = el('div', 'automation-settings-actions');
+    actions.append(action, el('p', 'field-hint', '点击后会通过已配置的渠道真实发送. 保存配置本身不发送通知; 结果不确定时不会自动重发.'));
+    settings.append(actions);
+    container.append(settings);
     notificationGroups.forEach(([title, fields], index) => {
       const group = el('details', 'notification-group');
       group.open = index === 0 || fields.some(([key]) => state.config.notifications[key]);
@@ -1095,16 +1226,25 @@
   }
 
   function renderRuntime(container) {
-    container.append(heading('定时与网络', '定时任务由当前服务调度, 服务停止期间不会运行. 时间以当前设备所在时区显示.'));
+    container.append(heading('定时与网络', '定时任务由当前服务调度, 服务停止期间不会补跑. 固定时间与日报均按 UTC+8 执行.'));
     const schedule = state.config.schedule;
     const scheduling = el('section', 'runtime-group');
     scheduling.append(el('h3', '', '运行计划'));
     const scheduleGrid = el('div', 'form-grid');
     scheduleGrid.append(
       checkField('启用定时签到', schedule.enabled, (value) => { schedule.enabled = value; }, '保存后生效. 同一时间只运行一个任务, 需要处理的账号会暂停自动执行.'),
-      field('运行间隔, 分钟', schedule.interval_minutes, (value) => { schedule.interval_minutes = value; }, { type: 'number', min: 30, max: 10080, required: true, hint: '允许 30 至 10080 分钟. 请根据站点规则设置合理间隔.' }),
+      selectField('签到计划方式', schedule.mode, [['interval', '按间隔执行'], ['cron', 'Cron 固定时间']], (value) => { schedule.mode = value; renderForm(); }, { hint: '按间隔执行沿用原有计划; Cron 使用固定的 UTC+8 时间.' }),
     );
+    if (schedule.mode === 'cron') {
+      scheduleGrid.append(field('Cron 表达式', schedule.cron, (value) => { schedule.cron = value; }, { required: true, wide: true, placeholder: '0 8 * * *', hint: '标准 5 字段: 分 时 日 月 星期. 支持 *、列表、范围和步长, 最短间隔 30 分钟. 星期 0 或 7 代表周日.' }));
+      const presets = el('div', 'cron-presets field-wide');
+      [['每天 08:00', '0 8 * * *'], ['每天 08:00 和 20:00', '0 8,20 * * *'], ['每周一 08:00', '0 8 * * 1']].forEach(([label, value]) => presets.append(button(label, 'button quiet', () => { schedule.cron = value; markDirty(); renderForm(); })));
+      scheduleGrid.append(presets);
+    } else scheduleGrid.append(field('运行间隔, 分钟', schedule.interval_minutes, (value) => { schedule.interval_minutes = value; }, { type: 'number', min: 30, max: 10080, required: true, hint: '允许 30 至 10080 分钟. 请根据站点规则设置合理间隔.' }));
     scheduling.append(scheduleGrid);
+    const next = el('p', 'hint-box', state.status?.next_run_at ? `下次签到: ${formatBalanceTime(state.status.next_run_at)}` : '定时任务未启用, 或尚未安排下一次运行.');
+    next.dataset.nextCheckin = '';
+    scheduling.append(next);
     const monitoring = state.config.monitoring;
     const monitoringGroup = el('section', 'runtime-group');
     monitoringGroup.append(el('h3', '', '余额监测'));
@@ -1149,6 +1289,7 @@
       const name = account.name || account.id;
       if (!['anyrouter', 'agentrouter'].includes(account.provider)) return `账号 ${name} 的站点不受支持.`;
       if (account.provider === 'agentrouter' ? account.auth_type !== 'password' : !['cookie', 'password'].includes(account.auth_type)) return `账号 ${name} 的认证方式不受此站点支持.`;
+      if (account.low_balance_threshold !== null && account.low_balance_threshold !== undefined && (typeof account.low_balance_threshold !== 'number' || !Number.isFinite(account.low_balance_threshold) || account.low_balance_threshold < 0 || account.low_balance_threshold > 1e12)) return `账号 ${name} 的低余额阈值需要为 0 至 1000000000000 的数值, 或留空继承全局阈值.`;
       if (!account.enabled) continue;
       if (account.auth_type === 'password') {
         if (!account.username || !account.password) return `账号 ${name} 需要填写站点登录账号和密码.`;
@@ -1162,6 +1303,14 @@
     for (const [value, min, max, label] of [[config.schedule.interval_minutes, 30, 10080, '运行间隔'], [config.monitoring.interval_minutes, 30, 10080, '余额采集间隔'], [config.http.timeout_seconds, 5, 120, 'HTTP 超时']]) {
       if (!Number.isInteger(value) || value < min || value > max) return `${label} 需要为 ${min} 至 ${max} 之间的整数.`;
     }
+    if (!['interval', 'cron'].includes(config.schedule.mode)) return '请选择有效的签到计划方式.';
+    if (config.schedule.mode === 'cron' && (typeof config.schedule.cron !== 'string' || config.schedule.cron.trim().split(/\s+/).length !== 5 || !/^[0-9*,/\s-]+$/.test(config.schedule.cron))) return 'Cron 表达式需要包含 5 个字段, 例如每天 08:00 使用 0 8 * * *.';
+    const automation = config.automation;
+    if (typeof automation.low_balance.threshold !== 'number' || !Number.isFinite(automation.low_balance.threshold) || automation.low_balance.threshold < 0 || automation.low_balance.threshold > 1e12) return '全局低余额阈值需要为 0 至 1000000000000 的数值.';
+    for (const [value, label] of [[automation.low_balance.cooldown_minutes, '低余额提醒冷却'], [automation.recovery.cooldown_minutes, '恢复提醒冷却']]) {
+      if (!Number.isInteger(value) || value < 1 || value > 10080) return `${label}需要为 1 至 10080 之间的整数分钟.`;
+    }
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(automation.daily_summary.time)) return '每日日报时间需要为有效的 24 小时时间, 例如 23:55.';
     if (config.webui_url) {
       try {
         const url = new URL(config.webui_url);
@@ -1265,11 +1414,13 @@
       $('runs-list').replaceChildren();
       state.runViews.clear();
       state.balances = null;
+      state.automation = null;
       state.balanceViews.clear();
       $('balance-accounts').replaceChildren();
       $('balance-summary').replaceChildren();
       $('balance-history').replaceChildren();
       $('balance-chart').replaceChildren();
+      $('automation-events').replaceChildren();
       notice('');
       showLogin('');
     } catch (error) {
@@ -1293,6 +1444,11 @@
   window.addEventListener('popstate', () => switchView(window.location.pathname === '/status' ? 'status' : 'manage', false));
   $('read-balances').addEventListener('click', loadBalances);
   $('retry-balances').addEventListener('click', loadBalances);
+  $('retry-automation').addEventListener('click', loadAutomation);
+  document.addEventListener('click', (event) => {
+    const target = event.target.closest('[data-send-summary]');
+    if (target && !target.disabled) sendDailySummary();
+  });
   $('refresh-balances').addEventListener('click', () => refreshBalances());
   $('config-form').addEventListener('submit', saveConfig);
   $('reload-config').addEventListener('click', () => loadConfig(true));

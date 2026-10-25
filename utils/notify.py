@@ -9,6 +9,10 @@ import httpx
 from utils.fy1push import fy1push_channel, fy1push_endpoint, fy1push_summary, validate_fy1push_token
 
 
+class NotificationRejected(RuntimeError):
+	"""The provider explicitly rejected this notification."""
+
+
 class NotificationKit:
 	def __init__(self):
 		self.email_user: str = os.getenv('EMAIL_USER', '')
@@ -37,8 +41,8 @@ class NotificationKit:
 		with httpx.Client(timeout=30.0) as client:
 			response = client.post(url, json=data)
 
-		if response.status_code >= 400:
-			raise RuntimeError(f'{service} request failed: HTTP {response.status_code}')
+		if not 200 <= response.status_code < 300:
+			raise NotificationRejected(f'{service} request failed: HTTP {response.status_code}')
 
 		try:
 			payload = response.json()
@@ -50,15 +54,17 @@ class NotificationKit:
 
 		error_msg = payload.get('errmsg') or payload.get('message') or payload.get('msg') or payload.get('error')
 		if payload.get('ok') is False:
-			raise RuntimeError(f'{service} request failed: {error_msg or payload.get("description") or "ok=false"}')
+			raise NotificationRejected(
+				f'{service} request failed: {error_msg or payload.get("description") or "ok=false"}'
+			)
 		if payload.get('errcode') not in (None, 0):
-			raise RuntimeError(f'{service} request failed: {error_msg or payload.get("errcode")}')
+			raise NotificationRejected(f'{service} request failed: {error_msg or payload.get("errcode")}')
 		if payload.get('StatusCode') not in (None, 0):
-			raise RuntimeError(f'{service} request failed: {error_msg or payload.get("StatusCode")}')
+			raise NotificationRejected(f'{service} request failed: {error_msg or payload.get("StatusCode")}')
 		if payload.get('code') not in (None, 0, 200):
-			raise RuntimeError(f'{service} request failed: {error_msg or payload.get("code")}')
+			raise NotificationRejected(f'{service} request failed: {error_msg or payload.get("code")}')
 		if payload.get('ret') not in (None, 0, 1, 200):
-			raise RuntimeError(f'{service} request failed: {error_msg or payload.get("ret")}')
+			raise NotificationRejected(f'{service} request failed: {error_msg or payload.get("ret")}')
 
 		return response
 
@@ -77,9 +83,10 @@ class NotificationKit:
 		msg['Subject'] = title
 
 		smtp_server = self.smtp_server if self.smtp_server else f'smtp.{self.email_user.split("@")[1]}'
-		with smtplib.SMTP_SSL(smtp_server, 465) as server:
+		with smtplib.SMTP_SSL(smtp_server, 465, timeout=30) as server:
 			server.login(self.email_user, self.email_pass)
-			server.send_message(msg)
+			if server.send_message(msg):
+				raise NotificationRejected('SMTP did not accept all recipients')
 
 	def send_pushplus(self, title: str, content: str):
 		if not self.pushplus_token:
@@ -182,13 +189,66 @@ class NotificationKit:
 		except httpx.HTTPError:
 			raise RuntimeError('Fy1Push request outcome unknown; no automatic retry') from None
 		if response.status_code != 200:
-			raise RuntimeError(f'Fy1Push request failed: HTTP {response.status_code}')
+			raise NotificationRejected(f'Fy1Push request failed: HTTP {response.status_code}')
 		try:
 			result = response.json()
 		except ValueError:
 			raise RuntimeError('Fy1Push returned an invalid response; delivery is unconfirmed') from None
 		if not isinstance(result, dict) or result.get('ok') is not True or result.get('accepted') is not True:
 			raise RuntimeError('Fy1Push did not confirm acceptance; no automatic retry')
+
+	def deliver_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text') -> dict:
+		"""Return acceptance evidence for configured channels without printing raw failures.
+
+		One attempt per channel. An unknown result is deliberately not retried, and
+		provider acceptance never means that a phone displayed the notification.
+		"""
+		channels = [
+			(
+				'Email',
+				bool(self.email_user and self.email_pass and self.email_to),
+				lambda: self.send_email(title, content, msg_type),
+			),
+			('PushPlus', bool(self.pushplus_token), lambda: self.send_pushplus(title, content)),
+			('Server Push', bool(self.server_push_key), lambda: self.send_serverPush(title, content)),
+			('DingTalk', bool(self.dingding_webhook), lambda: self.send_dingtalk(title, content)),
+			('Feishu', bool(self.feishu_webhook), lambda: self.send_feishu(title, content)),
+			('WeChat Work', bool(self.weixin_webhook), lambda: self.send_wecom(title, content)),
+			('Gotify', bool(self.gotify_url and self.gotify_token), lambda: self.send_gotify(title, content)),
+			(
+				'Telegram',
+				bool(self.telegram_bot_token and self.telegram_chat_id),
+				lambda: self.send_telegram(title, content),
+			),
+			('Bark', bool(self.bark_key), lambda: self.send_bark(title, content)),
+			('Fy1Push', bool(self.fy1push_server and self.fy1push_token), lambda: self.send_fy1push(title, content)),
+		]
+		results = []
+		for name, configured, send in channels:
+			if not configured:
+				continue
+			try:
+				send()
+				results.append({'channel': name, 'state': 'accepted', 'error_code': None})
+			except NotificationRejected:
+				results.append({'channel': name, 'state': 'failed', 'error_code': 'notification_rejected'})
+			except RuntimeError:
+				results.append({'channel': name, 'state': 'unknown', 'error_code': 'provider_acceptance_unconfirmed'})
+			except Exception:
+				results.append({'channel': name, 'state': 'unknown', 'error_code': 'notification_outcome_unknown'})
+		states = {result['state'] for result in results}
+		state = (
+			'not_configured'
+			if not results
+			else 'accepted'
+			if states == {'accepted'}
+			else 'partial'
+			if 'accepted' in states
+			else 'failed'
+			if states == {'failed'}
+			else 'unknown'
+		)
+		return {'state': state, 'channels': results, 'device_delivery': 'unconfirmed'}
 
 	def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text'):
 		notifications = [

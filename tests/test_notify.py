@@ -57,6 +57,7 @@ def test_real_notification(notification_kit):
 @patch('smtplib.SMTP_SSL')
 def test_send_email(mock_smtp, notification_kit):
 	mock_server = MagicMock()
+	mock_server.send_message.return_value = {}
 	mock_smtp.return_value.__enter__.return_value = mock_server
 
 	notification_kit.send_email('测试标题', '测试内容')
