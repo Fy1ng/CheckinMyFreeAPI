@@ -8,7 +8,7 @@
     csrf: '', authenticated: false, config: null, revision: null, dirty: false,
     tab: 'accounts', busy: false, configLoading: false, statusLoading: false,
     runsLoading: false, status: null, statusFresh: false, uncertain: null, resolveAccount: null,
-    savedIds: new Set(), migration: null, focusAccount: new URL(window.location.href).searchParams.get('account'),
+    savedIds: new Set(), migration: null, acknowledgedMigrations: new Set(), focusAccount: new URL(window.location.href).searchParams.get('account'),
     pollTimer: null, polling: false, expanded: new Map(), cardHeaders: [], runViews: new Map(),
     view: window.location.pathname === '/status' ? 'status' : 'manage',
     balances: null, balancesLoading: false, balanceViews: new Map(),
@@ -226,7 +226,21 @@
 
   function migrationNotice(data) {
     state.migration = data.migration || null;
-    if (state.migration) notice('旧配置已保留并转换为 HTTP 配置. 不兼容的账号已停用, 请展开账号重新配置凭据后启用. 原有数据不会自动清空.', 'warning');
+    if (!state.migration) return;
+    const key = `newapi.migration.acknowledged:${state.migration.from_schema}:${state.migration.source_revision}`;
+    let acknowledged = state.acknowledgedMigrations.has(key);
+    try { acknowledged ||= localStorage.getItem(key) === '1'; }
+    catch (_) { /* Storage may be unavailable; the current page still remembers acknowledgement. */ }
+    if (acknowledged) return;
+    notice('旧配置已保留并转换为 HTTP 配置. 不兼容的账号已停用, 请展开账号重新配置凭据后启用. 原有数据不会自动清空.', 'warning', {
+      label: '我已知晓', handler: () => {
+        state.acknowledgedMigrations.add(key);
+        try { localStorage.setItem(key, '1'); }
+        catch (_) { /* Acknowledgement remains effective for this page without storage. */ }
+        notice('');
+      },
+    });
+    $('global-message').classList.add('migration-notice');
   }
 
   async function loadConfig(askDiscard) {

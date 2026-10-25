@@ -9,7 +9,7 @@ from aiohttp.test_utils import TestServer
 from playwright.async_api import async_playwright, expect
 
 from server.app import SERVICE, create_app
-from server.config_store import SECRET_KEEP
+from server.config_store import SECRET_KEEP, ConfigStore
 
 pytestmark = pytest.mark.skipif(os.getenv('CHECKIN_BROWSER_TESTS') != '1', reason='Opt-in local Chromium fixtures')
 
@@ -52,6 +52,46 @@ async def local_ui(tmp_path, intercept=None):
 			assert not any(path.startswith(('/api/identities', '/manual/')) for _, path in requests)
 		finally:
 			await browser.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('width', [1440, 390])
+async def test_migration_acknowledgement_persists_without_hiding_other_notices(tmp_path, monkeypatch, width):
+	migration = {
+		'from_schema': 2,
+		'source_revision': 13,
+		'converted_accounts': 3,
+		'disabled_accounts': 3,
+		'omitted_accounts': 0,
+		'schedule_disabled': False,
+	}
+	monkeypatch.setattr(ConfigStore, 'migration_info', lambda _: dict(migration))
+	async with local_ui(tmp_path) as (page, service, _):
+		await page.set_viewport_size({'width': width, 'height': 1080})
+		message = page.locator('#global-message')
+		acknowledge = page.get_by_role('button', name='我已知晓', exact=True)
+		await expect(message).to_contain_text('旧配置已保留并转换为 HTTP 配置')
+		await expect(acknowledge).to_be_visible()
+		text_bounds = await message.locator('span').bounding_box()
+		button_bounds = await acknowledge.bounding_box()
+		assert text_bounds is not None and button_bounds is not None
+		assert button_bounds['x'] >= text_bounds['x'] + text_bounds['width']
+		assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+		await acknowledge.click()
+		await expect(message).to_be_hidden()
+		assert service.store.load()[1] == 0
+		await page.get_by_role('button', name='开始签到', exact=True).click()
+		await expect(message).to_be_visible()
+		await expect(message).to_contain_text('请先保存至少一个已启用账号')
+		await expect(acknowledge).to_have_count(0)
+		await page.reload()
+		await expect(page.locator('#workspace')).to_be_visible()
+		await expect(acknowledge).to_have_count(0)
+		await expect(message).not_to_contain_text('旧配置已保留并转换为 HTTP 配置')
+		migration['source_revision'] = 14
+		await page.reload()
+		await expect(acknowledge).to_be_visible()
+		await expect(message).to_contain_text('旧配置已保留并转换为 HTTP 配置')
 
 
 @pytest.mark.asyncio
