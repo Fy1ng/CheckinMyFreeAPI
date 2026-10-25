@@ -13,6 +13,7 @@
     view: window.location.pathname === '/status' ? 'status' : 'manage',
     balances: null, balancesLoading: false, balanceViews: new Map(),
     automation: null, automationLoading: false,
+    authPolicy: {}, loginBusy: false,
   };
 
   class ApiError extends Error {
@@ -57,7 +58,7 @@
       catch (_) { throw new ApiError('服务返回了无法读取的响应. 请重新读取状态确认结果.', response.status); }
       if (!response.ok) {
         const message = typeof payload.error === 'string' ? payload.error : `请求失败, HTTP ${response.status}.`;
-        if (response.status === 401 && path !== '/api/login') showLogin('登录已失效. 请重新登录.');
+        if (response.status === 401 && path !== '/api/login' && !path.startsWith('/api/passkey/login/')) { showLogin('登录已失效. 请重新登录.'); refreshLoginPolicy(); }
         throw new ApiError(message, response.status);
       }
       return payload;
@@ -156,6 +157,26 @@
     updateControls();
   }
 
+  function renderLoginPolicy(session = state.authPolicy) {
+    state.authPolicy = { ...state.authPolicy, ...(session || {}) };
+    const password = state.authPolicy.password_login_allowed ?? (state.authPolicy.auth_mode !== 'passkey' || state.authPolicy.reauth_method === 'password');
+    const passkey = state.authPolicy.passkey_available === true;
+    $('password-login-controls').hidden = !password;
+    $('login-password').disabled = !password || state.loginBusy;
+    $('login-password').required = password;
+    $('login-button').disabled = !password || state.loginBusy;
+    $('passkey-login-button').hidden = !passkey && state.authPolicy.auth_mode !== 'passkey';
+    $('passkey-login-button').disabled = state.loginBusy || !passkey || state.authPolicy.passkey_origin_allowed === false || !window.CheckinPasskeys?.supported();
+    $('login-method-hint').textContent = !password ? '此入口仅允许 Passkey 登录. 请使用已绑定的设备或安全密钥.' : state.authPolicy.auth_mode === 'passkey' ? '当前为本机恢复入口, 可使用管理密码. 公网入口仍仅允许 Passkey.' : '请输入管理密码, 或使用已绑定的 Passkey.';
+    if (state.authPolicy.auth_mode === 'passkey' && (!passkey || state.authPolicy.passkey_origin_allowed === false)) $('login-method-hint').textContent += ' 当前地址没有匹配的密钥, 请打开配置的 HTTPS 管理入口或通过 SSH 恢复.';
+    else if (passkey && !window.CheckinPasskeys?.supported()) $('login-method-hint').textContent += ' 当前浏览器或地址不支持 Passkey, 请使用支持 WebAuthn 的浏览器和 HTTPS 入口.';
+  }
+
+  async function refreshLoginPolicy() {
+    try { renderLoginPolicy(await api('/api/session')); }
+    catch (_) { /* Keep the last known mode until the session endpoint is reachable. */ }
+  }
+
   function showLogin(message = '') {
     state.authenticated = false;
     state.csrf = '';
@@ -165,10 +186,11 @@
     $('logout-button').hidden = true;
     $('login-message').textContent = message;
     $('login-message').className = `inline-message${message ? ' error' : ''}`;
-    $('login-button').disabled = false;
+    renderLoginPolicy();
   }
 
   async function enterWorkspace(session) {
+    renderLoginPolicy(session);
     state.authenticated = true;
     state.csrf = session.csrf;
     $('login-password').value = '';
@@ -1393,15 +1415,26 @@
 
   $('login-form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    if ($('login-button').disabled) return;
-    $('login-button').disabled = true;
+    if ($('login-button').disabled || state.loginBusy) return;
+    state.loginBusy = true;
+    renderLoginPolicy();
     $('login-message').textContent = '正在登录...';
     $('login-message').className = 'inline-message';
     try { await enterWorkspace(await api('/api/login', { method: 'POST', body: { password: $('login-password').value } })); }
     catch (error) {
       $('login-message').textContent = errorText(error);
       $('login-message').className = 'inline-message error';
-    } finally { $('login-button').disabled = false; }
+    } finally { state.loginBusy = false; renderLoginPolicy(); }
+  });
+
+  $('passkey-login-button').addEventListener('click', async () => {
+    if (state.loginBusy || $('passkey-login-button').disabled) return;
+    state.loginBusy = true; renderLoginPolicy();
+    $('login-message').textContent = '请在浏览器或设备上完成 Passkey 验证...';
+    $('login-message').className = 'inline-message';
+    try { await enterWorkspace(await window.CheckinPasskeys.login(api)); }
+    catch (error) { $('login-message').textContent = window.CheckinPasskeys.errorMessage(error); $('login-message').className = 'inline-message error'; }
+    finally { state.loginBusy = false; renderLoginPolicy(); }
   });
 
   $('logout-button').addEventListener('click', async () => {
@@ -1465,6 +1498,7 @@
     $('login-button').disabled = true;
     try {
       const session = await api('/api/session');
+      renderLoginPolicy(session);
       if (session.authenticated) await enterWorkspace(session);
       else showLogin('');
     } catch (error) { showLogin(errorText(error)); }

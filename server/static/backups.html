@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>备份与恢复 | NewAPI</title>
   <link rel="stylesheet" href="/style.css">
+  <script src="/passkeys.js" defer></script>
   <script src="/backups.js" defer></script>
 </head>
 <body>
@@ -13,11 +14,11 @@
     <header class="site-header"><a class="brand" href="/"><span class="brand-mark">N</span><span>NewAPI<span class="brand-caption">备份与恢复</span></span></a><span class="local-tag">私有管理</span></header>
     <main>
       <section id="backup-login" class="login-wrap" hidden>
-        <div class="login-intro"><p class="eyebrow">ENCRYPTED BACKUPS</p><h1>保存数据,<br>保留恢复的能力.</h1><p>请先使用当前管理密码登录.</p></div>
-        <form id="backup-login-form" class="login-card"><label class="field"><span class="field-label">管理密码</span><input id="backup-login-password" type="password" autocomplete="current-password" maxlength="512" required></label><button class="button primary" type="submit">登录</button><p id="backup-login-message" class="inline-message" role="status"></p></form>
+        <div class="login-intro"><p class="eyebrow">ENCRYPTED BACKUPS</p><h1>保存数据,<br>保留恢复的能力.</h1><p>请使用当前管理认证方式登录.</p></div>
+        <form id="backup-login-form" class="login-card"><div id="backup-password-login"><label class="field"><span class="field-label">管理密码</span><input id="backup-login-password" type="password" autocomplete="current-password" maxlength="512" required></label><button class="button primary" type="submit">登录</button></div><button id="backup-passkey-login" class="button primary" type="button" hidden>使用 Passkey 登录</button><p id="backup-login-message" class="inline-message" role="status"></p></form>
       </section>
       <div id="backup-workspace" hidden>
-        <nav class="workspace-nav" aria-label="控制台页面"><a href="/status">Status</a><a href="/">管理面板</a><a href="/backups" aria-current="page">备份与恢复</a></nav>
+        <nav class="workspace-nav" aria-label="控制台页面"><a href="/status">Status</a><a href="/">管理面板</a><a href="/backups" aria-current="page">备份与恢复</a><a href="/security">登录安全</a></nav>
         <section class="page-heading"><div><p class="eyebrow">ENCRYPTED BACKUPS</p><h1>备份与恢复</h1><p class="muted">备份包含数据库和主密钥, 使用独立恢复密码加密.</p></div></section>
         <p id="backup-message" class="notice" role="status" aria-live="polite" hidden></p>
         <section class="balance-panel" aria-labelledby="backup-settings-title">
@@ -40,7 +41,7 @@
             <label class="field"><span class="field-label">此备份的恢复密码</span><input id="restore-password" type="password" autocomplete="off" maxlength="512" required></label>
             <button id="backup-preview" type="submit" class="button secondary">校验并预览</button>
           </form>
-          <div id="restore-preview" class="notice" hidden><div><h3>即将恢复的数据</h3><p id="restore-preview-detail"></p><p>当前数据会先自动备份, 再替换为此备份的数据. 恢复前快照使用已保存的恢复密码; 尚未设置时使用本次输入的恢复密码. 完成后需要重新登录.</p><form id="backup-restore-form"><label class="field"><span class="field-label">当前管理员密码</span><input id="restore-admin-password" type="password" autocomplete="current-password" maxlength="512" required></label><label class="field"><span><input id="restore-confirm" type="checkbox" required> 我确认已核对备份, 并替换当前账户配置和历史数据</span></label><button id="backup-restore" type="submit" class="button danger-soft">确认恢复</button></form></div></div>
+          <div id="restore-preview" class="notice" hidden><div><h3>即将恢复的数据</h3><p id="restore-preview-detail"></p><p>当前数据会先自动备份, 再替换为此备份的数据. 恢复前快照使用已保存的恢复密码; 尚未设置时使用本次输入的恢复密码. 完成后需要重新登录.</p><form id="backup-restore-form"><label id="restore-password-reauth" class="field"><span class="field-label">当前管理员密码</span><input id="restore-admin-password" type="password" autocomplete="current-password" maxlength="512" required></label><p id="restore-passkey-reauth" class="muted small" hidden>确认恢复时将使用 Passkey 再次验证身份. 当前登录模式和已绑定密钥会保留.</p><label class="field"><span><input id="restore-confirm" type="checkbox" required> 我确认已核对备份, 并替换当前账户配置和历史数据</span></label><button id="backup-restore" type="submit" class="button danger-soft">确认恢复</button></form></div></div>
         </section>
       </div>
     </main>

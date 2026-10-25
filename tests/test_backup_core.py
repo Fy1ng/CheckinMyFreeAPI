@@ -91,6 +91,7 @@ async def instances(tmp_path):
 	for service in reversed(services):
 		await service.backups.close()
 		await service.jobs.close()
+		service.security.close()
 		service.store.close()
 		service.db.close()
 

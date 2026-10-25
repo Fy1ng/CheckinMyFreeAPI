@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>NewAPI 签到控制台</title>
   <link rel="stylesheet" href="/style.css">
+  <script src="/passkeys.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -19,15 +20,15 @@
       <section id="login-view" class="login-wrap" aria-labelledby="login-title">
         <div class="login-intro"><p class="eyebrow">HTTP CHECK-IN</p><h1 id="login-title">你的账号,<br>在这里管理.</h1><p>支持 AnyRouter 和 AgentRouter.<br>保存账号凭据, 按计划通过 HTTP 执行.</p></div>
         <form id="login-form" class="login-card">
-          <h2>进入控制台</h2><p class="muted">请输入启动服务时配置的管理密码.</p>
-          <label class="field"><span class="field-label">管理密码</span><input id="login-password" type="password" autocomplete="current-password" required maxlength="512" autofocus></label>
-          <button id="login-button" class="button primary full" type="submit">登录</button>
+          <h2>进入控制台</h2><p id="login-method-hint" class="muted">请输入启动服务时配置的管理密码.</p>
+          <div id="password-login-controls"><label class="field"><span class="field-label">管理密码</span><input id="login-password" type="password" autocomplete="current-password" required maxlength="512" autofocus></label><button id="login-button" class="button primary full" type="submit">登录</button></div>
+          <button id="passkey-login-button" class="button secondary full" type="button" hidden>使用 Passkey 登录</button>
           <p id="login-message" class="inline-message" role="status" aria-live="polite">正在检查登录状态...</p>
         </form>
       </section>
 
       <div id="workspace" hidden>
-        <nav class="workspace-nav" aria-label="控制台页面"><a href="/status" data-view="status">Status</a><a href="/" data-view="manage" aria-current="page">管理面板</a><a href="/backups">备份与恢复</a></nav>
+        <nav class="workspace-nav" aria-label="控制台页面"><a href="/status" data-view="status">Status</a><a href="/" data-view="manage" aria-current="page">管理面板</a><a href="/backups">备份与恢复</a><a href="/security">登录与安全</a></nav>
         <section class="page-heading"><div><p class="eyebrow" id="page-eyebrow">OVERVIEW</p><h1 id="page-title">签到控制台</h1><p class="muted" id="page-description">先保存配置, 再执行签到. 任务与配置分别管理.</p></div><span id="connection-status" class="connection-state">连接中</span></section>
         <div id="global-message" class="notice" role="status" aria-live="polite" hidden></div>
 

@@ -2,7 +2,20 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { csrf: '', config: null, revision: null, busy: false, dirty: false, ticket: null, uncertain: false };
+  const state = { csrf: '', config: null, revision: null, busy: false, dirty: false, ticket: null, uncertain: false, reauthMethod: 'password' };
+  function loginPolicy(policy) {
+    const password = policy.password_login_allowed ?? (policy.auth_mode !== 'passkey' || policy.reauth_method === 'password');
+    state.reauthMethod = policy.reauth_method || (policy.auth_mode === 'passkey' ? 'passkey' : 'password');
+    $('backup-password-login').hidden = !password;
+    $('backup-login-password').required = password;
+    $('backup-passkey-login').hidden = !policy.passkey_available;
+    $('backup-passkey-login').disabled = !window.CheckinPasskeys?.supported();
+    $('restore-password-reauth').hidden = state.reauthMethod === 'passkey';
+    $('restore-admin-password').required = state.reauthMethod !== 'passkey';
+    $('restore-passkey-reauth').hidden = state.reauthMethod !== 'passkey';
+    if (!password && !policy.passkey_available) message('此入口没有可用的 Passkey. 请通过 SSH 恢复管理入口.', true);
+    else if (!password && !window.CheckinPasskeys?.supported()) message('当前浏览器不支持 Passkey, 请使用支持 WebAuthn 的浏览器.', true);
+  }
   function message(text, error = false) {
     $('backup-message').textContent = text;
     $('backup-message').className = `notice${error ? ' error' : ''}`;
@@ -33,6 +46,7 @@
     }
     const result = await response.json();
     if (!response.ok) { const error = new Error(result.error || '请求失败'); error.status = response.status; throw error; }
+    if (result.csrf) state.csrf = result.csrf;
     return result;
   }
   function markDirty() {
@@ -41,6 +55,7 @@
   }
   function formatTime(value) { return value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Singapore', hour12: false }) + ' UTC+8' : '暂无'; }
   async function load() {
+    loginPolicy(await api('/api/session'));
     const result = await api('/api/config');
     state.config = result.config; state.revision = result.revision; state.dirty = false; state.uncertain = false; state.ticket = null;
     const settings = state.config.backups;
@@ -73,7 +88,7 @@
       if (write && (!error.status || error.status >= 500)) {
         state.uncertain = true;
         message('请求结果尚未确认. 请先重新读取设置和备份列表, 确认结果后再操作.', true);
-      } else message(error.message || '连接失败, 请重试读取状态.', true);
+      } else message(window.CheckinPasskeys?.errorMessage(error) || error.message || '连接失败, 请重试读取状态.', true);
     } finally { state.busy = false; controls(); }
   }
   $('backup-login-form').addEventListener('submit', (event) => {
@@ -84,6 +99,12 @@
       $('backup-login').hidden = true; $('backup-workspace').hidden = false; await load();
     });
   });
+  $('backup-passkey-login').addEventListener('click', () => perform(async () => {
+    const session = await window.CheckinPasskeys.login(api);
+    state.csrf = session.csrf;
+    $('backup-login').hidden = true; $('backup-workspace').hidden = false;
+    await load();
+  }));
   $('backup-settings-form').addEventListener('input', markDirty);
   $('backup-settings-form').addEventListener('submit', (event) => {
     event.preventDefault();
@@ -122,7 +143,12 @@
     event.preventDefault();
     if (!state.ticket || !$('restore-confirm').checked) return;
     perform(async () => {
-      await api('/api/backups/restore', { method: 'POST', body: { revision: state.revision, ticket: state.ticket, admin_password: $('restore-admin-password').value } });
+      const body = { revision: state.revision, ticket: state.ticket };
+      if (state.reauthMethod === 'passkey') {
+        try { body.reauth_token = await window.CheckinPasskeys.reauth(api); }
+        catch (error) { error.status ||= 400; throw error; }
+      } else body.admin_password = $('restore-admin-password').value;
+      await api('/api/backups/restore', { method: 'POST', body });
       $('restore-admin-password').value = ''; state.ticket = null; state.dirty = false;
       window.location.assign('/backups?restored=1');
     }, true);
@@ -131,7 +157,8 @@
   perform(async () => {
     const session = await api('/api/session'); state.csrf = session.csrf;
     $('backup-login').hidden = session.authenticated; $('backup-workspace').hidden = !session.authenticated;
+    loginPolicy(session);
     if (session.authenticated) await load();
-    if (new URLSearchParams(location.search).has('restored')) $('backup-login-message').textContent = '恢复完成, 自动任务已停用. 请使用当前管理员密码重新登录并核对配置.';
+    if (new URLSearchParams(location.search).has('restored')) $('backup-login-message').textContent = '恢复完成, 自动任务已停用. 请使用当前管理认证方式重新登录并核对配置.';
   });
 })();

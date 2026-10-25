@@ -55,7 +55,12 @@ async def backup_ui(tmp_path, *, authenticated=True, mobile=False):
 		)
 
 	app.router.add_get('/api/backups/' + BACKUP_ID, download)
-	for path, filename in [('/backups', 'backups.html'), ('/backups.js', 'backups.js'), ('/style.css', 'style.css')]:
+	for path, filename in [
+		('/backups', 'backups.html'),
+		('/backups.js', 'backups.js'),
+		('/passkeys.js', 'passkeys.js'),
+		('/style.css', 'style.css'),
+	]:
 
 		async def static(_, filename=filename):
 			return web.FileResponse(STATIC_ROOT / filename)

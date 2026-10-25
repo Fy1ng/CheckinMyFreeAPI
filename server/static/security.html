@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>登录与安全 | NewAPI</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/passkeys.js" defer></script>
+  <script src="/security.js" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    <header class="site-header"><a class="brand" href="/"><span class="brand-mark">N</span><span>NewAPI<span class="brand-caption">登录与安全</span></span></a><div class="header-end"><span class="local-tag">私有管理</span><button id="security-logout" class="button quiet" type="button" hidden>退出</button></div></header>
+    <main>
+      <section id="security-login" class="login-wrap" hidden>
+        <div class="login-intro"><p class="eyebrow">LOGIN AND SECURITY</p><h1>选择登录方式,<br>保护管理入口.</h1><p>密码版和 Passkey 版共用账户与数据.<br>Passkey 私钥由你的设备或认证器保管.</p></div>
+        <form id="security-login-form" class="login-card">
+          <h2>进入安全设置</h2><p id="security-login-hint" class="muted"></p>
+          <div id="security-password-login"><label class="field"><span class="field-label">管理密码</span><input id="security-login-password" type="password" autocomplete="current-password" maxlength="512" required></label><button id="security-login-button" class="button primary full" type="submit">登录</button></div>
+          <button id="security-passkey-login" class="button secondary full" type="button" hidden>使用 Passkey 登录</button>
+          <p id="security-login-message" class="inline-message" role="status" aria-live="polite">正在检查登录状态...</p>
+        </form>
+      </section>
+      <div id="security-workspace" hidden>
+        <nav class="workspace-nav" aria-label="控制台页面"><a href="/status">Status</a><a href="/">管理面板</a><a href="/backups">备份与恢复</a><a href="/security" aria-current="page">登录与安全</a></nav>
+        <section class="page-heading"><div><p class="eyebrow">LOGIN AND SECURITY</p><h1>登录与安全</h1><p class="muted">先绑定并验证密钥, 再选择适合你的登录模式.</p></div><button id="security-reload" class="button quiet" type="button">重新读取</button></section>
+        <p id="security-message" class="notice" role="status" aria-live="polite" hidden></p>
+        <section class="balance-panel" aria-labelledby="security-mode-title">
+          <div class="panel-title"><h2 id="security-mode-title">登录模式</h2><span id="security-mode-badge" class="badge"></span></div>
+          <p id="security-mode-description" class="muted small"></p>
+          <p class="muted small">密码版保留管理密码登录. Passkey 版关闭公网密码登录, 使用设备验证或安全密钥. 两种模式保留相同的账户、任务与历史数据.</p>
+          <div class="security-mode-actions"><button id="enable-passkey-mode" class="button primary" type="button" disabled>启用 Passkey 版</button><button id="enable-password-mode" class="button secondary" type="button" disabled>切换为密码版</button></div>
+          <p id="security-mode-hint" class="muted small"></p>
+        </section>
+        <section class="balance-panel" aria-labelledby="security-keys-title">
+          <div class="panel-title"><h2 id="security-keys-title">已绑定 Passkey</h2><span id="security-key-count" class="muted small"></span></div>
+          <p id="security-origin-hint" class="muted small"></p>
+          <div id="security-keys" class="security-keys"></div>
+          <div class="security-verify-action"><button id="verify-passkey" class="button secondary" type="button" disabled>验证 Passkey</button><p class="muted small">新密钥需要成功完成一次验证后才能启用 Passkey 版. 启用时会再次验证你的密钥.</p></div>
+        </section>
+        <section class="balance-panel" aria-labelledby="security-register-title">
+          <h2 id="security-register-title">添加 Passkey</h2>
+          <p class="muted small">使用 Windows Hello、手机或硬件安全密钥. 建议绑定另一把备用密钥, 以便设备丢失时登录.</p>
+          <form id="security-register-form" class="security-register-form">
+            <label class="field"><span class="field-label">密钥名称</span><input id="security-key-label" type="text" maxlength="80" placeholder="例如: 我的电脑或备用安全密钥" required></label>
+            <button id="security-register" class="button primary" type="submit" disabled>添加 Passkey</button>
+          </form>
+          <p id="security-register-hint" class="muted small"></p>
+        </section>
+        <section id="security-password-reauth" class="balance-panel" aria-labelledby="security-confirm-title">
+          <h2 id="security-confirm-title">确认当前身份</h2><p class="muted small">密码版中的添加和删除操作需要重新验证管理密码. Passkey 版使用新的设备验证, 公网不能通过密码绕过.</p>
+          <label class="field"><span class="field-label">当前管理密码</span><input id="security-current-password" type="password" autocomplete="current-password" maxlength="512"></label>
+        </section>
+        <section class="hint-box security-recovery"><strong>设备丢失或地址变化</strong><p>Passkey 绑定注册时的管理入口. 地址变化或没有可用密钥时, 使用 SSH 恢复工具切换登录模式. 公网不会自动回退到密码登录. Passkey 版不能删除最后一把当前入口已验证的密钥.</p></section>
+      </div>
+    </main>
+    <footer>NewAPI Check-in<span>服务器保存公钥, 不读取你的设备私钥.</span></footer>
+  </div>
+</body>
+</html>

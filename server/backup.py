@@ -102,6 +102,7 @@ def _expected_schema(scratch_parent: Path) -> dict[tuple[str, str], str | None]:
 	from server.execution_state import ExecutionState
 	from server.http_session_store import HttpSessionStore
 	from server.jobs import JobManager
+	from server.passkeys import SecurityStore
 
 	with tempfile.TemporaryDirectory(prefix='.backup-schema-', dir=scratch_parent) as directory:
 		root, key = Path(directory), secrets.token_bytes(32)
@@ -112,6 +113,7 @@ def _expected_schema(scratch_parent: Path) -> dict[tuple[str, str], str | None]:
 		attention = ExecutionState(root / 'webui.sqlite3')
 		sessions = HttpSessionStore(root / 'webui.sqlite3', hmac.digest(key, _SESSION_PURPOSE, 'sha256'))
 		backups = BackupRuntime(store, root, key, manager)
+		security = SecurityStore(root / 'webui.sqlite3')
 		try:
 			# New optional services create their own tables when taking a cached snapshot.
 			if hasattr(manager, 'automation_snapshot'):
@@ -122,6 +124,7 @@ def _expected_schema(scratch_parent: Path) -> dict[tuple[str, str], str | None]:
 			manager.db.commit()
 			return _schema(manager.db)
 		finally:
+			security.close()
 			backups.manager.close()
 			backups.db.close()
 			automation.close()
@@ -309,6 +312,7 @@ def _prepare_database(
 	current_config: dict | None,
 	current_revision: int,
 	current_auth: tuple | None,
+	current_security: dict[str, list[tuple]] | None = None,
 ) -> None:
 	config, saved_revision, _ = _validate_database(path, old_key)
 	revision = max(current_revision, saved_revision) + 1
@@ -352,6 +356,22 @@ def _prepare_database(
 		if current_auth is not None:
 			db.execute('DELETE FROM web_auth')
 			db.execute('INSERT INTO web_auth(id,salt,digest) VALUES (1,?,?)', current_auth)
+		if current_security is not None:
+			# Restoring account data must never downgrade the current authentication policy
+			# or resurrect deleted authenticators from the uploaded backup.
+			expected = _expected_schema(path.parent)
+			for name in ('web_security', 'web_passkeys'):
+				if name not in tables:
+					definition = expected[('table', name)]
+					if definition is None:
+						raise BackupError('当前认证数据结构不可用')
+					db.execute(definition)
+				db.execute('DELETE FROM ' + name)  # nosec B608 - fixed authentication table allowlist
+				rows = current_security.get(name, [])
+				if rows:
+					marks = ','.join('?' for _ in rows[0])
+					db.executemany('INSERT INTO ' + name + ' VALUES (' + marks + ')', rows)  # nosec B608 - fixed table names, bound values
+			db.execute('UPDATE web_security SET revision=revision+1 WHERE id=1')
 		for name, statement in {
 			'scheduler': 'UPDATE scheduler SET next_at=NULL',
 			'balance_scheduler': 'UPDATE balance_scheduler SET next_at=NULL',
@@ -526,9 +546,15 @@ class BackupManager:
 				raise BackupError('配置已更新, 请重新预览恢复')
 			with closing(sqlite3.connect(self.data_dir / 'webui.sqlite3')) as current:
 				auth = current.execute('SELECT salt,digest FROM web_auth WHERE id=1').fetchone()
+				tables = {row[0] for row in current.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+				security = {
+					name: current.execute('SELECT * FROM ' + name).fetchall()  # nosec B608 - fixed table allowlist
+					for name in ('web_security', 'web_passkeys')
+					if name in tables
+				}
 			if auth is None:
 				raise BackupError('当前管理员身份不可用')
-			_prepare_database(path, item['key'], self.key, config, revision, auth)
+			_prepare_database(path, item['key'], self.key, config, revision, auth, security or None)
 			return path
 		except BaseException:
 			path.unlink(missing_ok=True)
