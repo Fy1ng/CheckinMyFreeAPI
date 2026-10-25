@@ -33,7 +33,7 @@ def iso_time(timestamp: float | None) -> str | None:
 def acquire_file_lock(path: Path) -> BinaryIO:
 	stream = path.open('a+b')
 	try:
-		if os.name == 'nt':
+		if sys.platform == 'win32':
 			import msvcrt
 
 			stream.seek(0)
