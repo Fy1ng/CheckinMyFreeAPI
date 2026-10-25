@@ -1,0 +1,104 @@
+name: Go Quality Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-quality:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      CGO_ENABLED: '0'
+      CHECKIN_AUTH_BROWSER_TESTS: '0'
+      CHECKIN_GO_BROWSER_TESTS: '0'
+      CHECKIN_BUILD_VERSION: ci-${{ github.sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+          cache-dependency-path: go.sum
+
+      - name: Verify dependency checksums
+        run: go mod verify
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          files="$(gofmt -l cmd internal scripts/license-notices server/assets.go)"
+          if [[ -n "$files" ]]; then
+            printf 'Go files require formatting:\n%s\n' "$files"
+            exit 1
+          fi
+
+      - name: Run isolated Go tests
+        run: go test -mod=readonly -p 1 -count=1 -timeout=15m ./...
+
+      - name: Vet Go code
+        run: go vet -mod=readonly -p 1 ./...
+
+      - name: Install pinned Go vulnerability scanner
+        if: runner.os == 'Linux'
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+
+      - name: Scan reachable Go vulnerabilities
+        if: runner.os == 'Linux'
+        run: govulncheck ./...
+
+      - name: Build Windows and Linux standalone binaries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/build-go.sh --version "$CHECKIN_BUILD_VERSION"
+
+      - name: Build Windows silent and console binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build-go.ps1 -Version $env:CHECKIN_BUILD_VERSION -Targets windows-amd64
+
+      - name: Smoke test Windows CLI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./dist/go/windows-amd64/checkin-cli.exe version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./dist/go/windows-amd64/checkin-cli.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Smoke test Linux binary and verify checksums
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          ./dist/go/linux-amd64/checkin version
+          ./dist/go/linux-amd64/checkin --help
+          cd dist/go
+          sha256sum --check SHA256SUMS
+
+      - name: Save standalone build artifacts
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: checkin-go-${{ github.sha }}
+          path: dist/go/
+          if-no-files-found: error
+          retention-days: 7

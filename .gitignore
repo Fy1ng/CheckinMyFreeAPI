@@ -34,4 +34,14 @@ checkin_screenshots
 .idea/
 .vscode/
 
+# Standalone Go builds and private local runtime state.
+dist/
+*.test
+coverage-go.out
+checkin-data/
+go-data/
+go-secrets/
+go-runtime.json
+go-http-result-*.txt
+
 .DS_Store

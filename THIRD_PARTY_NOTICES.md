@@ -1,8 +1,22 @@
 # Third-party notices
 
+## Go edition dependencies
+
+The standalone edition uses Go's standard library and the modules pinned in
+`go.mod` and `go.sum`, including:
+
+- Go and golang.org/x/{crypto,net,sys,term,text}: https://go.dev/LICENSE
+- Go WebAuthn: https://github.com/go-webauthn/webauthn
+- modernc.org/sqlite and its pure-Go runtime: https://pkg.go.dev/modernc.org/sqlite
+
+The complete dependency license texts are included with standalone build
+artifacts as `GO_DEPENDENCY_LICENSES.txt`. The Go edition does not embed the
+Python runtime or its dependencies.
+
 ## Metapi
 
-The static permutation/XOR calculation in `utils/acw_challenge.py` is adapted
+The static permutation/XOR calculation in `utils/acw_challenge.py` and
+`internal/checkin/acw.go` is adapted
 from Metapi's `src/server/services/platforms/newApiShield.ts`. The offline
 fixture `tests/fixtures/anyrouter_acw_challenge.html` is copied from Metapi's
 `src/server/services/platforms/__fixtures__/anyrouter-challenge.html`.

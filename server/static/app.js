@@ -13,7 +13,7 @@
     view: window.location.pathname === '/status' ? 'status' : 'manage',
     balances: null, balancesLoading: false, balanceViews: new Map(),
     automation: null, automationLoading: false,
-    authPolicy: {}, loginBusy: false,
+    authPolicy: {}, loginBusy: false, runtime: null, runtimeBusy: false, backend: '',
   };
 
   class ApiError extends Error {
@@ -54,6 +54,7 @@
         ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
       });
       let payload;
+      if (response.headers.get('X-Checkin-Runtime') === 'go') state.backend = 'go';
       try { payload = await response.json(); }
       catch (_) { throw new ApiError('服务返回了无法读取的响应. 请重新读取状态确认结果.', response.status); }
       if (!response.ok) {
@@ -159,6 +160,15 @@
 
   function renderLoginPolicy(session = state.authPolicy) {
     state.authPolicy = { ...state.authPolicy, ...(session || {}) };
+    state.authPolicy.setup_required = session.setup_required === true;
+    const setup = state.authPolicy.setup_required;
+    $('login-confirm-controls').hidden = !setup;
+    $('login-confirm-password').required = setup;
+    $('login-confirm-password').disabled = !setup || state.loginBusy;
+    $('login-password').autocomplete = setup ? 'new-password' : 'current-password';
+    $('login-password').minLength = setup ? 16 : 1;
+    $('login-button').textContent = setup ? '设置密码并进入' : '登录';
+    if (setup) state.csrf = state.authPolicy.setup_csrf || '';
     const password = state.authPolicy.password_login_allowed ?? (state.authPolicy.auth_mode !== 'passkey' || state.authPolicy.reauth_method === 'password');
     const passkey = state.authPolicy.passkey_available === true;
     $('password-login-controls').hidden = !password;
@@ -170,6 +180,7 @@
     $('login-method-hint').textContent = !password ? '此入口仅允许 Passkey 登录. 请使用已绑定的设备或安全密钥.' : state.authPolicy.auth_mode === 'passkey' ? '当前为本机恢复入口, 可使用管理密码. 公网入口仍仅允许 Passkey.' : '请输入管理密码, 或使用已绑定的 Passkey.';
     if (state.authPolicy.auth_mode === 'passkey' && (!passkey || state.authPolicy.passkey_origin_allowed === false)) $('login-method-hint').textContent += ' 当前地址没有匹配的密钥, 请打开配置的 HTTPS 管理入口或通过 SSH 恢复.';
     else if (passkey && !window.CheckinPasskeys?.supported()) $('login-method-hint').textContent += ' 当前浏览器或地址不支持 Passkey, 请使用支持 WebAuthn 的浏览器和 HTTPS 入口.';
+    if (setup) $('login-method-hint').textContent = '首次使用, 请设置 16 至 512 字符的管理密码. 仅允许从本机或 SSH 转发入口初始化.';
   }
 
   async function refreshLoginPolicy() {
@@ -194,13 +205,14 @@
     state.authenticated = true;
     state.csrf = session.csrf;
     $('login-password').value = '';
+    $('login-confirm-password').value = '';
     $('login-view').hidden = true;
     $('workspace').hidden = false;
     $('logout-button').hidden = false;
     renderWorkspaceView();
     if (state.uncertain === 'logout') state.uncertain = null;
     const configTask = state.config && state.dirty ? Promise.resolve(renderForm()) : loadConfig(false);
-    await Promise.allSettled([configTask, loadStatus(), loadRuns(), ...(state.view === 'status' ? [loadBalances(), loadAutomation()] : [])]);
+    await Promise.allSettled([configTask, loadStatus(), loadRuns(), loadLocalRuntime(), ...(state.view === 'status' ? [loadBalances(), loadAutomation()] : [])]);
     schedulePoll();
   }
 
@@ -356,6 +368,9 @@
       checkin_verification_failed: '签到请求后未能核验账号结果, 请先到站点核对后再决定是否重试',
       session_save_failed: '操作已执行但加密会话保存失败, 请先核对站点记录',
       already_checked_in: '站点返回今日已签到', checkin_verified: '签到接口已接受, 后续用户信息已核验',
+      startup_already_checked_in: '当天已有核验成功记录, 本次启动跳过签到',
+      startup_network_unavailable: '启动时网络尚未就绪, 有限等待后仍无法连接, 本次未发送签到请求',
+      startup_history_unavailable: '无法核对当天运行记录, 本次启动未发送签到请求',
       REQUEST_CANCELLED_RESULT_UNKNOWN: '任务已停止, 请求结果仍待核对. 请先查看站点记录',
       HTTP_EXECUTION_FAILED_RESULT_UNKNOWN: 'HTTP 执行异常, 请求结果待核对. 请先查看站点记录',
       WORKER_INTERRUPTED_RESULT_UNKNOWN: '执行进程中断, 请求结果待核对. 请先查看站点记录',
@@ -1263,6 +1278,7 @@
 
   function renderRuntime(container) {
     container.append(heading('定时与网络', '定时任务由当前服务调度, 服务停止期间不会补跑. 固定时间与日报均按 UTC+8 执行.'));
+    if (state.runtime?.runtime === 'go') container.append(localRuntimePanel());
     const schedule = state.config.schedule;
     const scheduling = el('section', 'runtime-group');
     scheduling.append(el('h3', '', '运行计划'));
@@ -1300,6 +1316,62 @@
     const proxy = el('section', 'runtime-group'); proxy.append(el('h3', '', '默认代理'));
     proxy.append(secretField('代理 URL', state.config.proxy_url, (value) => { state.config.proxy_url = value; }, { placeholder: 'socks5://用户名:密码@主机:1080', hint: '支持 HTTP/HTTPS 和 SOCKS5. 认证格式: socks5://用户名:密码@主机:端口. 用户名和密码中的 @ : / # % 等特殊字符需进行 URL 编码. 供沿用上级或使用默认代理的账号使用. 已保存值留空保留, 点击清除才删除.' }));
     container.append(scheduling, monitoringGroup, network, proxy);
+  }
+
+  async function loadLocalRuntime() {
+    if (state.backend !== 'go') return;
+    try {
+      const result = await api('/api/runtime');
+      if (result.runtime === 'go') { state.runtime = result; if (state.tab === 'runtime' && !state.dirty) renderForm(); }
+    } catch (_) { /* The Python edition has no local lifecycle endpoint. */ }
+  }
+
+  function localRuntimePanel() {
+    const panel = el('section', 'runtime-group go-runtime-panel');
+    panel.append(el('h3', '', '本机启动与后台运行'));
+    panel.append(el('p', 'muted small', 'Go 独立应用在后台运行, 关闭浏览器不会退出程序. 以下设置单独保存, 无需保存账号配置.'));
+    const grid = el('div', 'form-grid');
+    const startup = el('label', 'check-field');
+    const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.id = 'runtime-startup-checkin'; enabled.checked = state.runtime.settings.run_on_startup;
+    startup.append(enabled, el('span', '', '启动时自动签到'));
+    const delayLabel = el('label', 'field'); delayLabel.append(el('span', 'field-label', '启动等待时间, 秒'));
+    const delay = document.createElement('input'); delay.type = 'number'; delay.id = 'runtime-startup-delay'; delay.min = '0'; delay.max = '300'; delay.value = state.runtime.settings.startup_delay_seconds;
+    delayLabel.append(delay, el('span', 'field-hint', '等待 0 至 300 秒后启动. 当天已确认成功的账号跳过, 暂停和限流规则继续生效.'));
+    grid.append(startup, delayLabel); panel.append(grid);
+    const status = el('p', 'inline-message'); status.setAttribute('role', 'status');
+    const actions = el('div', 'task-actions');
+    const save = button('保存启动设置', 'button secondary', async () => {
+      const seconds = Number(delay.value);
+      if (!Number.isInteger(seconds) || seconds < 0 || seconds > 300) { status.textContent = '启动等待时间需要为 0 至 300 秒.'; return; }
+      await perform(async () => {
+        state.runtime = await api('/api/runtime', { method: 'PUT', body: { revision: state.runtime.settings.revision, run_on_startup: enabled.checked, startup_delay_seconds: seconds } });
+        status.textContent = '启动设置已保存, 下次启动生效.';
+      });
+    }); save.id = 'runtime-save'; actions.append(save);
+    const reload = button('重新读取启动设置', 'button quiet', () => perform(async () => {
+      state.runtime = await api('/api/runtime'); enabled.checked = state.runtime.settings.run_on_startup; delay.value = state.runtime.settings.startup_delay_seconds; status.textContent = '已重新读取启动设置.';
+    })); reload.id = 'runtime-reload'; actions.append(reload);
+    if (state.runtime.can_manage_autostart) {
+      const autostart = button(state.runtime.autostart_enabled ? '关闭登录后自启' : '启用登录后自启', 'button quiet', async () => {
+        if (state.runtime.autostart_enabled && !window.confirm('关闭当前用户的登录后自启? 当前程序会继续运行.')) return;
+        await perform(async () => { state.runtime = await api('/api/runtime/autostart', { method: 'POST', body: { enabled: !state.runtime.autostart_enabled } }); autostart.textContent = state.runtime.autostart_enabled ? '关闭登录后自启' : '启用登录后自启'; status.textContent = '登录后自启设置已更新.'; });
+      }); autostart.id = 'runtime-autostart'; actions.append(autostart);
+    }
+    if (state.runtime.can_shutdown) {
+      const exit = button('退出后台程序', 'button danger-soft', async () => {
+        if (!window.confirm('退出将停止当前任务和后续定时任务. 是否退出后台程序?')) return;
+        await perform(async () => { await api('/api/runtime/shutdown', { method: 'POST', body: {} }); stopPolling(); status.textContent = '程序正在退出. 下次可重新启动应用.'; });
+      }); exit.id = 'runtime-exit'; actions.append(exit);
+    }
+    async function perform(action) {
+      if (state.runtimeBusy) return; state.runtimeBusy = true;
+      actions.querySelectorAll('button').forEach((item) => { item.disabled = true; });
+      try { await action(); }
+      catch (error) { status.textContent = `${errorText(error)} 请重新读取后确认设置.`; }
+      finally { state.runtimeBusy = false; actions.querySelectorAll('button').forEach((item) => { item.disabled = false; }); }
+    }
+    panel.append(actions, status, el('p', 'field-hint', '登录后自启只适用于当前用户. 无需登录即可运行时, 请使用命令行安装系统服务. 系统服务的安装和卸载需要管理员权限.'));
+    return panel;
   }
 
   const renderers = { accounts: renderAccounts, notifications: renderNotifications, runtime: renderRuntime };
@@ -1434,7 +1506,13 @@
     renderLoginPolicy();
     $('login-message').textContent = '正在登录...';
     $('login-message').className = 'inline-message';
-    try { await enterWorkspace(await api('/api/login', { method: 'POST', body: { password: $('login-password').value } })); }
+    try {
+      if (state.authPolicy.setup_required) {
+        await api('/api/setup', { method: 'POST', body: { password: $('login-password').value, confirm_password: $('login-confirm-password').value } });
+        renderLoginPolicy(await api('/api/session'));
+      }
+      await enterWorkspace(await api('/api/login', { method: 'POST', body: { password: $('login-password').value } }));
+    }
     catch (error) {
       $('login-message').textContent = errorText(error);
       $('login-message').className = 'inline-message error';

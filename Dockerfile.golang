@@ -1,0 +1,43 @@
+ARG GO_IMAGE=golang:1.26.10-bookworm
+ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian13:nonroot
+
+FROM ${GO_IMAGE} AS build
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
+COPY cmd ./cmd
+COPY internal ./internal
+COPY scripts/license-notices ./scripts/license-notices
+COPY LICENSE THIRD_PARTY_NOTICES.md /out/
+COPY server/assets.go ./server/assets.go
+COPY server/static ./server/static
+RUN case "$VERSION" in ''|*[!A-Za-z0-9._+-]*) echo 'Invalid build version' >&2; exit 2 ;; esac \
+    && go run -mod=readonly ./scripts/license-notices --out /out/GO_DEPENDENCY_LICENSES.txt \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-$(go env GOARCH)} \
+       go build -mod=readonly -p 1 -trimpath -buildvcs=false \
+       -ldflags "-s -w -X=main.version=$VERSION" -o /out/checkin ./cmd/checkin \
+    && chmod 0555 /out/checkin \
+    && mkdir -p /out/data \
+    && chmod 0700 /out/data \
+    && chown 10001:10001 /out/data
+
+# Distroless static includes trusted CA roots and tzdata, but no shell, Python,
+# browser, package manager, or dynamic C runtime. Use a digest for release pins.
+FROM ${RUNTIME_IMAGE}
+COPY --from=build /out/checkin /usr/local/bin/checkin
+COPY --from=build /out/LICENSE /out/THIRD_PARTY_NOTICES.md /out/GO_DEPENDENCY_LICENSES.txt /usr/share/licenses/checkin/
+COPY --from=build --chown=10001:10001 /out/data /data
+ENV CHECKIN_WEB_HOST=0.0.0.0 \
+    CHECKIN_WEB_PORT=8765 \
+    CHECKIN_WEB_DATA_DIR=/data \
+    CHECKIN_WEB_KEY_FILE=/data/master.key \
+    HOME=/data \
+    TZ=Asia/Singapore
+USER 10001:10001
+WORKDIR /data
+EXPOSE 8765
+ENTRYPOINT ["/usr/local/bin/checkin"]
+CMD ["serve"]

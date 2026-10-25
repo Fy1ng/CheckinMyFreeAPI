@@ -46,3 +46,13 @@ outputs
 .vscode
 .DS_Store
 Thumbs.db
+
+dist
+checkin-data
+go-data
+go-secrets
+go-runtime.json
+go-http-result-*.txt
+*.test
+*.nab
+*.har

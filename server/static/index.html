@@ -21,7 +21,7 @@
         <div class="login-intro"><p class="eyebrow">HTTP CHECK-IN</p><h1 id="login-title">你的账号,<br>在这里管理.</h1><p>支持 AnyRouter 和 AgentRouter.<br>保存账号凭据, 按计划通过 HTTP 执行.</p></div>
         <form id="login-form" class="login-card">
           <h2>进入控制台</h2><p id="login-method-hint" class="muted">请输入启动服务时配置的管理密码.</p>
-          <div id="password-login-controls"><label class="field"><span class="field-label">管理密码</span><input id="login-password" type="password" autocomplete="current-password" required maxlength="512" autofocus></label><button id="login-button" class="button primary full" type="submit">登录</button></div>
+          <div id="password-login-controls"><label class="field"><span class="field-label">管理密码</span><input id="login-password" type="password" autocomplete="current-password" required maxlength="512" autofocus></label><label id="login-confirm-controls" class="field" hidden><span class="field-label">确认密码</span><input id="login-confirm-password" type="password" autocomplete="new-password" maxlength="512"></label><button id="login-button" class="button primary full" type="submit">登录</button></div>
           <button id="passkey-login-button" class="button secondary full" type="button" hidden>使用 Passkey 登录</button>
           <p id="login-message" class="inline-message" role="status" aria-live="polite">正在检查登录状态...</p>
         </form>

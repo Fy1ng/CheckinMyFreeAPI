@@ -1,6 +1,17 @@
 # CheckinMyFreeAPI
 
-Python 3.11 + aiohttp + SQLite 的私有 WebUI, 包含签到管理和登录后可见的 Status 余额面板. 只支持两个固定站点, 服务器不安装或启动任何浏览器, 不支持 OAuth、自定义站点或远程桌面.
+提供 Go 独立应用和现有 Python 3.11 + aiohttp 版本, 共用 WebUI 与加密 SQLite 数据格式. 包含签到管理和登录后可见的 Status 余额面板. 只支持两个固定站点, 运行时不安装或启动任何浏览器, 不支持 OAuth、自定义站点或远程桌面.
+
+Go 版无需安装 Python, 支持 Windows 静默后台运行、当前用户登录后自启、Windows/Linux 系统服务以及启动签到. 默认启动后等待 10 秒, 当天已确认成功的账号跳过; 暂停、限流与结果不确定规则继续生效. 在 `定时与网络 -> 本机启动与后台运行` 单独保存启动设置. 首次启动通过 http://127.0.0.1:8765 设置管理密码, 不会自动打开浏览器.
+
+使用 Go 1.26.10 或更新补丁版本从源码构建:
+
+```powershell
+./scripts/build-go.ps1
+./dist/go/windows-amd64/checkin.exe
+```
+
+Windows 的 `checkin.exe` 无命令行窗口, `checkin-cli.exe` 用于诊断和服务管理. Linux 提供 amd64/arm64 独立二进制, 可以用 `bash scripts/build-go.sh` 构建. 完整的运行、自启、服务、容器与旧数据迁移说明见 [Go 版使用说明](docs/go-edition.md). Python 版仍可按下文运行; 两个进程不能同时使用同一数据目录. 当前服务器的运行版本不会因为本地构建而改变.
 
 管理认证保留密码登录与 Passkey 登录两种可选模式, 共用同一份程序和账户数据. 默认沿用密码模式, 绑定并验证 Passkey 后可自行切换, 无需部署两套服务.
 
