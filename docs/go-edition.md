@@ -1,6 +1,8 @@
 # Go 独立应用
 
-Go 版将后端与现有 WebUI 编译为独立程序, 使用纯 Go SQLite, 无需安装 Python, Node.js 或 Chromium. AnyRouter, AgentRouter, 代理, 通知, Status, 加密备份以及密码和 Passkey 两种管理认证沿用现有功能与安全规则.
+Go 版采用 Go 业务层 + Wails v3 桌面壳 + 共享 WebUI/JSON API. HTML, CSS 和 JavaScript 与后端按职责分离, 构建时嵌入同一个可执行文件, 无需额外运行前端服务器或安装 Python/Node.js. 桌面窗口使用系统 WebView, 服务器和 CLI 使用无 GUI 构建.
+
+AnyRouter, AgentRouter, 代理, 通知, Status, 加密备份以及密码和 Passkey 两种管理认证沿用现有功能与安全规则. 桌面 WebView 仅显示管理界面, 站点签到仍使用原有 HTTP 流程, 不通过 WebView 自动登录站点或处理验证码.
 
 当前 Python 版和既有服务器部署保持原状. 构建, 下载或启动 Go 版不会自动替换服务器程序, 也不会自动安装系统自启项.
 
@@ -8,20 +10,34 @@ Go 版将后端与现有 WebUI 编译为独立程序, 使用纯 Go SQLite, 无�
 
 | 路径 | 用途 |
 |---|---|
-| `windows-amd64/checkin.exe` | Windows 64 位静默程序, 不显示控制台 |
-| `windows-amd64/checkin-cli.exe` | 相同功能的控制台版本, 用于诊断和命令行管理 |
-| `linux-amd64/checkin` | Linux x86_64 |
-| `linux-arm64/checkin` | Linux ARM64 |
+| `windows-amd64/checkin.exe` | Windows 64 位桌面程序, 包含窗口和托盘, 不显示控制台 |
+| `windows-amd64/checkin-cli.exe` | 无 GUI 的 CLI/服务器程序, 用于诊断和服务管理 |
+| `linux-amd64/checkin` | Linux x86_64 无 GUI 服务器 |
+| `linux-arm64/checkin` | Linux ARM64 无 GUI 服务器 |
+| `linux-desktop-amd64/checkin` | 可选的 Linux x86_64 GTK 桌面构建 |
+| `linux-desktop-arm64/checkin` | 可选的 Linux ARM64 GTK 桌面构建 |
 | `SHA256SUMS` | 本次构建的二进制 SHA256 清单, 使用相对路径 |
 | `GO_DEPENDENCY_LICENSES.txt` | 编译进入程序的 Go 标准库和第三方模块许可文本 |
 
-Windows 两个程序操作相同的数据格式. 同一个数据目录只允许运行一个实例. 建议将程序放在固定的本地目录, 再配置自启或服务, 避免移动后留下失效的启动路径.
+Windows 两个程序操作相同的数据格式. 同一个数据目录只允许一个后端运行; 桌面壳可在核实身份后连接该目录已有的后台服务, 不重新启动签到或打开第二份数据库执行器. 建议将程序放在固定的本地目录, 再配置自启或服务, 避免移动后留下失效的启动路径.
 
 Linux 在文件复制后执行 `chmod 0755 checkin`. 从 CI 下载的 artifact 可能不保留执行权限. Linux 可在解压根目录运行 `sha256sum --check SHA256SUMS`; Windows 可用 `Get-FileHash -Algorithm SHA256` 与清单核对.
 
 ## Windows 首次运行
 
-双击 `checkin.exe` 即可后台启动, 不自动打开浏览器. 手动访问 `http://127.0.0.1:8765`, 或运行:
+双击 `checkin.exe` 打开桌面控制台, 同时启动后台任务和托盘. Windows 需要 Microsoft Edge WebView2 Runtime; 桌面窗口使用该系统组件, 不随程序打包一份 Chromium. 无 GUI 的 `checkin-cli.exe serve` 不需要 WebView2.
+
+关闭窗口会隐藏到托盘, 不停止签到或后续计划. 从托盘打开控制台或 Status; 选择退出才结束当前桌面实例. 再次启动同一数据目录的桌面程序会激活已有窗口. 通过系统服务运行的后台由服务管理器控制, 退出连接它的桌面窗口不会停止该服务.
+
+普通再次打开会保留当前页面和未保存草稿. 托盘的 Status 入口用于切换到状态页. `Ctrl+Q` 与托盘退出具有相同含义; 从页面选择退出后台程序仍需明确确认. 启动失败会在数据目录的 `desktop.log` 写入固定原因代码, 普通启动同时显示错误提示, 隐藏启动不弹出错误窗口.
+
+需要保留托盘但启动时不显示窗口时运行:
+
+```powershell
+.\checkin.exe app --hidden
+```
+
+也可通过系统浏览器访问同一套管理界面, 默认地址为 `http://127.0.0.1:8765`, 或运行:
 
 ```powershell
 .\checkin-cli.exe open
@@ -32,7 +48,7 @@ Linux 在文件复制后执行 `chmod 0755 checkin`. 从 CI 下载的 artifact �
 默认数据目录为 `%APPDATA%\CheckinMyFreeAPI`, 包含 `webui.sqlite3`, `master.key`, `go-runtime.json` 和 `server.log`. 可通过参数指定其他私有目录:
 
 ```powershell
-.\checkin.exe serve --data-dir 'D:\CheckinMyFreeAPI\data'
+.\checkin.exe app --data-dir 'D:\CheckinMyFreeAPI\data'
 .\checkin-cli.exe open --port 8765
 ```
 
@@ -42,13 +58,13 @@ Linux 在文件复制后执行 `chmod 0755 checkin`. 从 CI 下载的 artifact �
 .\checkin-cli.exe serve --data-dir 'D:\CheckinMyFreeAPI\data'
 ```
 
-前台使用 `Ctrl+C` 停止. 静默实例可通过面板退出. `server.log` 达到 5 MiB 后轮换, 最多保留三个历史日志. 程序不会将站点密码, Cookie, 令牌或原始响应写入日志. GUI 版不显示命令输出, 版本, 离线恢复及诊断命令建议使用 `checkin-cli.exe`.
+前台服务器使用 `Ctrl+C` 停止. 桌面实例可通过托盘退出, 窗口隐藏期间后台继续工作. `server.log` 达到 5 MiB 后轮换, 最多保留三个历史日志. 程序不会将站点密码, Cookie, 令牌或原始响应写入日志. GUI 版不显示命令输出, 版本, 离线恢复及诊断命令建议使用 `checkin-cli.exe`.
 
 ## 启动签到
 
 Go 运行设置提供启动签到开关和 0 至 300 秒的启动等待时间. 新实例默认启用, 等待 10 秒. 它与原有 Cron 或间隔计划分别配置.
 
-- 每次应用启动只发起一轮启动任务, 仅处理已保存并启用的账号. 启动时为空白或尚未初始化的实例不会签到, 随后首次保存账号也不会补触发启动任务.
+- 每次后端启动只发起一轮启动任务, 仅处理已保存并启用的账号. 打开第二个窗口或连接已有后台不会再触发一轮. 启动时为空白或尚未初始化的实例不会签到, 随后首次保存账号也不会补触发启动任务.
 - 按 UTC+8 判断当天. 同一账号和凭据, 身份, 代理绑定下, 当天已有确认成功记录时跳过, 保留可查的跳过原因.
 - 启动任务与手动, 定时, 余额及备份任务共用串行执行边界, 不并发操作账号会话.
 - 网络尚未就绪时仅对任务前的连接检查有限等待. 不重发结果不确定的签到或 Agent 登录写入.
@@ -66,7 +82,7 @@ $data = Join-Path $env:APPDATA 'CheckinMyFreeAPI'
 .\checkin.exe autostart remove --data-dir $data
 ```
 
-注册位置为当前用户的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, 项名为 `CheckinMyFreeAPI`. 使用 `checkin.exe` 注册可确保启动时不弹控制台. 自启项包含程序, 数据, 主密钥和监听设置的路径, 不包含账号密码或 Cookie. 移动程序或更改这些路径后应重新注册.
+注册位置为当前用户的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, 项名为 `CheckinMyFreeAPI`. 桌面自启使用 `app --hidden`, 登录后保留托盘并运行后台, 不弹出控制台或主窗口. 自启项包含程序, 数据, 主密钥和监听设置的路径, 不包含账号密码或 Cookie. 移动程序或更改这些路径后应重新注册. 旧版只运行 `serve` 的自启项可通过重新启用桌面自启更新, 原有后台模式仍可显式使用.
 
 如需 Windows 开机后在无人登录时也运行, 可在管理员 PowerShell 中安装系统服务. 先退出普通实例, 并移除该实例的登录自启项, 再执行:
 
@@ -111,6 +127,8 @@ systemctl --user start checkinmyfreeapi.service
 
 服务的执行路径和数据路径使用绝对路径. unit 包含故障重启, 私有临时目录, 只读系统目录和限制写入数据目录的设置. 不补跑停机期间漏过的原有定时计划.
 
+可选的 Linux 桌面版本使用 GTK 3 和 WebKitGTK 4.1, 需要图形会话与相应系统库. 运行桌面构建中的 `./checkin app`, 或使用 `app --hidden` 仅保留托盘. 托盘显示取决于桌面环境的支持. 在桌面版启用登录后自启会创建当前用户的 `~/.config/autostart/checkinmyfreeapi.desktop` (设置 XDG_CONFIG_HOME 时沿用对应目录), 在图形会话中执行 `app --hidden`. 上述 systemd 用户服务用于无 GUI 服务器, 两种自启应按实际运行版本选择. 无图形桌面的服务器继续使用 `linux-amd64` 或 `linux-arm64` 目录下的无 GUI 程序, 无需安装这些桌面库.
+
 ## 配置与认证兼容
 
 Go 版保留 `CHECKIN_WEB_DATA_DIR`, `CHECKIN_WEB_KEY_FILE`, `CHECKIN_WEB_HOST`, `CHECKIN_WEB_PORT`, `CHECKIN_WEB_PASSWORD_FILE`, `CHECKIN_WEB_PASSWORD`, `CHECKIN_WEB_PUBLIC_URL` 和 `CHECKIN_WEB_TRUSTED_PROXY_IPS`. 服务不自动读取 `.env`. 对应命令行参数优先于环境变量, 详见 `checkin-cli.exe --help` 或 `./checkin --help`.
@@ -120,6 +138,14 @@ Go 版保留 `CHECKIN_WEB_DATA_DIR`, `CHECKIN_WEB_KEY_FILE`, `CHECKIN_WEB_HOST`,
 保留 Python 版 SQLite 中的加盐管理密码哈希, Passkey 公钥和计数器, 安全模式以及用户标识. Passkey 模式不会因更换后端退回公网密码登录. Passkey 继续绑定原 RP ID 和精确 origin, 从原 HTTPS 地址改成本机 HTTP, 换域名或端口, 都可能使原密钥无法用于新入口. 应在保留原入口的条件下验证, 或通过离线安全恢复重新绑定.
 
 公网仍应由反向代理提供 HTTPS. 需要显式配置 `--public-url https://checkin.example.com` 和实际的单个可信反向代理 IP, 不以任意请求头扩展可信域名. 不直接公开应用的明文监听端口. 本机与公网会话隔离, Origin 和 CSRF 检查, 登录限流, Passkey 二次验证保持生效.
+
+桌面窗口仍访问受保护的同源 HTTP API, 不通过桌面绑定跳过管理登录或直接读取账号凭据. 不为嵌入窗口关闭 Origin/CSRF 校验, 不将任意 WebView 地址列为可信来源. 桌面壳通过私有本机记录和随机挑战核实已有后台的身份, 不把端口占用或通用健康响应当作可连接的服务.
+
+`desktop-control.json` 只用于同一私有数据目录的本机后台身份证明, 不提供账号操作能力. `desktop-instance.key` 用于桌面单实例通信, 与账号加密主密钥独立. Windows 的 `desktop-webview/` 包含桌面浏览器缓存和管理会话, 应与整个私有数据目录一起保护, 不提交到 Git 或上传为诊断附件. Linux WebKit 使用系统管理的 WebView 数据上下文. 正式构建不会打开远程调试端口.
+
+桌面加载可信管理页面后会安装页面侧导航防护, 阻止常见外链, 外部表单和弹出窗口; 可按提示复制链接到系统浏览器. 该防护不代替后端的来源检查, 也不是 WebView 引擎的完整原生导航策略. 本地控制台路径与已登录的加密备份下载继续可用.
+
+Passkey 是否可在内嵌窗口使用取决于系统 WebView 的支持. 当前入口或 WebView 不支持时, 使用托盘的浏览器入口在系统浏览器完成管理操作. 原有 RP ID/origin 绑定继续生效, 不自动将公网密钥迁移到本机地址, 不为兼容桌面窗口退回较弱的公网密码模式. WebView 的缓存目录不作为站点账号备份, 备份和恢复继续使用 `.nab`.
 
 ## 从 Python 版迁移与回退
 
@@ -181,15 +207,26 @@ Linux 使用相同参数, 数据目录建议 `0700`, 数据和密钥文件建议
 bash scripts/build-go.sh --version v1.0.0
 ```
 
-默认生成 `dist/go/` 下四个二进制和 `SHA256SUMS`. 所有目标使用 `CGO_ENABLED=0`, `-trimpath` 和 `main.version`, Windows GUI 额外使用 `-H=windowsgui`. 不需要 C 编译器. 不指定版本时使用 Git 描述, 无 Git 信息时使用 `dev`. 版本只允许 ASCII 字母, 数字, 点, 下划线, 加号和连字符.
+默认生成 `dist/go/` 下四个二进制和 `SHA256SUMS`: Windows Wails 桌面、Windows 无 GUI CLI、Linux amd64/arm64 无 GUI 服务器. 默认目标使用 `CGO_ENABLED=0`, `-trimpath` 和 `main.version`, 不需要 C 编译器. Windows 桌面额外使用 `-tags desktop,production -H=windowsgui`, CLI/服务器使用显式 `nogui` tag, 不导入 Wails.
+
+Linux 桌面需要在匹配架构的 Linux 宿主原生构建, 使用 `CGO_ENABLED=1` 和 `-tags desktop,production,gtk3`. 例如 Ubuntu/Debian 安装开发库后执行:
+
+```bash
+sudo apt-get install pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libx11-dev
+bash scripts/build-go.sh --version v1.0.0 linux-desktop-amd64
+```
+
+ARM64 宿主将最后一个目标改为 `linux-desktop-arm64`. PowerShell 的 `-Targets` 也接受这两个显式目标, 但同样需要匹配的 Linux 宿主. Windows 默认构建不会尝试链接 Linux 桌面库.
+
+不指定版本时使用 Git 描述, 无 Git 信息时使用 `dev`. 版本只允许 ASCII 字母, 数字, 点, 下划线, 加号和连字符. 构建产物附带 Go 标准库及实际链接模块的许可文本; 桌面目标额外包含 Wails 及其依赖.
 
 可通过 PowerShell 的 `-Targets windows-amd64` 或 Bash 的末尾目标参数限制构建, 通过 `-OutputDir` 或 `--output` 修改输出目录. 校验清单只包含本次构建的目标. 构建脚本不运行应用, 不注册自启, 不访问真实账号.
 
-`go-check.yml` 在 Ubuntu 和 Windows 执行隔离测试与 vet, 在 Linux 使用固定版本 govulncheck 扫描, 交叉构建 Windows/Linux amd64/Linux arm64 并保存短期 artifact. Actions 固定完整提交 SHA, 令牌仅允许读取源码. CI 不安装用户自启项, 不执行真实签到或发送通知, 浏览器验收为另行启用的隔离测试.
+`go-check.yml` 在 Ubuntu 和 Windows 执行无 GUI 隔离测试与 vet, 并在 Windows 编译、测试桌面集成. Linux job 使用固定版本 govulncheck 分别扫描无 GUI 与 Windows 桌面链接路径. 独立 Ubuntu job 安装 GTK/WebKit 开发库, 在隔离显示会话下测试并原生构建 Linux 桌面. 产物作为短期 artifact 保存. Actions 固定完整提交 SHA, 令牌仅允许读取源码. CI 不安装用户自启项, 不执行真实签到或发送通知, 真实 WebView/浏览器交互验收按测试开关另行启用.
 
 ## 可选的 Linux 容器
 
-`Dockerfile.golang` 使用 Go 多阶段构建, 运行层为包含 CA 与时区数据的 distroless static 镜像. 最终以 UID/GID `10001:10001` 运行, 无 Python, 浏览器, shell 或动态 C 运行库. 可直接构建, 无需服务器安装 Go:
+`Dockerfile.golang` 使用显式 `nogui` 构建和 Go 多阶段镜像, 运行层为包含 CA 与时区数据的 distroless static 镜像. 最终以 UID/GID `10001:10001` 运行, 不导入 Wails, 无 Python, 浏览器, GTK, WebView, shell 或动态 C 运行库. 可直接构建, 无需服务器安装 Go:
 
 ```bash
 docker build -f Dockerfile.golang --build-arg VERSION=v1.0.0 -t checkinmyfreeapi:go-v1.0.0 .

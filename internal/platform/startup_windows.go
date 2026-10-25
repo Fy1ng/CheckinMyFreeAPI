@@ -24,6 +24,7 @@ func commandLine(c Launch) string {
 		candidate := filepath.Join(filepath.Dir(c.Executable), "checkin.exe")
 		if info, e := os.Lstat(candidate); e == nil && info.Mode().IsRegular() {
 			c.Executable = candidate
+			c.Desktop = true
 		}
 	}
 	a := []string{syscall.EscapeArg(c.Executable)}
@@ -71,6 +72,7 @@ func Autostart(c Launch, action string) (bool, error) {
 }
 
 func Service(c Launch, action string) error {
+	c.Desktop = false
 	if e := c.Validate(); e != nil {
 		return e
 	}

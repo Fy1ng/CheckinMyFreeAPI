@@ -17,7 +17,7 @@ COPY server/static ./server/static
 RUN case "$VERSION" in ''|*[!A-Za-z0-9._+-]*) echo 'Invalid build version' >&2; exit 2 ;; esac \
     && go run -mod=readonly ./scripts/license-notices --out /out/GO_DEPENDENCY_LICENSES.txt \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-$(go env GOARCH)} \
-       go build -mod=readonly -p 1 -trimpath -buildvcs=false \
+       go build -mod=readonly -p 1 -tags nogui -trimpath -buildvcs=false \
        -ldflags "-s -w -X=main.version=$VERSION" -o /out/checkin ./cmd/checkin \
     && chmod 0555 /out/checkin \
     && mkdir -p /out/data \
@@ -26,6 +26,8 @@ RUN case "$VERSION" in ''|*[!A-Za-z0-9._+-]*) echo 'Invalid build version' >&2; 
 
 # Distroless static includes trusted CA roots and tzdata, but no shell, Python,
 # browser, package manager, or dynamic C runtime. Use a digest for release pins.
+# This target links the headless stub; Wails and native WebView libraries are
+# used only by desktop builds and are not present in the server image.
 FROM ${RUNTIME_IMAGE}
 COPY --from=build /out/checkin /usr/local/bin/checkin
 COPY --from=build /out/LICENSE /out/THIRD_PARTY_NOTICES.md /out/GO_DEPENDENCY_LICENSES.txt /usr/share/licenses/checkin/

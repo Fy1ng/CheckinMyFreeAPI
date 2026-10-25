@@ -3,7 +3,6 @@
 package platform
 
 import (
-	"errors"
 	"os"
 
 	"golang.org/x/sys/windows"
@@ -24,7 +23,7 @@ func Lock(path string) (*os.File, error) {
 	err = windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &windows.Overlapped{})
 	if err != nil {
 		f.Close()
-		return nil, errors.New("该数据目录已有服务或任务运行")
+		return nil, ErrLocked
 	}
 	return f, nil
 }

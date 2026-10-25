@@ -10,9 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,11 +18,11 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/Fy1ng/CheckinMyFreeAPI/internal/app"
 	"github.com/Fy1ng/CheckinMyFreeAPI/internal/auth"
 	"github.com/Fy1ng/CheckinMyFreeAPI/internal/backup"
+	"github.com/Fy1ng/CheckinMyFreeAPI/internal/desktop"
 	"github.com/Fy1ng/CheckinMyFreeAPI/internal/platform"
 	"golang.org/x/term"
 )
@@ -34,7 +32,8 @@ var version = "dev"
 type config struct {
 	launch                                         platform.Launch
 	passwordFile, backupFile, recoveryPasswordFile string
-	background, confirm, clearPasskeys             bool
+	background, confirm, clearPasskeys, hidden     bool
+	page                                           string
 }
 
 func env(name, fallback string) string {
@@ -53,6 +52,9 @@ func defaultDir() string {
 
 func parse(args []string) (string, string, config, error) {
 	command, action := "serve", ""
+	if desktop.Available() {
+		command = "app"
+	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		command = args[0]
 		args = args[1:]
@@ -76,13 +78,15 @@ func parse(args []string) (string, string, config, error) {
 	f.StringVar(&c.launch.TrustedProxyIPs, "trusted-proxy-ips", os.Getenv("CHECKIN_WEB_TRUSTED_PROXY_IPS"), "可信反向代理IP, 逗号分隔")
 	f.StringVar(&c.passwordFile, "password-file", os.Getenv("CHECKIN_WEB_PASSWORD_FILE"), "首次管理密码文件, 未设置时通过本机页面初始化")
 	f.BoolVar(&c.background, "background", false, "分离到后台, 不打开浏览器")
+	f.BoolVar(&c.hidden, "hidden", false, "桌面启动时隐藏到托盘")
+	f.StringVar(&c.page, "page", "/", "桌面初始页面: /, /status, /backups, /security")
 	f.BoolVar(&c.confirm, "confirm", false, "确认离线安全恢复")
 	f.BoolVar(&c.clearPasskeys, "clear-passkeys", false, "安全恢复时删除所有Passkey")
 	f.StringVar(&c.backupFile, "file", "", "备份文件路径")
 	f.StringVar(&c.recoveryPasswordFile, "recovery-password-file", "", "恢复密码文件, 未设置时终端安全输入")
 	f.Usage = func() {
 		fmt.Fprintf(f.Output(), "CheckinMyFreeAPI %s\n\n", version)
-		fmt.Fprintln(f.Output(), "用法: checkin [serve|open|version] [选项]")
+		fmt.Fprintln(f.Output(), "用法: checkin [app|serve|open|version] [选项]")
 		fmt.Fprintln(f.Output(), "      checkin autostart install|remove|status [选项]")
 		fmt.Fprintln(f.Output(), "      checkin service install|uninstall|start|stop|status [选项]")
 		fmt.Fprintln(f.Output(), "      checkin security reset --confirm [--clear-passkeys] [选项]")
@@ -139,12 +143,28 @@ func run(args []string) error {
 		return e
 	}
 	switch command {
+	case "app":
+		if !desktop.Available() {
+			return errors.New("当前为无GUI服务器版, 请使用桌面版程序或通过浏览器管理")
+		}
+		c.launch.Desktop = true
+		return desktop.Run(desktop.Options{DataDir: c.launch.DataDir, Version: version, Path: c.page, Hidden: c.hidden || c.background, Start: func(ctx context.Context) (desktop.Backend, error) {
+			backend, address, e := startOrAttachBackend(ctx, c)
+			if e != nil {
+				return desktop.Backend{}, e
+			}
+			if backend == nil {
+				return desktop.Backend{URL: address}, nil
+			}
+			return desktop.Backend{URL: address, Stop: backend.Stop, Done: backend.Done}, nil
+		}})
 	case "version":
 		fmt.Println("CheckinMyFreeAPI", version)
 		return nil
 	case "open":
 		return platform.OpenBrowser("http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(c.launch.Port)))
 	case "autostart":
+		c.launch.Desktop = desktop.Available()
 		enabled, e := platform.Autostart(c.launch, action)
 		if e != nil {
 			return e
@@ -238,78 +258,14 @@ func readSecretFile(path string) (string, error) {
 }
 
 func serve(parent context.Context, c config) error {
-	if e := platform.PrivateDir(c.launch.DataDir); e != nil {
-		return e
+	backend, err := startOwnedBackend(parent, c)
+	if err != nil {
+		return err
 	}
-	lockPath := filepath.Join(c.launch.DataDir, "service.lock")
-	if e := platform.PrivateFile(lockPath); e != nil {
-		return e
-	}
-	lock, e := platform.Lock(lockPath)
-	if e != nil {
-		return e
-	}
-	defer lock.Close()
-	execution, e := platform.Lock(filepath.Join(c.launch.DataDir, "execution.lock"))
-	if e != nil {
-		return e
-	}
-	defer execution.Close()
-	key, e := loadKey(c.launch.DataDir, c.launch.KeyFile)
-	if e != nil {
-		return e
-	}
-	logPath := filepath.Join(c.launch.DataDir, "server.log")
-	if e = platform.PrivateFile(logPath); e != nil {
-		return e
-	}
-	logger := &rotatingLog{path: logPath}
-	defer logger.Close()
-	log.SetOutput(logger)
-	log.SetFlags(log.Ldate | log.Ltime | log.LUTC)
-	log.SetPrefix("[UTC] ")
-	password := os.Getenv("CHECKIN_WEB_PASSWORD")
-	if c.passwordFile != "" {
-		password, e = readSecretFile(c.passwordFile)
-		if e != nil {
-			return e
-		}
-	}
-	ctx, cancel := context.WithCancel(parent)
-	defer cancel()
-	listener, e := net.Listen("tcp", net.JoinHostPort(c.launch.Host, strconv.Itoa(c.launch.Port)))
-	if e != nil {
-		log.Print("监听端口失败")
-		return errors.New("本机监听端口不可用, 请检查已有实例或选择其他端口")
-	}
-	defer listener.Close()
-	application, e := app.New(ctx, app.Options{DataDir: c.launch.DataDir, Key: key, Password: password, Launch: c.launch, Shutdown: cancel})
-	if e != nil {
-		log.Print("服务初始化失败")
-		return e
-	}
-	defer application.Close()
-	server := &http.Server{Handler: application, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 * 1024, ErrorLog: log.New(logger, "[HTTP] ", log.Ldate|log.Ltime|log.LUTC)}
-	log.Print("Go服务已启动, 本机端口 ", c.launch.Port)
-	done := make(chan error, 1)
-	go func() { done <- server.Serve(listener) }()
-	select {
-	case e = <-done:
-		if errors.Is(e, http.ErrServerClosed) {
-			return nil
-		}
-		return errors.New("HTTP服务异常退出")
-	case <-ctx.Done():
-		shutdownCtx, end := context.WithTimeout(context.Background(), 15*time.Second)
-		defer end()
-		if e = server.Shutdown(shutdownCtx); e != nil {
-			_ = server.Close()
-		}
-		log.Print("Go服务已停止")
-		return nil
-	}
+	defer backend.Stop()
+	<-backend.Done
+	return backend.Err()
 }
-
 func reset(c config) error {
 	if e := platform.PrivateDir(c.launch.DataDir); e != nil {
 		return e

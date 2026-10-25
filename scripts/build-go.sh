@@ -9,8 +9,9 @@ targets=(windows-amd64 linux-amd64 linux-arm64)
 usage() {
   cat <<'USAGE'
 Usage: bash scripts/build-go.sh [--version VERSION] [--output DIR] [TARGET ...]
-Targets: windows-amd64 linux-amd64 linux-arm64 (all by default)
-Windows includes silent checkin.exe and console checkin-cli.exe.
+Default targets: windows-amd64 linux-amd64 linux-arm64.
+Optional native GTK targets: linux-desktop-amd64 linux-desktop-arm64.
+Windows includes Wails desktop checkin.exe and headless checkin-cli.exe.
 The output directory contains SHA256SUMS for this invocation's binaries.
 USAGE
 }
@@ -24,7 +25,7 @@ while (($#)); do
       shift 2
       ;;
     -h|--help) usage; exit 0 ;;
-    windows-amd64|linux-amd64|linux-arm64) selected_targets+=("$1"); shift ;;
+    windows-amd64|linux-amd64|linux-arm64|linux-desktop-amd64|linux-desktop-arm64) selected_targets+=("$1"); shift ;;
     *) printf 'Unknown build option or target: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
 done
@@ -41,29 +42,53 @@ mkdir -p -- "$output_dir"
 output_dir="$(cd -- "$output_dir" && pwd)"
 artifacts=()
 cd -- "$repo_root"
-CGO_ENABLED=0 GOOS="$(go env GOHOSTOS)" GOARCH="$(go env GOHOSTARCH)" \
-  go run -mod=readonly ./scripts/license-notices --out "$output_dir/GO_DEPENDENCY_LICENSES.txt"
+host_os="$(go env GOHOSTOS)"
+host_arch="$(go env GOHOSTARCH)"
+license_args=(--out "$output_dir/GO_DEPENDENCY_LICENSES.txt")
+for target in "${targets[@]}"; do
+  case "$target" in
+    windows-amd64) license_args+=(--desktop) ;;
+    linux-desktop-*)
+      if [[ "$host_os" != linux || "$target" != "linux-desktop-$host_arch" ]]; then
+        printf 'Target %s needs a matching native Linux host with GTK 3 and WebKitGTK 4.1.\n' "$target" >&2
+        exit 2
+      fi
+      if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists gtk+-3.0 webkit2gtk-4.1 gdk-3.0 x11; then
+        printf 'Linux desktop builds need pkg-config, GTK 3, WebKitGTK 4.1 and X11 development libraries.\n' >&2
+        exit 2
+      fi
+      license_args+=(--linux-desktop)
+      ;;
+  esac
+done
+CGO_ENABLED=0 GOOS="$host_os" GOARCH="$host_arch" \
+  go run -mod=readonly ./scripts/license-notices "${license_args[@]}"
 cp -- LICENSE THIRD_PARTY_NOTICES.md "$output_dir/"
 cp -- docs/go-edition.md "$output_dir/README.md"
 for target in "${targets[@]}"; do
-  target_os="${target%-*}"
-  target_arch="${target#*-}"
+  target_os="${target%%-*}"
+  target_arch="${target##*-}"
   target_dir="$output_dir/$target"
   mkdir -p -- "$target_dir"
   base_flags="-s -w -X=main.version=$version"
   if [[ "$target_os" == windows ]]; then
-    printf 'Building %s/checkin.exe (silent)\n' "$target"
+    printf 'Building %s/checkin.exe (Wails desktop)\n' "$target"
     CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" \
-      go build -mod=readonly -p 1 -trimpath -buildvcs=false -ldflags "$base_flags -H=windowsgui" -o "$target_dir/checkin.exe" ./cmd/checkin
+      go build -mod=readonly -p 1 -tags desktop,production -trimpath -buildvcs=false -ldflags "$base_flags -H=windowsgui" -o "$target_dir/checkin.exe" ./cmd/checkin
     artifacts+=("$target/checkin.exe")
     printf 'Building %s/checkin-cli.exe (console)\n' "$target"
     CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" \
-      go build -mod=readonly -p 1 -trimpath -buildvcs=false -ldflags "$base_flags" -o "$target_dir/checkin-cli.exe" ./cmd/checkin
+      go build -mod=readonly -p 1 -tags nogui -trimpath -buildvcs=false -ldflags "$base_flags" -o "$target_dir/checkin-cli.exe" ./cmd/checkin
     artifacts+=("$target/checkin-cli.exe")
+  elif [[ "$target" == linux-desktop-* ]]; then
+    printf 'Building %s/checkin (Wails GTK desktop)\n' "$target"
+    CGO_ENABLED=1 GOOS="$target_os" GOARCH="$target_arch" \
+      go build -mod=readonly -p 1 -tags desktop,production,gtk3 -trimpath -buildvcs=false -ldflags "$base_flags" -o "$target_dir/checkin" ./cmd/checkin
+    artifacts+=("$target/checkin")
   else
     printf 'Building %s/checkin\n' "$target"
     CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" \
-      go build -mod=readonly -p 1 -trimpath -buildvcs=false -ldflags "$base_flags" -o "$target_dir/checkin" ./cmd/checkin
+      go build -mod=readonly -p 1 -tags nogui -trimpath -buildvcs=false -ldflags "$base_flags" -o "$target_dir/checkin" ./cmd/checkin
     artifacts+=("$target/checkin")
   fi
 done

@@ -10,6 +10,8 @@ import (
 
 const ServiceName = "CheckinMyFreeAPI"
 
+var ErrLocked = errors.New("该数据目录已有服务或任务运行")
+
 func Executable() (string, error) {
 	p, e := os.Executable()
 	if e != nil {

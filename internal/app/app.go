@@ -35,6 +35,7 @@ type Options struct {
 	Launch           platform.Launch
 	DisableScheduler bool
 	Shutdown         func()
+	DesktopIdentity  http.Handler
 }
 type restoreContext struct {
 	password, binding string
@@ -166,6 +167,10 @@ func (a *App) initializeAuth(password string) error {
 }
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Checkin-Runtime", "go")
+	if r.URL.Path == "/api/desktop/identity" && a.opts.DesktopIdentity != nil {
+		a.opts.DesktopIdentity.ServeHTTP(w, r)
+		return
+	}
 	if r.URL.Path != "/api/backups/restore" || r.Method != "POST" {
 		a.httpGate.RLock()
 		defer a.httpGate.RUnlock()
@@ -248,7 +253,7 @@ func revisionBody(r *http.Request, extra ...string) (Document, int, error) {
 	return d, revision, nil
 }
 
-var staticPaths = map[string]string{"/": "index.html", "/status": "index.html", "/backups": "backups.html", "/security": "security.html", "/app.js": "app.js", "/backups.js": "backups.js", "/security.js": "security.js", "/passkeys.js": "passkeys.js", "/style.css": "style.css"}
+var staticPaths = map[string]string{"/": "index.html", "/status": "index.html", "/backups": "backups.html", "/security": "security.html", "/app.js": "app.js", "/backups.js": "backups.js", "/security.js": "security.js", "/passkeys.js": "passkeys.js", "/style.css": "style.css", "/favicon.ico": "favicon.svg"}
 
 func static(w http.ResponseWriter, r *http.Request) {
 	name, ok := staticPaths[r.URL.Path]
@@ -466,7 +471,7 @@ func (a *App) runtimeStatus(w http.ResponseWriter, r *http.Request) error {
 	if canManage {
 		installed, _ = platform.Autostart(a.opts.Launch, "status")
 	}
-	writeJSON(w, 200, Document{"runtime": "go", "platform": runtime.GOOS, "settings": settings, "autostart_enabled": installed, "can_manage_autostart": canManage, "can_shutdown": canManage && a.opts.Shutdown != nil})
+	writeJSON(w, 200, Document{"runtime": "go", "platform": runtime.GOOS, "settings": settings, "desktop": a.opts.Launch.Desktop, "autostart_enabled": installed, "can_manage_autostart": canManage, "can_shutdown": canManage && a.opts.Shutdown != nil})
 	return nil
 }
 func (a *App) runtimeSave(w http.ResponseWriter, r *http.Request) error {

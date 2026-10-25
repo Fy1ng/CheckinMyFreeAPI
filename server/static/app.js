@@ -1329,7 +1329,7 @@
   function localRuntimePanel() {
     const panel = el('section', 'runtime-group go-runtime-panel');
     panel.append(el('h3', '', '本机启动与后台运行'));
-    panel.append(el('p', 'muted small', 'Go 独立应用在后台运行, 关闭浏览器不会退出程序. 以下设置单独保存, 无需保存账号配置.'));
+    panel.append(el('p', 'muted small', state.runtime.desktop ? '桌面版关闭窗口后隐藏到托盘, 签到和监测继续运行. 以下设置单独保存, 无需保存账号配置.' : 'Go 独立应用在后台运行, 关闭浏览器不会退出程序. 以下设置单独保存, 无需保存账号配置.'));
     const grid = el('div', 'form-grid');
     const startup = el('label', 'check-field');
     const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.id = 'runtime-startup-checkin'; enabled.checked = state.runtime.settings.run_on_startup;

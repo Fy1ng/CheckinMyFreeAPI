@@ -2,7 +2,7 @@
 param(
     [string]$Version = '',
     [string]$OutputDir = '',
-    [ValidateSet('windows-amd64', 'linux-amd64', 'linux-arm64')]
+    [ValidateSet('windows-amd64', 'linux-amd64', 'linux-arm64', 'linux-desktop-amd64', 'linux-desktop-arm64')]
     [string[]]$Targets = @('windows-amd64', 'linux-amd64', 'linux-arm64')
 )
 
@@ -31,33 +31,56 @@ foreach ($name in @('CGO_ENABLED', 'GOOS', 'GOARCH')) {
 $artifacts = [System.Collections.Generic.List[string]]::new()
 Push-Location $repoRoot
 try {
+    $hostOS = [string](& go env GOHOSTOS)
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read the Go host operating system.' }
+    $hostArch = [string](& go env GOHOSTARCH)
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read the Go host architecture.' }
+    $selectedTargets = @($Targets | Select-Object -Unique)
+    $linuxDesktopTargets = @($selectedTargets | Where-Object { $_ -like 'linux-desktop-*' })
+    foreach ($desktopTarget in $linuxDesktopTargets) {
+        if ($hostOS -ne 'linux' -or $desktopTarget -ne "linux-desktop-$hostArch") {
+            throw "Linux desktop target $desktopTarget requires a matching native Linux host with GTK 3 and WebKitGTK 4.1 development libraries."
+        }
+        & pkg-config --exists gtk+-3.0 webkit2gtk-4.1 gdk-3.0 x11
+        if ($LASTEXITCODE -ne 0) { throw 'Linux desktop builds need pkg-config, GTK 3, WebKitGTK 4.1 and X11 development libraries.' }
+    }
     $env:CGO_ENABLED = '0'
-    $env:GOOS = [string](& go env GOHOSTOS)
-    $env:GOARCH = [string](& go env GOHOSTARCH)
-    & go run -mod=readonly ./scripts/license-notices --out (Join-Path $OutputDir 'GO_DEPENDENCY_LICENSES.txt')
+    $env:GOOS = $hostOS
+    $env:GOARCH = $hostArch
+    $licenseArguments = @('--out', (Join-Path $OutputDir 'GO_DEPENDENCY_LICENSES.txt'))
+    if ($selectedTargets -contains 'windows-amd64') { $licenseArguments += '--desktop' }
+    if ($linuxDesktopTargets.Count -gt 0) { $licenseArguments += '--linux-desktop' }
+    & go run -mod=readonly ./scripts/license-notices @licenseArguments
     if ($LASTEXITCODE -ne 0) { throw 'Go dependency license collection failed.' }
     Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $OutputDir 'LICENSE')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md') -Destination (Join-Path $OutputDir 'THIRD_PARTY_NOTICES.md')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'docs/go-edition.md') -Destination (Join-Path $OutputDir 'README.md')
-    foreach ($target in ($Targets | Select-Object -Unique)) {
+    foreach ($target in $selectedTargets) {
         $parts = $target.Split('-')
         $env:GOOS = $parts[0]
-        $env:GOARCH = $parts[1]
+        $env:GOARCH = $parts[-1]
+        $env:CGO_ENABLED = '0'
         $targetDir = Join-Path $OutputDir $target
         [System.IO.Directory]::CreateDirectory($targetDir) | Out-Null
         $baseFlags = "-s -w -X=main.version=$Version"
         if ($env:GOOS -eq 'windows') {
-            Write-Output "Building $target/checkin.exe (silent)"
-            & go build -mod=readonly -p 1 -trimpath -buildvcs=false -ldflags "$baseFlags -H=windowsgui" -o (Join-Path $targetDir 'checkin.exe') ./cmd/checkin
+            Write-Output "Building $target/checkin.exe (Wails desktop)"
+            & go build -mod=readonly -p 1 -tags 'desktop,production' -trimpath -buildvcs=false -ldflags "$baseFlags -H=windowsgui" -o (Join-Path $targetDir 'checkin.exe') ./cmd/checkin
             if ($LASTEXITCODE -ne 0) { throw "Go build failed for $target/checkin.exe." }
             $artifacts.Add("$target/checkin.exe")
             Write-Output "Building $target/checkin-cli.exe (console)"
-            & go build -mod=readonly -p 1 -trimpath -buildvcs=false -ldflags $baseFlags -o (Join-Path $targetDir 'checkin-cli.exe') ./cmd/checkin
+            & go build -mod=readonly -p 1 -tags nogui -trimpath -buildvcs=false -ldflags $baseFlags -o (Join-Path $targetDir 'checkin-cli.exe') ./cmd/checkin
             if ($LASTEXITCODE -ne 0) { throw "Go build failed for $target/checkin-cli.exe." }
             $artifacts.Add("$target/checkin-cli.exe")
+        } elseif ($target -like 'linux-desktop-*') {
+            $env:CGO_ENABLED = '1'
+            Write-Output "Building $target/checkin (Wails GTK desktop)"
+            & go build -mod=readonly -p 1 -tags 'desktop,production,gtk3' -trimpath -buildvcs=false -ldflags $baseFlags -o (Join-Path $targetDir 'checkin') ./cmd/checkin
+            if ($LASTEXITCODE -ne 0) { throw "Go build failed for $target/checkin." }
+            $artifacts.Add("$target/checkin")
         } else {
             Write-Output "Building $target/checkin"
-            & go build -mod=readonly -p 1 -trimpath -buildvcs=false -ldflags $baseFlags -o (Join-Path $targetDir 'checkin') ./cmd/checkin
+            & go build -mod=readonly -p 1 -tags nogui -trimpath -buildvcs=false -ldflags $baseFlags -o (Join-Path $targetDir 'checkin') ./cmd/checkin
             if ($LASTEXITCODE -ne 0) { throw "Go build failed for $target/checkin." }
             $artifacts.Add("$target/checkin")
         }

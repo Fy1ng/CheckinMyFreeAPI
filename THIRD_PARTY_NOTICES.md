@@ -8,10 +8,14 @@ The standalone edition uses Go's standard library and the modules pinned in
 - Go and golang.org/x/{crypto,net,sys,term,text}: https://go.dev/LICENSE
 - Go WebAuthn: https://github.com/go-webauthn/webauthn
 - modernc.org/sqlite and its pure-Go runtime: https://pkg.go.dev/modernc.org/sqlite
+- Wails v3 desktop framework (MIT): https://github.com/wailsapp/wails
 
 The complete dependency license texts are included with standalone build
 artifacts as `GO_DEPENDENCY_LICENSES.txt`. The Go edition does not embed the
-Python runtime or its dependencies.
+Python runtime or its dependencies. Desktop builds use the operating system's
+WebView runtime; headless CLI, server and container builds do not link Wails or
+require a graphical environment. Desktop release notices include the linked
+Wails dependencies alongside the headless application's modules.
 
 ## Metapi
 

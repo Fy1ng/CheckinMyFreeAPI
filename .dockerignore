@@ -53,6 +53,12 @@ go-data
 go-secrets
 go-runtime.json
 go-http-result-*.txt
+desktop-control.json
+desktop-instance.key
+webview-profile
+desktop-webview
+desktop-control.lock
+desktop-instance.lock
 *.test
 *.nab
 *.har

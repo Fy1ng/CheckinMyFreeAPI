@@ -55,6 +55,9 @@ func Autostart(c Launch, action string) (bool, error) {
 	if e := c.Validate(); e != nil {
 		return false, e
 	}
+	if c.Desktop {
+		return desktopAutostart(c, action)
+	}
 	path, e := userUnitPath()
 	if e != nil {
 		return false, e
@@ -100,6 +103,7 @@ func Autostart(c Launch, action string) (bool, error) {
 	return false, errors.New("自启操作无效")
 }
 func Service(c Launch, action string) error {
+	c.Desktop = false
 	const path = "/etc/systemd/system/checkinmyfreeapi.service"
 	switch action {
 	case "install":

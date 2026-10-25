@@ -53,10 +53,19 @@ jobs:
           fi
 
       - name: Run isolated Go tests
-        run: go test -mod=readonly -p 1 -count=1 -timeout=15m ./...
+        run: go test -mod=readonly -tags nogui -p 1 -count=1 -timeout=15m ./...
 
       - name: Vet Go code
-        run: go vet -mod=readonly -p 1 ./...
+        run: go vet -mod=readonly -tags nogui -p 1 ./...
+
+      - name: Test and vet Windows desktop integration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          go test -mod=readonly -tags desktop -p 1 -count=1 -timeout=10m ./internal/desktop ./cmd/checkin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go vet -mod=readonly -tags desktop -p 1 ./internal/desktop ./cmd/checkin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install pinned Go vulnerability scanner
         if: runner.os == 'Linux'
@@ -64,14 +73,17 @@ jobs:
 
       - name: Scan reachable Go vulnerabilities
         if: runner.os == 'Linux'
-        run: govulncheck ./...
+        shell: bash
+        run: |
+          govulncheck -tags nogui ./...
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 govulncheck -tags desktop ./...
 
       - name: Build Windows and Linux standalone binaries
         if: runner.os == 'Linux'
         shell: bash
         run: bash scripts/build-go.sh --version "$CHECKIN_BUILD_VERSION"
 
-      - name: Build Windows silent and console binaries
+      - name: Build Windows desktop and headless console binaries
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/build-go.ps1 -Version $env:CHECKIN_BUILD_VERSION -Targets windows-amd64
@@ -99,6 +111,55 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: checkin-go-${{ github.sha }}
+          path: dist/go/
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-desktop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CGO_ENABLED: '1'
+      CHECKIN_AUTH_BROWSER_TESTS: '0'
+      CHECKIN_GO_BROWSER_TESTS: '0'
+      CHECKIN_BUILD_VERSION: ci-${{ github.sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+          cache-dependency-path: go.sum
+
+      - name: Install native GTK and WebKit development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libx11-dev xvfb dbus-x11
+
+      - name: Test Linux desktop integration in an isolated display
+        run: xvfb-run -a dbus-run-session -- go test -mod=readonly -tags desktop,gtk3 -p 1 -count=1 -timeout=10m ./internal/desktop ./cmd/checkin
+
+      - name: Vet Linux desktop code
+        run: go vet -mod=readonly -tags desktop,gtk3 -p 1 ./internal/desktop ./cmd/checkin
+
+      - name: Build native Linux desktop binary
+        run: bash scripts/build-go.sh --version "$CHECKIN_BUILD_VERSION" linux-desktop-amd64
+
+      - name: Verify native desktop artifact
+        run: |
+          ./dist/go/linux-desktop-amd64/checkin version
+          cd dist/go
+          sha256sum --check SHA256SUMS
+
+      - name: Save Linux desktop build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: checkin-go-linux-desktop-${{ github.sha }}
           path: dist/go/
           if-no-files-found: error
           retention-days: 7

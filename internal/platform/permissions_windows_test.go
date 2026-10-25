@@ -43,4 +43,7 @@ func TestCLIAutostartPrefersSilentSibling(t *testing.T) {
 	if strings.Contains(line, "checkin-cli.exe") || !strings.Contains(line, "checkin.exe") {
 		t.Fatal("CLI registered visible console", line)
 	}
+	if !strings.Contains(line, "app --hidden") {
+		t.Fatal("GUI autostart would open a window or run wrong mode", line)
+	}
 }
