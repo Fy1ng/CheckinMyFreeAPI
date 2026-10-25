@@ -294,10 +294,12 @@ func TestPythonBidirectionalBackupCompatibility(t *testing.T) {
 	goBackup, _ := m.Read(storage.String(created["id"]))
 	python := pythonInterpreter(t)
 	root, _ := filepath.Abs(filepath.Join("..", ".."))
-	check := exec.Command(python, "-c", "import cryptography")
+	// Interoperability imports the Python edition, so its complete runtime is
+	// optional together. A Go-only host may have cryptography without httpx.
+	check := exec.Command(python, "-c", "import cryptography, httpx, aiohttp, fido2")
 	check.Dir = root
 	if err := check.Run(); err != nil {
-		t.Skip("Python cryptography is unavailable for optional interoperability coverage")
+		t.Skip("Python edition runtime dependencies are unavailable for optional interoperability coverage")
 	}
 	output := filepath.Join(t.TempDir(), "python.nab")
 	script := `

@@ -24,11 +24,12 @@ PASSWORD = 'native-desktop-test-password'  # nosec B105
 ROOT = Path(sys.argv[2])
 SCREENS = Path(tempfile.mkdtemp(prefix='checkin-native-webview-'))
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-USER32 = ctypes.windll.user32
+# Resolve Windows-only ctypes exports dynamically for cross-platform type checks.
+USER32 = getattr(ctypes, 'windll').user32
 USER32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 USER32.IsWindowVisible.argtypes = [wintypes.HWND]
 USER32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-CALLBACK = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+CALLBACK = getattr(ctypes, 'WINFUNCTYPE')(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 
 def port():

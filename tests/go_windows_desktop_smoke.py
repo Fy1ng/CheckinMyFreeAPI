@@ -83,7 +83,8 @@ async def wait_for(check, label, seconds=20):
 
 
 def native_api():
-	user32 = ctypes.windll.user32
+	# These exports exist only on Windows, where this opt-in fixture runs.
+	user32 = getattr(ctypes, 'windll').user32
 	user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 	user32.IsWindowVisible.argtypes = [wintypes.HWND]
 	user32.IsWindowVisible.restype = wintypes.BOOL
@@ -110,7 +111,7 @@ def native_api():
 
 def visible_windows(pid):
 	user32, result = native_api(), []
-	callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+	callback = getattr(ctypes, 'WINFUNCTYPE')(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 	def visit(handle, unused):
 		owner = wintypes.DWORD()
@@ -135,7 +136,7 @@ async def quit_native_shortcut(pid):
 	assert len(handles) == 1
 	user32 = native_api()
 	thread = user32.GetWindowThreadProcessId(handles[0], None)
-	current = ctypes.windll.kernel32.GetCurrentThreadId()
+	current = getattr(ctypes, 'windll').kernel32.GetCurrentThreadId()
 	# A background test runner cannot always acquire foreground focus. Attaching
 	# only these input queues lets the owned HWND process Ctrl+Q using Wails'
 	# native GetKeyboardState handler, with no event sent to another window.
