@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   quality-checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       CHECKIN_BROWSER_TESTS: '1'
