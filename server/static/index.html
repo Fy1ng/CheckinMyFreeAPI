@@ -27,9 +27,20 @@
       </section>
 
       <div id="workspace" hidden>
-        <section class="page-heading"><div><p class="eyebrow">OVERVIEW</p><h1>签到控制台</h1><p class="muted">先保存配置, 再执行签到. 任务与配置分别管理.</p></div><span id="connection-status" class="connection-state">连接中</span></section>
+        <nav class="workspace-nav" aria-label="控制台页面"><a href="/status" data-view="status">Status</a><a href="/" data-view="manage" aria-current="page">管理面板</a></nav>
+        <section class="page-heading"><div><p class="eyebrow" id="page-eyebrow">OVERVIEW</p><h1 id="page-title">签到控制台</h1><p class="muted" id="page-description">先保存配置, 再执行签到. 任务与配置分别管理.</p></div><span id="connection-status" class="connection-state">连接中</span></section>
         <div id="global-message" class="notice" role="status" aria-live="polite" hidden></div>
 
+        <section id="balance-view" aria-labelledby="page-title" hidden>
+          <div class="balance-toolbar"><p class="muted small">站内美元额度, 按 UTC+8 统计. 页面读取已保存的数据.</p><div class="balance-actions"><button id="read-balances" class="button quiet" type="button">重新读取</button><button id="refresh-balances" class="button primary" type="button" disabled>刷新余额</button></div></div>
+          <p id="balance-refresh-hint" class="muted small" role="status" aria-live="polite"></p>
+          <div id="balances-error" class="load-error" role="status" hidden><span></span><button id="retry-balances" class="text-button" type="button">重试读取</button></div>
+          <div id="balance-summary" class="balance-summary" aria-label="余额汇总"><p class="muted">正在读取余额...</p></div>
+          <section class="balance-panel" aria-labelledby="balance-accounts-title"><div class="panel-title"><h2 id="balance-accounts-title">账户余额</h2><span id="balance-day" class="muted small"></span></div><div id="balance-accounts" class="balance-accounts"><p class="muted small">尚未读取账户状态.</p></div></section>
+          <section class="balance-panel" aria-labelledby="balance-history-title"><div class="panel-title"><h2 id="balance-history-title">最近 30 天</h2><span class="muted small">每日最后已知余额</span></div><p class="muted small">账户覆盖和更新时间可能不同. 缺少数据的日期保留空白, 历史从启用采集后积累.</p><div id="balance-chart" class="balance-chart"></div><details id="balance-history-details" class="balance-history-details"><summary>查看每日数据</summary><div class="balance-table-wrap"><table class="balance-table"><caption class="sr-only">最近 30 天余额和每日变化</caption><thead><tr><th scope="col">日期, UTC+8</th><th scope="col">余额</th><th scope="col">新增</th><th scope="col">净变化</th><th scope="col">余额覆盖</th></tr></thead><tbody id="balance-history"></tbody></table></div></details></section>
+        </section>
+
+        <div id="management-view">
         <section class="overview" aria-labelledby="task-title">
           <div class="task-panel">
             <div class="panel-title"><h2 id="task-title">当前任务</h2><span id="task-badge" class="badge">读取中</span></div>
@@ -62,6 +73,7 @@
           </div>
           <div class="save-bar"><div><span id="dirty-status" class="dirty-status">正在读取配置</span><p id="save-hint" class="muted small">敏感字段保存在服务端, 已保存的值不会回显.</p></div><div class="save-actions"><button id="reload-config" class="button quiet" type="button" disabled>重新读取</button><button id="save-button" class="button primary" type="submit" form="config-form" disabled>保存配置</button></div></div>
         </section>
+        </div>
       </div>
     </main>
     <footer>NewAPI Check-in<span>配置保存和签到执行相互独立.</span></footer>

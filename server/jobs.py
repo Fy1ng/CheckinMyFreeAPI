@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
 
+from server.balance_store import BalanceStore
 from server.execution_state import ExecutionState
 from utils.http_checkin import account_binding
 from utils.process_env import child_environment
@@ -80,6 +81,8 @@ class JobManager:
 		);
 		CREATE TABLE IF NOT EXISTS scheduler (id INTEGER PRIMARY KEY CHECK(id=1), next_at REAL);
 		INSERT OR IGNORE INTO scheduler VALUES (1, NULL);
+		CREATE TABLE IF NOT EXISTS balance_scheduler (id INTEGER PRIMARY KEY CHECK(id=1), next_at REAL);
+		INSERT OR IGNORE INTO balance_scheduler VALUES (1, NULL);
 		""")
 		columns = {column[1] for column in self.db.execute('PRAGMA table_info(runs)')}
 		if 'kind' not in columns:
@@ -93,13 +96,14 @@ class JobManager:
 			if kind == 'checkin':
 				self._record_interrupted_account(self._progress(self.data_dir / f'run-{run_id}.json'), config)
 		self.db.execute(
-			"UPDATE runs SET state='interrupted',finished_at=?,error='服务重启, 请核对站点结果后再运行' WHERE state IN ('running','awaiting_login','stopping')",
+			"UPDATE runs SET state='interrupted',finished_at=?,error=CASE WHEN kind='balance' THEN '服务重启, 余额刷新已中断' ELSE '服务重启, 请核对站点结果后再运行' END WHERE state IN ('running','awaiting_login','stopping')",
 			(time.time(),),
 		)
 		self.db.commit()
 		self.task: asyncio.Task | None = None
 		self.process: asyncio.subprocess.Process | None = None
 		self.active_id: int | None = None
+		self.active_kind: str | None = None
 		self.manual: dict | None = None
 		self.stopping = False
 		self._scheduler_task: asyncio.Task | None = None
@@ -160,14 +164,44 @@ class JobManager:
 		finally:
 			state.close()
 
-	def schedule_changed(self) -> None:
+	def balance_snapshot(self) -> dict:
+		config, _ = self.config_store.load()
+		store = BalanceStore(self.data_dir / 'webui.sqlite3')
+		try:
+			result = store.snapshot(config)
+		finally:
+			store.close()
+		return {
+			**result,
+			'refreshing': self.active_id is not None,
+			'next_refresh_at': iso_time(
+				self.db.execute('SELECT next_at FROM balance_scheduler WHERE id=1').fetchone()[0]
+			),
+		}
+
+	def balance_schedule_changed(self) -> None:
+		config, _ = self.config_store.load()
+		monitoring = config['monitoring']
+		next_at = (
+			time.time() + monitoring['interval_minutes'] * 60
+			if monitoring['enabled'] and any(account['enabled'] for account in config['accounts'])
+			else None
+		)
+		self.db.execute('UPDATE balance_scheduler SET next_at=? WHERE id=1', (next_at,))
+		self.db.commit()
+
+	def schedule_changed(self, *, include_balance: bool = True) -> None:
 		config, _ = self.config_store.load()
 		schedule = config['schedule']
 		next_at = time.time() + schedule['interval_minutes'] * 60 if schedule['enabled'] else None
 		self.db.execute('UPDATE scheduler SET next_at=? WHERE id=1', (next_at,))
 		self.db.commit()
+		if include_balance:
+			self.balance_schedule_changed()
 
-	async def start(self, revision: int, *, trigger: str = 'manual', account_id: str | None = None) -> dict:
+	async def start(
+		self, revision: int, *, trigger: str = 'manual', account_id: str | None = None, kind: str = 'checkin'
+	) -> dict:
 		async with self._lock:
 			if self.active_id is not None:
 				raise BusyError('已有任务运行, 请等待完成或先停止')
@@ -176,6 +210,8 @@ class JobManager:
 				raise BusyError('配置已更新, 请重新读取后运行')
 			if trigger not in {'manual', 'scheduled'}:
 				raise BusyError('任务来源无效')
+			if kind not in {'checkin', 'balance'}:
+				raise BusyError('任务类型无效')
 			if account_id is not None:
 				if not isinstance(account_id, str) or trigger != 'manual':
 					raise BusyError('单账号任务参数无效')
@@ -196,19 +232,27 @@ class JobManager:
 			}
 			cursor = self.db.execute(
 				"INSERT INTO runs(state,started_at,revision,kind,identity,summary) VALUES ('running',?,?,?,?,?)",
-				(time.time(), revision, 'checkin', None, json.dumps(summary)),
+				(time.time(), revision, kind, None, json.dumps(summary)),
 			)
 			self.db.commit()
 			assert cursor.lastrowid is not None
 			self.active_id = cursor.lastrowid
+			self.active_kind = kind
 			self.stopping = False
 			self.task = asyncio.create_task(
-				self._execute(self.active_id, config, trigger=trigger, account_id=account_id), name='checkin-worker'
+				self._execute(self.active_id, config, trigger=trigger, account_id=account_id, kind=kind),
+				name=kind + '-worker',
 			)
 			return self.history()[0]
 
 	async def _execute(
-		self, run_id: int, config: dict, *, trigger: str = 'manual', account_id: str | None = None
+		self,
+		run_id: int,
+		config: dict,
+		*,
+		trigger: str = 'manual',
+		account_id: str | None = None,
+		kind: str = 'checkin',
 	) -> None:
 		event_file = self.data_dir / f'run-{run_id}.json'
 		try:
@@ -240,6 +284,7 @@ class JobManager:
 				'run_id': run_id,
 				'trigger': trigger,
 				'account_id': account_id,
+				'kind': kind,
 			}
 			self.process.stdin.write(json.dumps(payload).encode())
 			await self.process.stdin.drain()
@@ -266,7 +311,7 @@ class JobManager:
 					else 'failed'
 				)
 			)
-			if state != 'succeeded':
+			if state != 'succeeded' and kind == 'checkin':
 				self._record_interrupted_account(progress, config)
 			summary = (
 				progress.get('summary') if isinstance(progress.get('summary'), dict) else self.history()[0]['summary']
@@ -275,7 +320,7 @@ class JobManager:
 				None
 				if state == 'succeeded'
 				else (
-					'任务已停止, 部分操作可能已完成, 请核对后再运行'
+					('余额刷新已停止' if kind == 'balance' else '任务已停止, 部分操作可能已完成, 请核对后再运行')
 					if self.stopping
 					else progress.get('error', '任务未正常完成, 请检查执行记录和配置')
 				)
@@ -286,24 +331,32 @@ class JobManager:
 			)
 		except asyncio.CancelledError:
 			await self._terminate()
-			self._record_interrupted_account(self._progress(event_file), config)
+			if kind == 'checkin':
+				self._record_interrupted_account(self._progress(event_file), config)
 			self.db.execute(
-				"UPDATE runs SET state='interrupted',finished_at=?,error='服务关闭, 请核对站点结果' WHERE id=?",
-				(time.time(), run_id),
+				"UPDATE runs SET state='interrupted',finished_at=?,error=? WHERE id=?",
+				(time.time(), '服务关闭, 余额刷新已中断' if kind == 'balance' else '服务关闭, 请核对站点结果', run_id),
 			)
 			raise
 		except Exception:
 			await self._terminate()
-			self._record_interrupted_account(self._progress(event_file), config)
+			if kind == 'checkin':
+				self._record_interrupted_account(self._progress(event_file), config)
 			self.db.execute(
-				"UPDATE runs SET state=?,finished_at=?,error='执行器启动或运行失败, 请核对后再运行' WHERE id=?",
-				('cancelled' if self.stopping else 'failed', time.time(), run_id),
+				'UPDATE runs SET state=?,finished_at=?,error=? WHERE id=?',
+				(
+					'cancelled' if self.stopping else 'failed',
+					time.time(),
+					'余额执行器启动或运行失败' if kind == 'balance' else '执行器启动或运行失败, 请核对后再运行',
+					run_id,
+				),
 			)
 		finally:
 			self.db.commit()
 			event_file.unlink(missing_ok=True)
 			self.process = None
 			self.active_id = None
+			self.active_kind = None
 			self.manual = None
 			self.stopping = False
 
@@ -384,23 +437,39 @@ class JobManager:
 			await asyncio.sleep(1)
 			config, revision = self.config_store.load()
 			next_at = self.db.execute('SELECT next_at FROM scheduler WHERE id=1').fetchone()[0]
-			if not config['schedule']['enabled']:
-				continue
-			if next_at is None:
-				self.schedule_changed()
-			elif next_at <= time.time() and self.active_id is None:
+			if config['schedule']['enabled'] and next_at is None:
+				self.schedule_changed(include_balance=False)
+			elif (
+				config['schedule']['enabled']
+				and next_at is not None
+				and next_at <= time.time()
+				and self.active_id is None
+			):
 				# Advance before starting: a restart or failure never creates a catch-up loop.
-				self.schedule_changed()
+				self.schedule_changed(include_balance=False)
 				try:
 					await self.start(revision, trigger='scheduled')
 				except BusyError:
 					pass
+			balance_at = self.db.execute('SELECT next_at FROM balance_scheduler WHERE id=1').fetchone()[0]
+			if config['monitoring']['enabled'] and any(account['enabled'] for account in config['accounts']):
+				if balance_at is None:
+					self.balance_schedule_changed()
+				elif balance_at <= time.time() and self.active_id is None:
+					self.balance_schedule_changed()
+					try:
+						await self.start(revision, trigger='scheduled', kind='balance')
+					except BusyError:
+						pass
 
 	async def open(self) -> None:
 		config, _ = self.config_store.load()
 		next_at = self.db.execute('SELECT next_at FROM scheduler WHERE id=1').fetchone()[0]
 		if not config['schedule']['enabled'] or next_at is None or next_at <= time.time():
-			self.schedule_changed()
+			self.schedule_changed(include_balance=False)
+		balance_at = self.db.execute('SELECT next_at FROM balance_scheduler WHERE id=1').fetchone()[0]
+		if not config['monitoring']['enabled'] or balance_at is None or balance_at <= time.time():
+			self.balance_schedule_changed()
 		self._scheduler_task = asyncio.create_task(self.scheduler(), name='scheduler')
 
 	async def close(self) -> None:

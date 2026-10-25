@@ -10,6 +10,8 @@
     runsLoading: false, status: null, statusFresh: false, uncertain: null, resolveAccount: null,
     savedIds: new Set(), migration: null, focusAccount: new URL(window.location.href).searchParams.get('account'),
     pollTimer: null, polling: false, expanded: new Map(), cardHeaders: [], runViews: new Map(),
+    view: window.location.pathname === '/status' ? 'status' : 'manage',
+    balances: null, balancesLoading: false, balanceViews: new Map(),
   };
 
   class ApiError extends Error {
@@ -31,7 +33,7 @@
   }
 
   function errorText(error) {
-    return error instanceof ApiError ? explainError(error.message) : '网络连接失败. 请检查本地服务是否仍在运行.';
+    return error instanceof ApiError ? explainError(error.message) : '网络连接失败. 请检查服务是否仍在运行以及网络是否可达.';
   }
 
   async function api(path, options = {}) {
@@ -101,6 +103,13 @@
     });
     $('stop-button').disabled = blocked || !state.statusFresh || !state.status?.running || state.status?.run?.state === 'stopping';
     $('logout-button').disabled = state.busy;
+    const balanceBlocked = !available || blocked || state.dirty || !state.statusFresh || !!state.status?.running || !!state.balances?.refreshing;
+    $('refresh-balances').disabled = balanceBlocked;
+    $('refresh-balances').textContent = state.balances?.refreshing || (state.status?.running && state.status?.run?.kind === 'balance') ? '正在采集...' : '刷新余额';
+    document.querySelectorAll('[data-balance-refresh]').forEach((item) => {
+      item.disabled = balanceBlocked || item.dataset.enabled !== 'true';
+      item.title = state.dirty ? '请先保存当前修改' : item.dataset.enabled !== 'true' ? '此账号已停用' : balanceBlocked ? '请等待当前任务结束并确认状态' : '仅查询此账号的余额';
+    });
     $('dirty-status').textContent = !available ? '配置尚未就绪' : state.uncertain ? '请先确认上次操作结果' : state.dirty ? '有未保存的修改' : '所有修改已保存';
     $('dirty-status').className = `dirty-status${state.dirty ? ' unsaved' : ''}${state.uncertain ? ' uncertain-lock' : ''}`;
     $('config-revision').textContent = state.revision === null ? '尚未读取配置' : `已保存版本 ${state.revision}`;
@@ -160,9 +169,10 @@
     $('login-view').hidden = true;
     $('workspace').hidden = false;
     $('logout-button').hidden = false;
+    renderWorkspaceView();
     if (state.uncertain === 'logout') state.uncertain = null;
     const configTask = state.config && state.dirty ? Promise.resolve(renderForm()) : loadConfig(false);
-    await Promise.allSettled([configTask, loadStatus(), loadRuns()]);
+    await Promise.allSettled([configTask, loadStatus(), loadRuns(), ...(state.view === 'status' ? [loadBalances()] : [])]);
     schedulePoll();
   }
 
@@ -174,6 +184,7 @@
     result.notifications ||= {};
     result.proxy_url ||= '';
     result.schedule ||= { enabled: false, interval_minutes: 360 };
+    result.monitoring ||= { enabled: true, interval_minutes: 60 };
     result.http ||= { timeout_seconds: 30 };
     result.webui_url ||= '';
     return result;
@@ -309,7 +320,7 @@
     const currentBadge = badge(run?.state);
     currentBadge.id = 'task-badge';
     $('task-badge').replaceWith(currentBadge);
-    $('task-description').textContent = run ? `任务 #${run.id}, ${formatTime(run.started_at)} 开始.${run.error ? ` ${explainError(run.error)}` : ''}${run.state === 'needs_attention' ? ' 部分账号已暂停, 请查看近期记录并更新凭据.' : ''}${run.state === 'uncertain' ? ' 请先在站点核对结果, 避免重复执行.' : ''}` : '还没有运行中的任务. 配置完成后即可开始.';
+    $('task-description').textContent = run ? `${run.kind === 'balance' ? '余额采集' : '签到任务'} #${run.id}, ${formatTime(run.started_at)} 开始.${run.error ? ` ${explainError(run.error)}` : ''}${run.state === 'needs_attention' ? run.kind === 'balance' ? ' 部分账号余额暂不可用, 请查看查询结果.' : ' 部分账号已暂停, 请查看近期记录并更新凭据.' : ''}${run.state === 'uncertain' ? ' 请先在站点核对结果, 避免重复执行.' : ''}` : '还没有运行中的任务. 配置完成后即可开始.';
     setText($('task-progress'), progressText(run?.summary?.progress, run?.state));
     $('next-run').textContent = data.next_run_at ? `下次计划: ${formatTime(data.next_run_at)}` : '定时任务未启用, 或尚未安排下一次运行.';
     updateControls();
@@ -343,7 +354,7 @@
   }
 
   function stageLabel(stage) {
-    return ({ prepare: '准备账号', load_session: '读取会话', password_login: '账号密码登录', acw_verification: '处理 acw 访问验证', verify_identity: '核验账号', checkin: '发送签到请求', verify_result: '核验签到结果', save_session: '保存会话', finished: '账号处理结束', notify: '发送通知' })[stage] || stage || '等待执行';
+    return ({ prepare: '准备账号', load_session: '读取会话', password_login: '账号密码登录', acw_verification: '处理 acw 访问验证', verify_identity: '核验账号', checkin: '发送签到请求', verify_result: '核验签到结果', read_balance: '查询余额', balance: '查询余额', save_balance: '保存余额', save_session: '保存会话', finished: '账号处理结束', notify: '发送通知' })[stage] || stage || '等待执行';
   }
 
   function requestDetail(item) {
@@ -389,11 +400,11 @@
     return { root, title, reason, verification, diagnostic, retry, steps };
   }
 
-  function updateAccountResult(view, account) {
+  function updateAccountResult(view, account, kind) {
     const outcome = account.pending_outcome || account.outcome || (account.success ? 'succeeded' : 'failed');
     const reason = account.pending_reason || account.reason || account.error;
     const agentVerified = account.provider === 'agentrouter' && account.success && reason === 'agent_checkin_verified';
-    setText(view.title, `${account.name || account.id || '账号'}: ${account.pending_outcome ? '已暂停, ' : ''}${agentVerified ? '签到成功' : runLabel(outcome)}`);
+    setText(view.title, `${account.name || account.id || '账号'}: ${account.pending_outcome ? '已暂停, ' : ''}${kind === 'balance' && account.success ? '余额已更新' : agentVerified ? '签到成功' : runLabel(outcome)}`);
     setText(view.reason, reasonText(reason));
     const verification = account.provider === 'agentrouter' && reason === 'user_info_requested_reward_unverified' ? '历史用户信息请求未验证签到, 请以站点记录为准.' : account.verification_reason ? `结果核验: ${reasonText(account.verification_reason)}` : '';
     setText(view.verification, verification);
@@ -419,7 +430,7 @@
     const root = el('div', 'run-row');
     root.dataset.runId = run.id;
     const main = el('div', 'run-main');
-    const title = el('p', 'run-title', `任务 #${run.id}`);
+    const title = el('p', 'run-title', `${run.kind === 'balance' ? '余额采集' : '签到任务'} #${run.id}`);
     const started = el('p', 'run-meta');
     const finished = el('p', 'run-meta');
     const error = el('p', 'run-meta run-diagnostic');
@@ -455,7 +466,7 @@
       keys.add(key);
       let result = view.accounts.get(key);
       if (!result) { result = createAccountResult(); view.accounts.set(key, result); }
-      updateAccountResult(result, account);
+      updateAccountResult(result, account, run.kind);
       const position = view.details.children[index + 2];
       if (position !== result.root) view.details.insertBefore(result.root, position || null);
     });
@@ -495,6 +506,232 @@
     }
   }
 
+  function renderWorkspaceView() {
+    const status = state.view === 'status';
+    $('balance-view').hidden = !status;
+    $('management-view').hidden = status;
+    $('page-eyebrow').textContent = status ? 'ACCOUNT STATUS' : 'OVERVIEW';
+    $('page-title').textContent = status ? '账户 Status' : '签到控制台';
+    $('page-description').textContent = status ? '余额、每日新增与变化, 在这里查看.' : '先保存配置, 再执行签到. 任务与配置分别管理.';
+    document.title = status ? '账户 Status | NewAPI' : 'NewAPI 签到控制台';
+    document.querySelectorAll('[data-view]').forEach((item) => {
+      if (item.dataset.view === state.view) item.setAttribute('aria-current', 'page');
+      else item.removeAttribute('aria-current');
+    });
+  }
+
+  function switchView(view, push = true) {
+    state.view = view === 'status' ? 'status' : 'manage';
+    if (push) window.history.pushState(null, '', state.view === 'status' ? '/status' : '/');
+    renderWorkspaceView();
+    if (state.authenticated && state.view === 'status') loadBalances();
+  }
+
+  function money(value, signed = false) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '未知';
+    const amount = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(Math.abs(value));
+    return `${value < 0 ? '-' : signed && value > 0 ? '+' : ''}$${amount}`;
+  }
+
+  function metric(label, value, hint, signed = false) {
+    const root = el('section', 'balance-metric');
+    root.append(el('p', 'metric-label', label), el('p', 'metric-value', money(value, signed)), el('p', 'muted small', hint));
+    return root;
+  }
+
+  function balanceReason(account) {
+    const known = {
+      balance_updated: '真实余额已核验', balance_verified: '真实余额已核验', balance_refreshed: '真实余额已核验',
+      balance_not_collected: '尚无采集数据', balance_collection_failed: '余额采集失败. 已保留上次成功结果.',
+      balance_session_required: '暂无可用会话. 请先完成一次正常签到, 或更新 Any Cookie.',
+      session_required: '暂无可用会话. 请先完成一次正常签到, 或更新 Any Cookie.',
+      balance_session_expired: '监测会话已失效. 请等待下一次正常签到, 或更新 Any Cookie.',
+      balance_unavailable: '站点未返回有效余额', invalid_balance: '站点未返回有效余额',
+      balance_fields_missing: '站点未返回有效余额', account_disabled: '账号已停用',
+    };
+    return known[account.reason] || (account.reason ? reasonText(account.reason) : account.updated_at ? '' : '尚无采集数据');
+  }
+
+  function balanceState(account) {
+    if (!account.enabled || account.state === 'disabled') return '已停用';
+    if (account.stale) return '余额已过期';
+    return ({ ok: '已更新', unknown: '暂无数据', needs_credentials: '待更新会话', blocked: '访问受阻', rate_limited: '请求限流', failed: '查询失败' })[account.state] || '暂无数据';
+  }
+
+  function renderBalanceAccounts(accounts) {
+    const list = $('balance-accounts');
+    const keys = new Set();
+    if (!state.balanceViews.size) list.replaceChildren();
+    accounts.forEach((account, index) => {
+      const id = String(account.id);
+      keys.add(id);
+      let view = state.balanceViews.get(id);
+      if (!view) {
+        const root = el('article', 'balance-account');
+        root.dataset.balanceAccount = id;
+        const heading = el('div', 'balance-account-heading');
+        const name = el('h3');
+        const status = el('span', 'badge');
+        const refresh = button('刷新', 'button quiet balance-account-refresh', () => refreshBalances(id));
+        refresh.dataset.balanceRefresh = id;
+        heading.append(name, status, refresh);
+        const provider = el('p', 'muted small');
+        const amount = el('p', 'account-balance');
+        const changes = el('p', 'balance-changes');
+        const source = el('p', 'balance-source muted small');
+        const updated = el('p', 'muted small');
+        const details = el('details', 'balance-details');
+        details.append(el('summary', '', '查看查询详情'));
+        const reason = el('p', 'muted small');
+        const used = el('p', 'muted small');
+        details.append(reason, used);
+        root.append(heading, provider, amount, changes, source, updated, details);
+        view = { root, name, status, refresh, provider, amount, changes, source, updated, reason, used };
+        state.balanceViews.set(id, view);
+      }
+      view.name.textContent = account.name || id;
+      view.status.textContent = balanceState(account);
+      view.status.className = `badge ${account.stale || !['ok', 'disabled'].includes(account.state) ? 'warning' : account.state === 'ok' ? 'success' : ''}`;
+      view.refresh.dataset.enabled = String(account.enabled === true);
+      view.refresh.setAttribute('aria-label', `刷新余额 ${account.name || id}`);
+      view.provider.textContent = account.provider === 'agentrouter' ? 'AgentRouter' : account.provider === 'anyrouter' ? 'AnyRouter' : account.provider || '';
+      view.amount.textContent = money(account.balance);
+      const incomePartial = account.income_partial ?? account.partial;
+      const netPartial = account.net_change_partial ?? account.partial;
+      view.changes.textContent = `今日新增 ${money(account.today_income, true)} / ${netPartial ? '采集期净变化' : '净变化'} ${money(account.today_net_change, true)}`;
+      const source = ({ site: '站点今日入账', checkin: '仅已核验签到收益', observed: '采集期间已观测入账' })[account.income_source];
+      view.source.textContent = `${source ? `新增来源: ${source}` : '新增来源: 暂无可靠数据'}${incomePartial ? '. 新增仅覆盖采集期间, 不代表全天统计.' : ''}${netPartial ? '. 净变化以当日首次采集为基准.' : ''}${account.observed_since ? ` 采集基准: ${formatBalanceTime(account.observed_since)}` : ''}`;
+      view.updated.textContent = `最后更新: ${formatBalanceTime(account.updated_at)}${account.stale && account.updated_at ? '. 保留上次已知余额.' : ''}`;
+      view.reason.textContent = balanceReason(account) || '查询完成. 余额监测不会自动重新登录.';
+      view.used.textContent = `累计已用额度: ${money(account.used)}`;
+      const position = list.children[index];
+      if (position !== view.root) list.insertBefore(view.root, position || null);
+    });
+    state.balanceViews.forEach((view, key) => { if (!keys.has(key)) { view.root.remove(); state.balanceViews.delete(key); } });
+    if (!accounts.length) list.replaceChildren(el('p', 'muted small', '暂无已连接账户. 请先在管理面板添加并保存账号.'));
+  }
+
+  function formatBalanceTime(value) {
+    if (!value) return '暂无';
+    const date = new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value);
+    if (Number.isNaN(date.getTime())) return '未知';
+    return date.toLocaleString('zh-CN', { timeZone: 'Asia/Singapore', hour12: false }).replaceAll('/', '-') + ' UTC+8';
+  }
+
+  function renderBalanceHistory(history) {
+    const supplied = history.filter((entry) => entry && /^\d{4}-\d{2}-\d{2}$/.test(entry.day) && Number.isFinite(Date.parse(entry.day))).sort((a, b) => a.day.localeCompare(b.day));
+    const rows = [];
+    if (supplied.length) {
+      const byDay = new Map(supplied.map((entry) => [entry.day, entry]));
+      const end = Date.parse(supplied[supplied.length - 1].day);
+      const start = Math.max(Date.parse(supplied[0].day), end - 29 * 86400000);
+      for (let at = start; at <= end; at += 86400000) {
+        const day = new Date(at).toISOString().slice(0, 10);
+        rows.push(byDay.get(day) || { day, balance: null, today_income: null, today_net_change: null, balance_count: 0 });
+      }
+    }
+    const body = $('balance-history');
+    body.replaceChildren();
+    rows.slice().reverse().forEach((entry) => {
+      const row = el('tr');
+      [entry.day, money(entry.balance), money(entry.today_income, true), money(entry.today_net_change, true), `${entry.balance_count ?? 0} 个账号`].forEach((value) => row.append(el('td', '', value)));
+      body.append(row);
+    });
+    const chart = $('balance-chart');
+    chart.replaceChildren();
+    const known = rows.filter((entry) => typeof entry.balance === 'number' && Number.isFinite(entry.balance));
+    if (!known.length) { chart.append(el('p', 'muted small', '尚无趋势数据. 首次成功采集后开始记录.')); return; }
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', '0 0 900 200');
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', `最近 ${rows.length} 天余额趋势, ${known.length} 天有数据. 精确数值见下方每日数据.`);
+    const min = Math.min(...known.map((entry) => entry.balance));
+    const max = Math.max(...known.map((entry) => entry.balance));
+    const range = max - min || Math.max(Math.abs(max) * 0.1, 1);
+    const x = (index) => 90 + (rows.length === 1 ? 355 : index / (rows.length - 1) * 710);
+    const y = (value) => 145 - (value - min) / range * 100;
+    const label = (value, px, py, anchor) => {
+      const text = document.createElementNS(ns, 'text');
+      text.setAttribute('x', px); text.setAttribute('y', py);
+      if (anchor) text.setAttribute('text-anchor', anchor);
+      text.textContent = value; svg.append(text);
+    };
+    label(money(max), 5, 40); label(money(min), 5, 150);
+    label(rows[0].day, 90, 183); label(rows[rows.length - 1].day, 800, 183, 'end');
+    let segment = [];
+    const finish = () => {
+      if (segment.length > 1) {
+        const line = document.createElementNS(ns, 'polyline');
+        line.setAttribute('points', segment.join(' ')); line.setAttribute('class', 'balance-chart-line'); svg.append(line);
+      }
+      segment = [];
+    };
+    rows.forEach((entry, index) => {
+      if (typeof entry.balance !== 'number' || !Number.isFinite(entry.balance)) { finish(); return; }
+      const cx = x(index), cy = y(entry.balance);
+      segment.push(`${cx},${cy}`);
+      const dot = document.createElementNS(ns, 'circle');
+      dot.setAttribute('cx', cx); dot.setAttribute('cy', cy); dot.setAttribute('r', '4');
+      const title = document.createElementNS(ns, 'title'); title.textContent = `${entry.day}: ${money(entry.balance)}`;
+      dot.append(title); svg.append(dot);
+    });
+    finish(); chart.append(svg);
+  }
+
+  function renderBalances(data) {
+    const summary = data.summary || {};
+    const total = summary.account_count ?? 0;
+    $('balance-summary').replaceChildren(
+      metric('总余额', summary.balance, `已知 ${summary.balance_count ?? 0} / ${total} 个账号, 含上次已知值`),
+      metric('今日新增', summary.today_income, `覆盖 ${summary.income_count ?? 0} / ${total} 个账号, 不扣消费`, true),
+      metric('今日净变化', summary.today_net_change, `覆盖 ${summary.net_change_count ?? 0} / ${total} 个账号, 按采集基准计算, 包含消费`, true),
+      (() => { const root = el('section', 'balance-metric'); root.append(el('p', 'metric-label', '有效采集'), el('p', 'metric-value', `${summary.fresh_count ?? 0} / ${total}`), el('p', 'muted small', '过期与缺失数据请查看账户详情')); return root; })(),
+    );
+    $('balance-day').textContent = data.day ? `${data.day} / UTC+8` : 'UTC+8';
+    const interval = state.config?.monitoring?.interval_minutes ?? 60;
+    $('balance-refresh-hint').textContent = data.refreshing ? '正在串行采集账户余额. 不会自动登录或执行签到.' : `${data.next_refresh_at ? `下次采集: ${formatBalanceTime(data.next_refresh_at)}.` : '自动采集未安排.'} 采集间隔 ${interval} 分钟, 可在管理面板调整. 重新读取只读取缓存.`;
+    renderBalanceAccounts(Array.isArray(data.accounts) ? data.accounts : []);
+    renderBalanceHistory(Array.isArray(data.history) ? data.history : []);
+    updateControls();
+  }
+
+  async function loadBalances() {
+    if (state.balancesLoading || !state.authenticated) return;
+    state.balancesLoading = true;
+    $('read-balances').disabled = true;
+    $('retry-balances').disabled = true;
+    try {
+      const data = await api('/api/balances');
+      state.balances = data;
+      renderBalances(data);
+      $('balances-error').hidden = true;
+    } catch (error) {
+      $('balances-error').hidden = false;
+      $('balances-error').querySelector('span').textContent = `余额读取失败. ${errorText(error)}${state.balances ? ' 已保留上次结果, 数据可能已过期.' : ''}`;
+    } finally {
+      state.balancesLoading = false;
+      $('read-balances').disabled = false;
+      $('retry-balances').disabled = false;
+      updateControls();
+    }
+  }
+
+  async function refreshBalances(accountId = null) {
+    if (!state.config || state.busy || state.uncertain || state.dirty || !state.statusFresh || state.status?.running || state.balances?.refreshing) return;
+    setBusy(true);
+    try {
+      const body = { revision: state.revision };
+      if (accountId) body.account_id = accountId;
+      await api('/api/balances/refresh', { method: 'POST', body });
+      notice('余额采集任务已启动. 仅查询已保存会话, 不会自动登录或执行签到.');
+      await Promise.allSettled([loadStatus(), loadRuns(), loadBalances()]);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status >= 500 || error.status === 0 || (error.status >= 200 && error.status < 300)) setUncertain('balance', errorText(error));
+      else { notice(errorText(error), error.status === 409 ? 'warning' : 'error'); await loadStatus(); }
+    } finally { setBusy(false); }
+  }
+
   function stopPolling() {
     clearTimeout(state.pollTimer);
     state.pollTimer = null;
@@ -509,7 +746,7 @@
   async function poll() {
     if (state.polling || !state.authenticated || document.hidden) return;
     state.polling = true;
-    try { await Promise.allSettled([loadStatus(), loadRuns()]); }
+    try { await Promise.allSettled([loadStatus(), loadRuns(), ...(state.view === 'status' ? [loadBalances()] : [])]); }
     finally { state.polling = false; schedulePoll(); }
   }
 
@@ -778,7 +1015,7 @@
       if (account.auth_type === 'password') {
         const agent = account.provider === 'agentrouter';
         grid.append(field('站点登录账号', account.username, (value) => { account.username = value; }, { autocomplete: 'off', hint: agent ? '填写 AgentRouter 的站点用户名或邮箱.' : '填写 AnyRouter 的用户名或邮箱.' }));
-        grid.append(secretField('站点密码', account.password, (value) => { account.password = value; }, { hint: agent ? '每次运行重新登录 AgentRouter, 不复用登录会话. 仅确认站点返回已签到才显示签到成功.' : '已知 acw 访问验证可自动处理, 其他验证码或未知验证会暂停并通知, 请在本机处理后更新凭据.' }));
+        grid.append(secretField('站点密码', account.password, (value) => { account.password = value; }, { hint: agent ? '每次签到重新登录 AgentRouter, 不复用登录会话. 仅确认站点返回已签到才显示签到成功. 登录后的会话仅供后续只读余额监测.' : '已知 acw 访问验证可自动处理, 其他验证码或未知验证会暂停并通知, 请在本机处理后更新凭据.' }));
       } else if (account.auth_type === 'cookie' && account.provider === 'anyrouter') {
         const cookie = secretField('Cookie', account.cookies, (value) => { account.cookies = value; }, { wide: true, placeholder: 'session=...; other=...', hint: '输入完整 Cookie header. 已保存值留空保留, 点击清除才删除.' });
         cookie.append(el('p', 'field-hint', '先登录 https://anyrouter.top, 按 F12 -> Application -> Cookies -> https://anyrouter.top, 找到 session 并复制其 Value, 在上方手动粘贴 session=复制的值. 也可从 Network 的 Request Headers 复制包含 session 的完整 Cookie 值. acw_sc__v2 只是访问验证 Cookie, 不能替代登录 Cookie.'));
@@ -868,6 +1105,15 @@
       field('运行间隔, 分钟', schedule.interval_minutes, (value) => { schedule.interval_minutes = value; }, { type: 'number', min: 30, max: 10080, required: true, hint: '允许 30 至 10080 分钟. 请根据站点规则设置合理间隔.' }),
     );
     scheduling.append(scheduleGrid);
+    const monitoring = state.config.monitoring;
+    const monitoringGroup = el('section', 'runtime-group');
+    monitoringGroup.append(el('h3', '', '余额监测'));
+    const monitoringGrid = el('div', 'form-grid');
+    monitoringGrid.append(
+      checkField('启用定时余额采集', monitoring.enabled, (value) => { monitoring.enabled = value; }, '仅使用已有会话查询余额, 会话失效时等待正常签到或更新凭据. 不会自动重新登录.'),
+      field('余额采集间隔, 分钟', monitoring.interval_minutes, (value) => { monitoring.interval_minutes = value; }, { type: 'number', min: 30, max: 10080, required: true, hint: '默认 60 分钟. 与签到任务串行执行, 页面刷新只读取已保存数据.' }),
+    );
+    monitoringGroup.append(monitoringGrid);
     const network = el('section', 'runtime-group'); network.append(el('h3', '', 'HTTP 与通知入口'));
     const networkGrid = el('div', 'form-grid');
     networkGrid.append(
@@ -877,7 +1123,7 @@
     network.append(networkGrid);
     const proxy = el('section', 'runtime-group'); proxy.append(el('h3', '', '默认代理'));
     proxy.append(secretField('代理 URL', state.config.proxy_url, (value) => { state.config.proxy_url = value; }, { placeholder: 'socks5://用户名:密码@主机:1080', hint: '支持 HTTP/HTTPS 和 SOCKS5. 认证格式: socks5://用户名:密码@主机:端口. 用户名和密码中的 @ : / # % 等特殊字符需进行 URL 编码. 供沿用上级或使用默认代理的账号使用. 已保存值留空保留, 点击清除才删除.' }));
-    container.append(scheduling, network, proxy);
+    container.append(scheduling, monitoringGroup, network, proxy);
   }
 
   const renderers = { accounts: renderAccounts, notifications: renderNotifications, runtime: renderRuntime };
@@ -913,7 +1159,7 @@
       }
       if (account.proxy === 'default' && !config.proxy_url) return `账号 ${name} 选择了默认代理, 请先配置代理 URL.`;
     }
-    for (const [value, min, max, label] of [[config.schedule.interval_minutes, 30, 10080, '运行间隔'], [config.http.timeout_seconds, 5, 120, 'HTTP 超时']]) {
+    for (const [value, min, max, label] of [[config.schedule.interval_minutes, 30, 10080, '运行间隔'], [config.monitoring.interval_minutes, 30, 10080, '余额采集间隔'], [config.http.timeout_seconds, 5, 120, 'HTTP 超时']]) {
       if (!Number.isInteger(value) || value < min || value > max) return `${label} 需要为 ${min} 至 ${max} 之间的整数.`;
     }
     if (config.webui_url) {
@@ -1018,6 +1264,12 @@
       $('form-content').replaceChildren();
       $('runs-list').replaceChildren();
       state.runViews.clear();
+      state.balances = null;
+      state.balanceViews.clear();
+      $('balance-accounts').replaceChildren();
+      $('balance-summary').replaceChildren();
+      $('balance-history').replaceChildren();
+      $('balance-chart').replaceChildren();
       notice('');
       showLogin('');
     } catch (error) {
@@ -1033,6 +1285,15 @@
     state.tab = target.dataset.tab;
     renderForm();
   });
+  document.querySelectorAll('[data-view]').forEach((item) => item.addEventListener('click', (event) => {
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    switchView(item.dataset.view);
+  }));
+  window.addEventListener('popstate', () => switchView(window.location.pathname === '/status' ? 'status' : 'manage', false));
+  $('read-balances').addEventListener('click', loadBalances);
+  $('retry-balances').addEventListener('click', loadBalances);
+  $('refresh-balances').addEventListener('click', () => refreshBalances());
   $('config-form').addEventListener('submit', saveConfig);
   $('reload-config').addEventListener('click', () => loadConfig(true));
   $('retry-config').addEventListener('click', () => loadConfig(false));

@@ -5,17 +5,123 @@ import base64
 import copy
 import json
 import os
+import time
 from unittest.mock import Mock
 
 import httpx
 import pytest
 
 from server import worker
+from server.balance_store import BalanceStore
 from server.config_store import default_config
 from server.execution_state import ExecutionState
 from utils.http_checkin import HttpCheckinRuntime, account_binding
 
 AGENT_PASSWORD = 'synthetic-private-password'
+
+
+async def test_balance_refresh_is_read_only_does_not_notify_or_clear_uncertain_write(fixture, monkeypatch):
+	payload, notify = fixture
+	payload['kind'] = 'balance'
+	config = payload['config']
+	account = config['accounts'][0]
+	state = ExecutionState(worker.Path(payload['data_dir']) / 'webui.sqlite3')
+	state.record(account['id'], account_binding(account, config), {'outcome': 'uncertain', 'reason': 'write_unknown'})
+	state.close()
+
+	class Runtime:
+		def __init__(self, config, sessions):
+			self.balance_observations = []
+			self.balance_error = None
+
+		async def execute(self, *args, **kwargs):
+			pytest.fail('A balance refresh cannot execute checkin')
+
+		async def balance(self, account, *, on_progress=None):
+			self.balance_observations = [{'id': 42, 'quota': 500000, 'used_quota': 0, 'observed_at': time.time()}]
+			return {'id': account['id'], 'success': True, 'outcome': 'success', 'reason': 'balance_refreshed'}
+
+	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
+	assert await worker.execute(payload) == 0
+	notify.assert_not_called()
+	state = ExecutionState(worker.Path(payload['data_dir']) / 'webui.sqlite3')
+	pending = state.get(account['id'], account_binding(account, config))
+	assert pending is not None and pending['reason'] == 'write_unknown'
+	state.close()
+	store = BalanceStore(worker.Path(payload['data_dir']) / 'webui.sqlite3')
+	assert store.snapshot(config)['summary']['balance'] == 1
+	store.close()
+
+
+async def test_balance_rate_limit_prevents_immediate_manual_retry_without_pausing_checkin_as_unknown(
+	fixture, monkeypatch
+):
+	payload, notify = fixture
+	payload['kind'] = 'balance'
+	calls = []
+
+	class Runtime:
+		def __init__(self, config, sessions):
+			self.balance_observations = []
+			self.balance_error = None
+
+		async def balance(self, account, *, on_progress=None):
+			calls.append(account['id'])
+			return {
+				'id': account['id'],
+				'success': False,
+				'outcome': 'rate_limited',
+				'reason': 'rate_limited',
+				'retry_after_seconds': 300,
+			}
+
+	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
+	assert await worker.execute(payload) == 1
+	assert await worker.execute(payload) == 1
+	assert calls == ['main']
+	notify.assert_not_called()
+	state = ExecutionState(worker.Path(payload['data_dir']) / 'webui.sqlite3')
+	assert state.get('main', account_binding(payload['config']['accounts'][0], payload['config'])) is None
+	state.close()
+
+
+async def test_balance_cancellation_does_not_create_write_uncertainty(fixture, monkeypatch):
+	payload, notify = fixture
+	payload['kind'] = 'balance'
+
+	class Runtime:
+		def __init__(self, config, sessions):
+			pass
+
+		async def balance(self, *args, **kwargs):
+			raise asyncio.CancelledError
+
+	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
+	with pytest.raises(asyncio.CancelledError):
+		await worker.execute(payload)
+	state = ExecutionState(worker.Path(payload['data_dir']) / 'webui.sqlite3')
+	assert state.get('main', account_binding(payload['config']['accounts'][0], payload['config'])) is None
+	state.close()
+	notify.assert_not_called()
+
+
+async def test_auxiliary_balance_storage_failure_does_not_undo_confirmed_checkin(fixture, monkeypatch):
+	payload, _ = fixture
+
+	class Runtime:
+		def __init__(self, config, sessions):
+			self.balance_observations = [{'id': 42, 'quota': 500000}]
+
+		async def execute(self, account, *, on_progress=None):
+			return {'id': account['id'], 'success': True, 'outcome': 'success', 'reason': 'agent_checkin_verified'}
+
+	monkeypatch.setattr(worker, 'HttpCheckinRuntime', Runtime)
+	monkeypatch.setattr(BalanceStore, 'record', Mock(side_effect=RuntimeError('synthetic private exception')))
+	assert await worker.execute(payload) == 0
+	progress = json.loads(open(payload['event_file'], encoding='utf-8').read())
+	assert progress['summary']['accounts'][0]['reason'] == 'agent_checkin_verified'
+	assert progress['summary']['accounts'][0]['balance_warning'] == 'balance_storage_failed'
+	assert 'private exception' not in json.dumps(progress)
 
 
 @pytest.fixture
@@ -296,6 +402,11 @@ async def test_agent_login_result_flows_through_worker_and_unknown_results_stay_
 
 	def handler(request):
 		requests.append(request)
+		if request.method == 'GET':
+			assert request.url == 'https://agentrouter.org/api/user/self'
+			assert request.headers['new-api-user'] == '42'
+			assert 'session=ignored-agent-session' in request.headers['cookie']
+			return httpx.Response(200, json={'success': True, 'data': {'id': 42, 'quota': 500000, 'used_quota': 0}})
 		assert request.method == 'POST' and request.url == 'https://agentrouter.org/api/user/login?turnstile='
 		assert json.loads(request.content) == {'username': 'synthetic-agent-user', 'password': AGENT_PASSWORD}
 		assert 'authorization' not in request.headers and 'cookie' not in request.headers
@@ -323,7 +434,7 @@ async def test_agent_login_result_flows_through_worker_and_unknown_results_stay_
 	assert progress['state'] == state
 	result = progress['summary']['accounts'][0]
 	assert result['outcome'] == outcome and result['reason'] == reason
-	assert len(requests) == 1
+	assert len(requests) == (2 if checked_in is True else 1)
 	assert AGENT_PASSWORD not in json.dumps(progress) + str(notify.call_args_list)
 	assert 'ignored-agent-session' not in json.dumps(progress) + str(notify.call_args_list)
 	if outcome == 'uncertain':

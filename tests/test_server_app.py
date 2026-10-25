@@ -63,10 +63,12 @@ async def test_login_cookie_and_limits(web_client):
 	origin = str(client.make_url('')).rstrip('/')
 	assert (await client.post('/api/login', json=[], headers={'Origin': origin})).status == 400
 	service.attempts.clear()
+	service.client_attempts.clear()
 	for _ in range(5):
 		assert (await client.post('/api/login', json={'password': 'wrong'}, headers={'Origin': origin})).status == 401
 	assert (await client.post('/api/login', json={'password': PASSWORD}, headers={'Origin': origin})).status == 429
 	service.attempts.clear()
+	service.client_attempts.clear()
 	response = await client.post('/api/login', json={'password': PASSWORD}, headers={'Origin': origin})
 	assert 'HttpOnly' in response.headers['Set-Cookie']
 	assert 'SameSite=Strict' in response.headers['Set-Cookie']

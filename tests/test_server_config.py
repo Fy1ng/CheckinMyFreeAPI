@@ -88,6 +88,7 @@ def test_default_is_independent_and_does_not_read_environment(monkeypatch):
 		'proxy_url': '',
 		'notifications': {},
 		'schedule': {'enabled': False, 'interval_minutes': 360},
+		'monitoring': {'enabled': True, 'interval_minutes': 60},
 		'http': {'timeout_seconds': 30},
 		'webui_url': '',
 	}

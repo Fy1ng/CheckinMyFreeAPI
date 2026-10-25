@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
+from server.balance_store import BalanceStore
 from server.config_store import validate_config
 from server.execution_state import ExecutionState
 from server.http_session_store import HttpSessionStore
@@ -23,7 +24,8 @@ from utils.secure_state import atomic_write
 
 async def execute(payload: dict) -> int:
 	config = validate_config(payload['config'])
-	if payload.get('kind', 'checkin') != 'checkin':
+	kind = payload.get('kind', 'checkin')
+	if kind not in {'checkin', 'balance'}:
 		raise ValueError('Unsupported task kind')
 	trigger = payload.get('trigger', 'manual')
 	if trigger not in {'manual', 'scheduled'}:
@@ -47,6 +49,7 @@ async def execute(payload: dict) -> int:
 	install_redaction()
 	sessions = HttpSessionStore(data_dir / 'webui.sqlite3', session_key)
 	attention = ExecutionState(data_dir / 'webui.sqlite3')
+	balances = BalanceStore(data_dir / 'webui.sqlite3')
 	runtime = HttpCheckinRuntime(config, sessions)
 	results: list[dict] = []
 	total = sum(account.get('enabled', True) for account in accounts)
@@ -78,22 +81,33 @@ async def execute(payload: dict) -> int:
 				publish(state='running', active_account=None, summary=snapshot())
 				continue
 			retry_at = previous.get('retry_at') if previous else None
+			balance_retry = balances.retry_at(account, config)
+			if balance_retry and balance_retry > time.time():
+				retry_at = max(retry_at or 0, balance_retry)
+				limited_balance = True
+			else:
+				limited_balance = False
 			limited = previous and previous['outcome'] == 'rate_limited' and retry_at and retry_at > time.time()
 			paused = previous and (
-				previous['outcome'] == 'uncertain' or (trigger == 'scheduled' and previous['outcome'] != 'rate_limited')
+				(kind == 'checkin' and previous['outcome'] == 'uncertain')
+				or (trigger == 'scheduled' and previous['outcome'] not in {'rate_limited', 'uncertain'})
 			)
-			if previous is not None and (limited or paused):
+			if limited_balance or (previous is not None and (limited or paused)):
+				pending = {'outcome': 'rate_limited', 'reason': 'rate_limited'} if limited_balance else previous
+				assert pending is not None
 				results.append(
 					{
 						**base,
 						'success': False,
 						'outcome': 'skipped',
 						'reason': 'ACCOUNT_PAUSED',
-						'pending_outcome': previous['outcome'],
-						'pending_reason': previous['reason'],
+						'pending_outcome': pending['outcome'],
+						'pending_reason': pending['reason'],
 						**({'retry_after_seconds': max(1, int((retry_at or 0) - time.time()) + 1)} if limited else {}),
 					}
 				)
+				if kind == 'balance':
+					balances.failure(account, config, pending['outcome'], pending['reason'])
 				publish(state='running', active_account=None, summary=snapshot())
 				continue
 
@@ -106,27 +120,58 @@ async def execute(payload: dict) -> int:
 
 			report({'stage': 'prepare'})
 			try:
-				result = await runtime.execute(account, on_progress=report)
-			except asyncio.CancelledError:
-				attention.record(
-					account['id'], binding, {'outcome': 'uncertain', 'reason': 'REQUEST_CANCELLED_RESULT_UNKNOWN'}
+				result = await (
+					runtime.balance(account, on_progress=report)
+					if kind == 'balance'
+					else runtime.execute(account, on_progress=report)
 				)
+			except asyncio.CancelledError:
+				if kind == 'checkin':
+					attention.record(
+						account['id'], binding, {'outcome': 'uncertain', 'reason': 'REQUEST_CANCELLED_RESULT_UNKNOWN'}
+					)
+				else:
+					balances.failure(account, config, 'failed', 'balance_refresh_interrupted')
 				raise
 			except Exception:
 				result = {
 					**base,
 					'success': False,
-					'outcome': 'uncertain',
-					'reason': 'HTTP_EXECUTION_FAILED_RESULT_UNKNOWN',
+					'outcome': 'uncertain' if kind == 'checkin' else 'failed',
+					'reason': 'HTTP_EXECUTION_FAILED_RESULT_UNKNOWN'
+					if kind == 'checkin'
+					else 'balance_collection_failed',
 					'diagnostic': {**latest_event, 'error_type': 'ExecutionError'},
 					'steps': [{**latest_event, 'state': 'failed', 'error_type': 'ExecutionError'}],
 				}
-			attention.record(account['id'], binding, result)
+			if kind == 'checkin':
+				attention.record(account['id'], binding, result)
+			if kind == 'balance' or config['monitoring']['enabled']:
+				try:
+					observations = getattr(runtime, 'balance_observations', [])
+					for observation in observations:
+						valid = balances.record(account, config, observation)
+						if kind == 'balance' and not valid:
+							result.update(success=False, outcome='failed', reason='invalid_balance_data')
+					error = getattr(runtime, 'balance_error', None)
+					if error is None and not result['success']:
+						error = result
+					if error:
+						balances.failure(account, config, error['outcome'], error['reason'])
+						if error['outcome'] == 'rate_limited':
+							balances.rate_limit(account, config, error.get('retry_after_seconds', 3600))
+				except Exception:
+					# An auxiliary metrics write must never undo a confirmed check-in.
+					if kind == 'balance':
+						result.update(success=False, outcome='failed', reason='balance_storage_failed')
+					else:
+						result['balance_warning'] = 'balance_storage_failed'
 			results.append(result)
 			publish(state='running', active_account=None, summary=snapshot())
 	finally:
 		sessions.close()
 		attention.close()
+		balances.close()
 	outcomes = {
 		result.get('pending_outcome', result['outcome']) for result in results if result['reason'] != 'ACCOUNT_DISABLED'
 	}
@@ -141,6 +186,14 @@ async def execute(payload: dict) -> int:
 		else 'failed'
 	)
 	summary = {**snapshot(), 'trigger': trigger}
+	if kind == 'balance':
+		publish(
+			state=state,
+			active_account=None,
+			summary=summary,
+			error=None if success else '余额读取未全部完成, 请查看 Status',
+		)
+		return 0 if success else 1
 	normalized = [
 		{
 			**result,

@@ -67,7 +67,7 @@ SECRET_NOTIFICATION_ENV_NAMES = frozenset(
 	}
 )
 _TOP_LEVEL_FIELDS = frozenset(
-	{'schema_version', 'accounts', 'proxy_url', 'notifications', 'schedule', 'http', 'webui_url'}
+	{'schema_version', 'accounts', 'proxy_url', 'notifications', 'schedule', 'monitoring', 'http', 'webui_url'}
 )
 _ACCOUNT_FIELDS = frozenset(
 	{
@@ -107,6 +107,7 @@ def default_config() -> dict:
 		'proxy_url': '',
 		'notifications': {},
 		'schedule': {'enabled': False, 'interval_minutes': 360},
+		'monitoring': {'enabled': True, 'interval_minutes': 60},
 		'http': {'timeout_seconds': 30},
 		'webui_url': '',
 	}
@@ -371,6 +372,11 @@ def validate_config(config: dict) -> dict:
 	if schedule['enabled'] and not any(account['enabled'] for account in data['accounts']):
 		raise ConfigError('An enabled schedule requires at least one enabled account')
 	data['schedule'] = schedule
+	monitoring = default_config()['monitoring']
+	monitoring.update(_object(data['monitoring'], set(monitoring), 'Balance monitoring'))
+	monitoring['enabled'] = _boolean(monitoring['enabled'], 'Balance monitoring enabled')
+	monitoring['interval_minutes'] = _integer(monitoring['interval_minutes'], 'Balance monitoring interval', 30, 10080)
+	data['monitoring'] = monitoring
 	http = default_config()['http']
 	http.update(_object(data['http'], set(http), 'HTTP settings'))
 	http['timeout_seconds'] = _integer(http['timeout_seconds'], 'HTTP timeout', 5, 120)

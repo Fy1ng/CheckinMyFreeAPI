@@ -53,6 +53,47 @@ class FakeInput:
 		self.closed = True
 
 
+async def test_balance_tasks_share_checkin_lock_and_snapshot_never_starts_network(
+	configured_store, tmp_path, fake_worker
+):
+	store, key = configured_store
+	manager = JobManager(store, tmp_path, key)
+	process, launched, _ = fake_worker
+	try:
+		assert manager.balance_snapshot()['summary']['balance'] is None
+		assert manager.history() == []
+		run = await manager.start(1, kind='balance')
+		assert run['kind'] == 'balance'
+		await launched.wait()
+		assert json.loads(bytes(process.stdin.data))['kind'] == 'balance'
+		assert manager.balance_snapshot()['refreshing'] is True
+		with pytest.raises(BusyError):
+			await manager.start(1)
+		with pytest.raises(BusyError):
+			await manager.start(1, kind='balance')
+	finally:
+		await manager.close()
+	assert store.load()[1] == 1
+
+
+async def test_balance_restart_does_not_pause_account_as_an_unknown_write(configured_store, tmp_path):
+	store, key = configured_store
+	manager = JobManager(store, tmp_path, key)
+	manager.db.execute(
+		"INSERT INTO runs(state,started_at,revision,kind) VALUES ('running',?,1,'balance')", (time.time(),)
+	)
+	run_id = manager.db.execute('SELECT max(id) FROM runs').fetchone()[0]
+	manager.db.commit()
+	(tmp_path / f'run-{run_id}.json').write_text(json.dumps({'active_account': 'first'}))
+	await manager.close()
+	restarted = JobManager(store, tmp_path, key)
+	try:
+		assert restarted.status()['attention'] == {}
+		assert restarted.history()[0]['state'] == 'interrupted'
+	finally:
+		await restarted.close()
+
+
 @pytest.mark.asyncio
 async def test_single_account_scope_filters_snapshot_without_changing_saved_config(
 	configured_store, tmp_path, fake_worker
@@ -434,6 +475,51 @@ def one_scheduler_tick(monkeypatch):
 			raise asyncio.CancelledError
 
 	monkeypatch.setattr(jobs_module.asyncio, 'sleep', tick)
+
+
+async def test_balance_schedule_runs_independently_with_checkin_disabled(configured_store, tmp_path, monkeypatch):
+	store, key = configured_store
+	manager = JobManager(store, tmp_path, key)
+	manager.db.execute('UPDATE balance_scheduler SET next_at=? WHERE id=1', (time.time() - 10,))
+	manager.db.commit()
+	start = AsyncMock()
+	monkeypatch.setattr(manager, 'start', start)
+	one_scheduler_tick(monkeypatch)
+	try:
+		with pytest.raises(asyncio.CancelledError):
+			await manager.scheduler()
+		start.assert_awaited_once_with(1, trigger='scheduled', kind='balance')
+		assert manager.balance_snapshot()['next_refresh_at'] is not None
+		assert manager.status()['next_run_at'] is None
+	finally:
+		await manager.close()
+
+
+async def test_checkin_advancement_cannot_postpone_due_balance_collection(configured_store, tmp_path, monkeypatch):
+	store, key = configured_store
+	config, revision = store.load()
+	config['schedule'].update(enabled=True, interval_minutes=30)
+	revision = store.save(config, revision)['revision']
+	manager = JobManager(store, tmp_path, key)
+	balance_due = time.time() - 5
+	manager.db.execute('UPDATE scheduler SET next_at=? WHERE id=1', (time.time() - 10,))
+	manager.db.execute('UPDATE balance_scheduler SET next_at=? WHERE id=1', (balance_due,))
+	manager.db.commit()
+
+	async def start_checkin(*args, **kwargs):
+		manager.active_id = 123
+
+	start = AsyncMock(side_effect=start_checkin)
+	monkeypatch.setattr(manager, 'start', start)
+	one_scheduler_tick(monkeypatch)
+	try:
+		with pytest.raises(asyncio.CancelledError):
+			await manager.scheduler()
+		start.assert_awaited_once_with(revision, trigger='scheduled')
+		assert manager.db.execute('SELECT next_at FROM balance_scheduler WHERE id=1').fetchone()[0] == balance_due
+	finally:
+		manager.active_id = None
+		await manager.close()
 
 
 @pytest.mark.asyncio

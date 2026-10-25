@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import httpx
+import pytest
 
 
 def test_cli_starts_locally_and_restores_configuration_after_restart(tmp_path):
@@ -21,6 +22,8 @@ def test_cli_starts_locally_and_restores_configuration_after_restart(tmp_path):
 		CHECKIN_WEB_PASSWORD='synthetic-webui-password',
 	)
 	environment.pop('CHECKIN_WEB_PASSWORD_FILE', None)
+	environment.pop('CHECKIN_WEB_PUBLIC_URL', None)
+	environment.pop('CHECKIN_WEB_TRUSTED_PROXY_IPS', None)
 	for attempt in range(2):
 		process = subprocess.Popen(
 			[sys.executable, '-m', 'server'],
@@ -60,3 +63,30 @@ def test_cli_starts_locally_and_restores_configuration_after_restart(tmp_path):
 			process.wait(timeout=10)
 		environment.pop('CHECKIN_WEB_PASSWORD', None)
 	assert (tmp_path / 'keys' / 'master.key').stat().st_size == 32
+
+
+@pytest.mark.parametrize(
+	'field,value',
+	[('CHECKIN_WEB_PUBLIC_URL', 'http://public.example.test'), ('CHECKIN_WEB_TRUSTED_PROXY_IPS', '0.0.0.0/0')],
+)
+def test_cli_rejects_invalid_ingress_before_creating_local_data(tmp_path, field, value):
+	environment = dict(os.environ)
+	environment.update(
+		CHECKIN_WEB_DATA_DIR=str(tmp_path / 'must-not-create'),
+		CHECKIN_WEB_KEY_FILE=str(tmp_path / 'must-not-create-keys' / 'master.key'),
+		CHECKIN_WEB_PUBLIC_URL='https://public.example.test',
+		CHECKIN_WEB_TRUSTED_PROXY_IPS='127.0.0.1',
+	)
+	environment[field] = value
+	result = subprocess.run(
+		[sys.executable, '-m', 'server'],
+		cwd=Path(__file__).resolve().parent.parent,
+		env=environment,
+		stdin=subprocess.DEVNULL,
+		capture_output=True,
+		text=True,
+		timeout=10,
+	)
+	assert result.returncode != 0 and field in result.stderr
+	assert not (tmp_path / 'must-not-create').exists()
+	assert not (tmp_path / 'must-not-create-keys').exists()

@@ -1,6 +1,6 @@
 # NewAPI HTTP 签到控制台
 
-Python 3.11 + aiohttp + SQLite 的私有 WebUI. 第一版只支持两个固定站点, 服务器不安装或启动任何浏览器, 不支持 OAuth、自定义站点或远程桌面.
+Python 3.11 + aiohttp + SQLite 的私有 WebUI, 包含签到管理和登录后可见的 Status 余额面板. 只支持两个固定站点, 服务器不安装或启动任何浏览器, 不支持 OAuth、自定义站点或远程桌面.
 
 | 站点 | 认证方式 | 请求行为 |
 |---|---|---|
@@ -41,7 +41,18 @@ Cookie 认证仅支持手动粘贴, 不提供 Console 提取脚本或 cURL 导�
 
 Any 密码登录会优先复用已验证、加密保存的 HTTP 会话; 失效后最多尝试一次 API 登录. 签到前核对账号, 签到后再次核对, 失败不覆盖上一份会话. HTTP 不跟随重定向, 凭据只发送到账号选定的固定站点.
 
-Agent 不读取或保存可复用的登录会话. 登录请求带空 turnstile 查询参数, 在当次新 HTTP 会话内完成请求和身份核验. 历史 user_info_requested_reward_unverified 记录保留原有说明, 仅表示当时用户信息请求完成, 未验证签到; 不因升级改写为签到成功.
+Agent 签到不复用已保存会话. 登录请求带空 turnstile 查询参数, 在当次新 HTTP 会话内完成请求和身份核验. 启用余额监测后, 正常登录产生的会话加密保存, 仅供后续只读余额查询; 登录响应中的占位额度不作为真实余额. 余额采集失败不会将已确认的签到改判为失败. 历史 user_info_requested_reward_unverified 记录保留原有说明, 仅表示当时用户信息请求完成, 未验证签到; 不因升级改写为签到成功.
+
+## Status 余额面板
+
+登录后通过 Status 入口或 `/status` 查看各账户余额、今日新增、今日净变化、总余额及最近 30 天记录. Status 与管理面板共用管理认证, 不向未登录访问者公开账户统计.
+
+- 余额监测默认开启, 每 60 分钟采集一次, 在定时与网络中配置开关和间隔. 打开页面和页面轮询只读取缓存, 手动刷新按钮才创建采集任务. 采集与签到共用串行任务锁, 避免同时操作账户会话.
+- 通过 `GET /api/user/self` 读取真实余额, Any/Agent 原始额度按每 500000 单位折算为 1 单位站内美元额度. 总余额汇总当前启用账户的最近已知余额, 同时显示采集覆盖数和过期状态; 不是现金资产估值.
+- 今日新增优先使用站点有效的 `today_income`, 缺失时根据同日已观测的剩余额度和累计消耗变化计算入账. 首次采样不虚构收入. 部分时段结果标明观察范围, 不声称覆盖全天.
+- 今日净变化以同日首个观测余额为基准, 包含消费影响. 日期按 `Asia/Singapore` (UTC+8) 划分, 未采集的历史不补造, 跨日缺失基准不借用旧值冒充当天完整统计.
+- 查询失败保留上次成功余额并标记错误或过期. 未知值显示未知, 与真实 0 区分. 更改凭据、目标身份或代理后不会复用不匹配的历史基准和会话.
+- 余额采集不调用签到接口, 也不自动通过账号密码登录. Any Cookie 可直接查询; 密码账号及 Agent 在正常签到建立会话后可查询. 会话失效需要更新 Cookie 或等待正常签到恢复. CF、限流和结果不确定的暂停规则继续生效, 余额刷新不会解除签到暂停.
 
 站点代理在 WebUI 的 `定时与网络 -> 默认代理` 配置. 单个账号也可展开 `账号代理`, 选择沿用上级、直连、默认代理或指定代理. 支持 HTTP、HTTPS 和 SOCKS5, 包括 `socks5://用户名:密码@主机:1080`. 使用 SOCKS5 认证时, 用户名和密码均需填写, URL 解码后各为 1 至 255 个 UTF-8 字节; 无认证 SOCKS5 仍可使用. 特殊字符应进行百分号编码, 例如用户名 `user@example`、密码 `pass:word@` 可写为 `socks5://user%40example:pass%3Aword%40@proxy.example:1080`. URL 和其中的凭据加密保存, 已保存值不会回显. 代理认证失败会显示明确错误, 不会自动改为直连. 登录、acw 验证及签到沿用同一代理会话. 该设置用于站点请求, 通知渠道的网络设置保持现有行为.
 
@@ -67,6 +78,8 @@ Agent 不读取或保存可复用的登录会话. 登录请求带空 turnstile �
 | CHECKIN_WEB_KEY_FILE | server-keys/master.key, 原始 32 字节 |
 | CHECKIN_WEB_PASSWORD_FILE | 首次管理密码的只读文本文件, 至少 16 字符 |
 | CHECKIN_WEB_PASSWORD | 首次密码的备选进程环境来源, 优先使用密码文件 |
+| CHECKIN_WEB_PUBLIC_URL | 可选的公网 HTTPS origin, 如 https://checkin.example.com; 默认只允许本机或 SSH 转发 |
+| CHECKIN_WEB_TRUSTED_PROXY_IPS | 可选的可信反向代理单 IP 列表; 只接受这些来源提供的转发头 |
 
 账号、通知、代理与定时配置全部通过 WebUI 保存. 服务不自动读取 .env, 不支持旧 --import-env 参数. 缺少现有数据库所对应的密钥时拒绝启动.
 
@@ -103,7 +116,22 @@ Compose 将容器 8765 仅映射到宿主 127.0.0.1:8765. 在本机建立转发:
 ssh -N -L 127.0.0.1:18765:127.0.0.1:8765 your-server
 ```
 
-然后通过 http://127.0.0.1:18765 管理. 本机端口被占用时可更换转发左侧端口. 不直接公开明文 WebUI. 默认服务只接受 loopback Host, 公网 HTTPS 暴露和认证模型不在本次实现范围内.
+然后通过 http://127.0.0.1:18765 管理. 本机端口被占用时可更换转发左侧端口. 默认服务只接受 loopback Host.
+
+### 公网 HTTPS 管理
+
+继续将应用端口绑定在宿主 loopback, 通过 Caddy 等反向代理提供 HTTPS. 在 Compose 的应用环境中设置 `CHECKIN_WEB_PUBLIC_URL=https://checkin.example.com`, 并将 `CHECKIN_WEB_TRUSTED_PROXY_IPS` 配置为应用实际看到的反向代理 IP (Docker bridge 下通常为宿主网关单 IP). 不将任意来源或整个网段列为可信代理.
+
+```caddyfile
+checkin.example.com {
+    reverse_proxy 127.0.0.1:8765 {
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-For {remote_host}
+    }
+}
+```
+
+应用只接受显式配置的公网 origin, 不用访问者提供的转发 Host 自动扩展可信域名. 公网管理 Cookie 为 Secure、HttpOnly、SameSite=Strict, 会话绑定访问 origin; 修改请求还校验 Origin 和 CSRF. 登录使用按来源及全局限流、限制密码哈希并发. SSH 本机访问仍可使用, 与公网会话隔离. 反向代理需保留原始 Host 并覆盖转发协议与来源头, 不暴露容器明文管理端口. DNS 指向正确源站后再启用入口, 证书签发和域名可达性需在实际部署环境核验.
 
 Windows 已有本地测试实例可手动运行 `scripts/restart_local_webui.ps1 -TestRoot <测试目录>`. 脚本先检查无任务且定时关闭, 核对监听进程归属, 才重启. 加 `-CheckOnly` 只检查. 不删除数据、不自动签到、不切换浏览器选项. 服务启动后按上述规则迁移旧配置.
 

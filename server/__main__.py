@@ -1,4 +1,4 @@
-"""Start a private WebUI without changing the invoking shell's configuration."""
+"""Start the WebUI using explicitly configured local or HTTPS ingress."""
 
 import argparse
 import getpass
@@ -9,10 +9,19 @@ from pathlib import Path
 
 from aiohttp import web
 
+from server.web_access import WebAccess
+
 
 def main() -> None:
 	parser = argparse.ArgumentParser(description='启动本机配置和调度 WebUI')
 	parser.parse_args()
+	try:
+		access = WebAccess(
+			os.getenv('CHECKIN_WEB_PUBLIC_URL', ''),
+			tuple(peer.strip() for peer in os.getenv('CHECKIN_WEB_TRUSTED_PROXY_IPS', '').split(',') if peer.strip()),
+		)
+	except ValueError as error:
+		raise SystemExit(str(error)) from None
 	data = Path(os.getenv('CHECKIN_WEB_DATA_DIR', 'server-data'))
 	key_path = Path(os.getenv('CHECKIN_WEB_KEY_FILE', 'server-keys/master.key'))
 	if data.is_symlink() or key_path.is_symlink():
@@ -48,8 +57,11 @@ def main() -> None:
 	port = int(os.getenv('CHECKIN_WEB_PORT', '8765'))
 	from server.app import create_app
 
-	app = create_app(data, key, password)
-	print(f'WebUI 已启动, 请通过本机或 SSH 转发访问 http://127.0.0.1:{port}')
+	app = create_app(
+		data, key, password, public_origin=access.public_origin, trusted_proxy_ips=tuple(access.trusted_proxy_ips)
+	)
+	address = access.public_origin or f'http://127.0.0.1:{port}'
+	print(f'WebUI 已启动, 管理地址 {address}')
 	web.run_app(app, host=host, port=port, access_log=None, print=None)
 
 

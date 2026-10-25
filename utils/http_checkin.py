@@ -145,7 +145,15 @@ class HttpCheckinRuntime:
 		self.sessions = cast(_Sessions, sessions)
 		self.client_factory = client_factory
 
-	async def execute(self, account: dict, *, on_progress: Callable[[dict], None] | None = None) -> dict:
+	async def balance(self, account: dict, *, on_progress: Callable[[dict], None] | None = None) -> dict:
+		"""Read an existing authenticated session; this path never logs in or signs in."""
+		return await self.execute(account, on_progress=on_progress, read_only=True)
+
+	async def execute(
+		self, account: dict, *, on_progress: Callable[[dict], None] | None = None, read_only: bool = False
+	) -> dict:
+		self.balance_observations: list[dict] = []
+		self.balance_error: dict | None = None
 		self._steps: list[dict] = []
 		self._current: dict = {}
 		self._on_progress = on_progress
@@ -184,7 +192,9 @@ class HttpCheckinRuntime:
 				follow_redirects=False,
 				headers=headers,
 			) as client:
-				if provider == 'agentrouter':
+				if read_only:
+					details = await self._balance(client, account, origin)
+				elif provider == 'agentrouter':
 					details = await self._agent(client, account)
 				else:
 					details = await self._any(client, account, origin)
@@ -436,7 +446,71 @@ class HttpCheckinRuntime:
 			raise _Failure('failed', 'agent_checkin_not_confirmed', checked_in=False)
 		# Login responses contain placeholder quota fields on the live site; do
 		# not present them as an observed balance or invent a reward amount.
+		if self.config.get('monitoring', {}).get('enabled', False):
+			try:
+				self._save_session(client, account, str(user['id']))
+				self._stage('read_balance')
+				observed = self._verify(
+					await self._request(client, 'GET', '/api/user/self', headers={'new-api-user': str(user['id'])}),
+					account,
+					str(user['id']),
+				)
+				self._observe(observed)
+			except _Failure as exc:
+				self.balance_error = {'outcome': exc.outcome, 'reason': exc.reason, **exc.details}
+				self._update(state='failed')
+			except Exception:
+				self.balance_error = {'outcome': 'failed', 'reason': 'balance_collection_failed'}
+				self._update(state='failed')
 		return {'outcome': 'success', 'reason': 'agent_checkin_verified', 'checked_in': True}
+
+	def _observe(self, user: dict) -> None:
+		self.balance_observations.append(
+			{key: user.get(key) for key in ('id', 'quota', 'used_quota', 'today_income')}
+			| {'observed_at': datetime.now(timezone.utc).timestamp()}
+		)
+
+	def _save_session(self, client: httpx.AsyncClient, account: dict, user_id: str) -> None:
+		host = urlsplit(str(client.base_url)).hostname or ''
+		cookies = [
+			{'name': item.name, 'value': item.value, 'domain': item.domain, 'path': item.path, 'expires': item.expires}
+			for item in client.cookies.jar
+			if item.domain in {host, '.' + host}
+		]
+		try:
+			self.sessions.save(
+				str(account['id']), account_binding(account, self.config), {'api_user': user_id, 'cookies': cookies}
+			)
+		except Exception:
+			raise _Failure('failed', 'session_save_failed') from None
+
+	async def _balance(self, client: httpx.AsyncClient, account: dict, origin: str) -> dict:
+		self._stage('load_session')
+		state = self._load(account, account_binding(account, self.config))
+		host = urlsplit(origin).hostname or ''
+		saved_id = _uid(state.get('api_user')) if state else None
+		user_id = _uid(account.get('api_user'))
+		if state:
+			if not saved_id:
+				raise _Failure('failed', 'invalid_saved_session')
+			if user_id and saved_id != user_id:
+				raise _Failure('needs_credentials', 'account_identity_mismatch')
+			self._cookies(client, state.get('cookies'), host, saved=True)
+			user_id = saved_id
+		elif account['provider'] == 'anyrouter' and account['auth_type'] == 'cookie':
+			self._cookies(client, account.get('cookies'), host)
+		else:
+			raise _Failure('needs_credentials', 'balance_session_required')
+		if not user_id:
+			raise _Failure('needs_credentials', 'cookie_user_id_required')
+		if not client.build_request('GET', '/api/user/self').headers.get('cookie'):
+			raise _Failure('needs_credentials', 'balance_session_required')
+		self._stage('read_balance')
+		user = self._verify(
+			await self._request(client, 'GET', '/api/user/self', headers={'new-api-user': user_id}), account, user_id
+		)
+		self._observe(user)
+		return {'outcome': 'success', 'reason': 'balance_refreshed'}
 
 	def _load(self, account: dict, binding: str) -> dict | None:
 		try:
@@ -561,6 +635,8 @@ class HttpCheckinRuntime:
 				user_id,
 			)
 		user_id = cast(str, _uid(before['id']))
+		if self.config.get('monitoring', {}).get('enabled', False):
+			self._observe(before)
 		self._stage('checkin')
 		payload = await self._request(
 			client, 'POST', '/api/user/sign_in', headers={'new-api-user': user_id, 'Content-Type': 'application/json'}
@@ -582,6 +658,8 @@ class HttpCheckinRuntime:
 			)
 		except _Failure as exc:
 			raise _Failure('uncertain', 'checkin_verification_failed', verification_reason=exc.reason) from None
+		if self.config.get('monitoring', {}).get('enabled', False):
+			self._observe(after)
 		cookies = [
 			{
 				'name': cookie.name,
