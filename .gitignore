@@ -19,6 +19,12 @@ server-data/
 server-keys/
 webui.sqlite3
 webui.sqlite3-*
+*.nab
+*.har
+*.key
+*.pem
+*.p12
+*.pfx
 http-result-fingerprint.txt
 service.lock
 execution.lock

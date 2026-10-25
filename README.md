@@ -1,4 +1,4 @@
-# NewAPI HTTP 签到控制台
+# CheckinMyFreeAPI
 
 Python 3.11 + aiohttp + SQLite 的私有 WebUI, 包含签到管理和登录后可见的 Status 余额面板. 只支持两个固定站点, 服务器不安装或启动任何浏览器, 不支持 OAuth、自定义站点或远程桌面.
 
