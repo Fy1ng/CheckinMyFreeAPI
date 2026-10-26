@@ -4,6 +4,8 @@
 
 Go 版无需安装 Python. Windows 桌面版使用 Wails v3 和系统 WebView2, 双击后直接进入本地控制台, 无需管理密码, Passkey 或管理员重验. 关闭窗口后隐藏到托盘并继续运行. 当前用户登录后自启采用 `app --hidden`, 不自动弹出窗口; CLI/Linux 服务器和系统服务继续无 GUI 运行. 默认启动后等待 10 秒, 当天已确认成功的账号跳过; 暂停、限流与结果不确定规则继续生效. 在 `定时与网络 -> 本机启动与后台运行` 单独保存启动设置. 本地免认证模式只允许直接本机访问, 公网和服务器模式继续要求管理认证.
 
+预编译程序从 [GitHub Releases](https://github.com/Fy1ng/CheckinMyFreeAPI/releases) 下载. 推送有效的 `vMAJOR.MINOR.PATCH` 标签后, Release 工作流会先运行 Python 和 Go 质量检查, 全部通过后自动发布 Windows 桌面/CLI, Linux amd64/arm64 服务器和 Ubuntu 24.04 amd64 桌面程序, 附许可证与 SHA256 校验清单. 带预发布标识的版本标记为 prerelease, 不替代 latest; 普通分支推送和 PR 不发布 Release. 下载包及维护者发布步骤见 [Go 版使用说明](docs/go-edition.md#自动发布-release).
+
 使用 Go 1.26.10 或更新补丁版本从源码构建:
 
 ```powershell

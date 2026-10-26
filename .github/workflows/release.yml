@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate version tag
+        id: version
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: python3 scripts/package_go_release.py --version "$RELEASE_VERSION" --validate-version >> "$GITHUB_OUTPUT"
+
+  python-checks:
+    needs: validate
+    uses: ./.github/workflows/pr-check.yml
+
+  go-checks:
+    needs: validate
+    uses: ./.github/workflows/go-check.yml
+
+  publish:
+    needs: [validate, python-checks, go-checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ github.ref_name }}
+      RELEASE_PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download verified standalone builds
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: checkin-go-${{ github.sha }}
+          path: dist/artifacts/standalone
+
+      - name: Download verified Linux desktop build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: checkin-go-linux-desktop-${{ github.sha }}
+          path: dist/artifacts/linux-desktop
+
+      - name: Package versioned release assets
+        run: |
+          python3 scripts/package_go_release.py --version "$RELEASE_VERSION" \
+            --standalone dist/artifacts/standalone \
+            --linux-desktop dist/artifacts/linux-desktop --output dist/release
+          cd dist/release
+          sha256sum --check SHA256SUMS
+
+      - name: Prepare release notes
+        run: |
+          cat > dist/release-notes.md <<'NOTES'
+          Windows 包含桌面程序和无 GUI CLI, 桌面窗口需要系统 WebView2 Runtime.
+          Linux amd64/arm64 为无 GUI 服务器版. Linux 桌面包在 Ubuntu 24.04 构建,
+          需要 GTK 3 和 WebKitGTK 4.1, 不保证任意旧发行版兼容.
+
+          各包附带使用说明, 许可证和二进制 SHA256SUMS.
+          本页独立的 SHA256SUMS 用于核验下载的压缩包.
+          NOTES
+
+      - name: Publish GitHub Release with all assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Never overwrite a published release. Failed uploads can be retried as a draft.
+          existing="$(gh release list --limit 1000 --json tagName,isDraft \
+            --jq ".[] | select(.tagName == \"$RELEASE_VERSION\") | .isDraft")"
+          flags=(--prerelease="$RELEASE_PRERELEASE")
+          if [[ "$RELEASE_PRERELEASE" == true ]]; then flags+=(--latest=false); fi
+          if [[ -n "$existing" ]]; then
+            if [[ "$existing" != true ]]; then
+              printf 'Release %s is already published; refusing to overwrite it.\n' "$RELEASE_VERSION" >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_VERSION" --verify-tag --draft \
+              --title "CheckinMyFreeAPI $RELEASE_VERSION" --generate-notes \
+              --notes-file dist/release-notes.md "${flags[@]}"
+          fi
+          gh release upload "$RELEASE_VERSION" dist/release/* --clobber
+          gh release edit "$RELEASE_VERSION" --verify-tag --draft=false "${flags[@]}"

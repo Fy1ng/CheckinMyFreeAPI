@@ -232,7 +232,34 @@ ARM64 宿主将最后一个目标改为 `linux-desktop-arm64`. PowerShell 的 `-
 
 可通过 PowerShell 的 `-Targets windows-amd64` 或 Bash 的末尾目标参数限制构建, 通过 `-OutputDir` 或 `--output` 修改输出目录. 校验清单只包含本次构建的目标. 构建脚本不运行应用, 不注册自启, 不访问真实账号.
 
-`go-check.yml` 在 Ubuntu 和 Windows 执行无 GUI 隔离测试与 vet, 并在 Windows 编译、测试桌面集成. Linux job 使用固定版本 govulncheck 分别扫描无 GUI 与 Windows 桌面链接路径. 独立 Ubuntu job 安装 GTK/WebKit 开发库, 在隔离显示会话下测试并原生构建 Linux 桌面. 产物作为短期 artifact 保存. Actions 固定完整提交 SHA, 令牌仅允许读取源码. CI 不安装用户自启项, 不执行真实签到或发送通知, 真实 WebView/浏览器交互验收按测试开关另行启用.
+`go-check.yml` 在 Ubuntu 和 Windows 执行无 GUI 隔离测试与 vet, 并在 Windows 编译、测试桌面集成. Linux job 使用固定版本 govulncheck 分别扫描无 GUI 与 Windows 桌面链接路径. 独立 Ubuntu job 安装 GTK/WebKit 开发库, 在隔离显示会话下测试并原生构建 Linux 桌面. 普通 `main` 推送和 PR 只执行检查, 构建产物作为 artifact 保留 7 天. Actions 固定完整提交 SHA, 检查和构建任务使用 `contents: read`, 只有 Release 发布任务使用 `contents: write`. CI 不安装用户自启项, 不执行真实签到或发送通知, 真实 WebView/浏览器交互验收按测试开关另行启用.
+
+## 自动发布 Release
+
+`.github/workflows/release.yml` 在推送 `v*` 标签时运行, 只接受 `vMAJOR.MINOR.PATCH` 格式的有效 SemVer 版本, 如 `v1.0.0`, `v1.1.0-rc.1` 或 `v1.1.0+build.1`. 工作流复用现有 Python 和 Go 全部质量检查, 任一检查或构建失败都不会发布. 通过后使用对应版本的构建产物自动创建 [GitHub Release](https://github.com/Fy1ng/CheckinMyFreeAPI/releases) 并生成发行说明. 含预发布字段的版本标记为 prerelease, 不替代 latest.
+
+每个 Release 提供以下附件, 其中 `<version>` 包含 `v` 前缀:
+
+| 附件 | 内容 |
+|---|---|
+| `CheckinMyFreeAPI-<version>-windows-amd64.zip` | Windows 64 位桌面程序和无 GUI CLI |
+| `CheckinMyFreeAPI-<version>-linux-amd64.tar.gz` | Linux x86_64 无 GUI 服务器 |
+| `CheckinMyFreeAPI-<version>-linux-arm64.tar.gz` | Linux ARM64 无 GUI 服务器 |
+| `CheckinMyFreeAPI-<version>-linux-desktop-amd64-ubuntu24.04.tar.gz` | Ubuntu 24.04 原生构建的 Linux x86_64 GTK 桌面程序 |
+| `SHA256SUMS` | 上述压缩包的 SHA256 校验清单 |
+
+压缩包沿用构建输出的目标子目录, 例如 `windows-amd64/checkin.exe` 或 `linux-amd64/checkin`. 每包附带 `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md`, `GO_DEPENDENCY_LICENSES.txt` 和包内二进制 `SHA256SUMS`. Release 打包仅选取这些构建文件, 不包含数据目录, 主密钥或账号配置. Linux 桌面程序依赖 GTK 3 和 WebKitGTK 4.1, 不保证适用于任意旧发行版; 其他发行版可按上文在匹配宿主自行构建.
+
+下载后先用 Release 的 `SHA256SUMS` 核对压缩包, 解压后再使用包内清单核对二进制. Linux 的 `.tar.gz` 保留可执行权限. Windows 可用 `Get-FileHash -Algorithm SHA256` 核对文件摘要.
+
+维护者发布前先确认 `main` 的质量检查通过, 核对待发布提交范围及安全和隐私检查结果, 再在准备发布的提交上创建并明确推送版本标签:
+
+```bash
+git tag -a v1.0.0 -m 'Release v1.0.0'
+git push origin v1.0.0
+```
+
+将示例版本替换为本次未使用的实际版本. 普通代码推送不会创建 Release, 发布新版本需另行推送标签.
 
 ## 可选的 Linux 容器
 
