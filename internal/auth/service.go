@@ -235,7 +235,7 @@ func (s *Service) RequirePasskeyReauth(r *http.Request) bool {
 	return s.Capabilities(r)["reauth_method"] == "passkey"
 }
 
-var publicPaths = map[string]bool{"/": true, "/status": true, "/backups": true, "/security": true, "/app.js": true, "/backups.js": true, "/security.js": true, "/passkeys.js": true, "/style.css": true, "/favicon.ico": true, "/api/login": true, "/api/passkey/login/options": true, "/api/passkey/login/verify": true, "/api/session": true, "/healthz": true}
+var publicPaths = map[string]bool{"/": true, "/status": true, "/backups": true, "/security": true, "/app.js": true, "/backups.js": true, "/security.js": true, "/passkeys.js": true, "/style.css": true, "/logo.png": true, "/favicon.ico": true, "/api/login": true, "/api/passkey/login/options": true, "/api/passkey/login/verify": true, "/api/session": true, "/healthz": true}
 var noCSRF = map[string]bool{"/api/login": true, "/api/passkey/login/options": true, "/api/passkey/login/verify": true}
 
 func (s *Service) Guard(next http.Handler) http.Handler {

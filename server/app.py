@@ -116,6 +116,8 @@ class WebService:
 				'/security.js',
 				'/passkeys.js',
 				'/style.css',
+				'/logo.png',
+				'/favicon.ico',
 				'/api/login',
 				'/api/passkey/login/options',
 				'/api/passkey/login/verify',
@@ -735,6 +737,8 @@ class WebService:
 			if request.path == '/backups'
 			else 'security.html'
 			if request.path == '/security'
+			else 'logo.png'
+			if request.path == '/favicon.ico'
 			else request.path.lstrip('/')
 		)
 		return web.FileResponse(STATIC_ROOT / name)
@@ -788,6 +792,8 @@ def create_app(
 		'/security.js',
 		'/passkeys.js',
 		'/style.css',
+		'/logo.png',
+		'/favicon.ico',
 	):
 		app.router.add_get(path, service.static)
 	app.router.add_get('/api/session', service.session_status)

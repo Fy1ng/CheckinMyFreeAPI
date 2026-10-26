@@ -257,7 +257,7 @@ func revisionBody(r *http.Request, extra ...string) (Document, int, error) {
 	return d, revision, nil
 }
 
-var staticPaths = map[string]string{"/": "index.html", "/status": "index.html", "/backups": "backups.html", "/security": "security.html", "/app.js": "app.js", "/backups.js": "backups.js", "/security.js": "security.js", "/passkeys.js": "passkeys.js", "/style.css": "style.css", "/favicon.ico": "favicon.svg"}
+var staticPaths = map[string]string{"/": "index.html", "/status": "index.html", "/backups": "backups.html", "/security": "security.html", "/app.js": "app.js", "/backups.js": "backups.js", "/security.js": "security.js", "/passkeys.js": "passkeys.js", "/style.css": "style.css", "/logo.png": "logo.png", "/favicon.ico": "logo.png"}
 
 func static(w http.ResponseWriter, r *http.Request) {
 	name, ok := staticPaths[r.URL.Path]

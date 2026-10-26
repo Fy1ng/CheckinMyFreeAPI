@@ -402,13 +402,18 @@ func TestNoStartupRunWithNoAccounts(t *testing.T) {
 }
 func TestStaticEmbeddedAndNoTraversal(t *testing.T) {
 	a, _ := fixture(t, true)
-	for _, path := range []string{"/", "/status", "/backups", "/security", "/app.js", "/style.css"} {
+	for _, path := range []string{"/", "/status", "/backups", "/security", "/app.js", "/style.css", "/logo.png", "/favicon.ico"} {
 		code, _, w := request(t, a, "GET", path, nil, nil, "")
 		if code != 200 || w.Body.Len() == 0 {
 			t.Fatal(path, code)
 		}
 		if !strings.Contains(w.Header().Get("Content-Security-Policy"), "default-src") {
 			t.Fatal("CSP absent")
+		}
+		if path == "/logo.png" || path == "/favicon.ico" {
+			if w.Header().Get("Content-Type") != "image/png" || !bytes.HasPrefix(w.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")) {
+				t.Fatal("logo is not served as PNG", path)
+			}
 		}
 	}
 	code, _, _ := request(t, a, "GET", "/server/app.py", nil, nil, "")

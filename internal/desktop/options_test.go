@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	frontend "github.com/Fy1ng/CheckinMyFreeAPI/server"
 )
 
 func TestBackendOriginRestrictedToExplicitLoopback(t *testing.T) {
@@ -95,17 +97,20 @@ func TestProfileAndSingleInstanceKeyStableConcurrentAndPrivate(t *testing.T) {
 	}
 }
 
-func TestDesktopIconIsSmallPNGWithTransparentCorners(t *testing.T) {
+func TestDesktopIconUsesSharedLogo(t *testing.T) {
+	expected, e := frontend.Files.ReadFile("static/logo.png")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !bytes.Equal(appIcon(), expected) {
+		t.Fatal("desktop icon differs from the shared WebUI logo")
+	}
 	icon, e := png.Decode(bytes.NewReader(appIcon()))
 	if e != nil {
 		t.Fatal(e)
 	}
-	if icon.Bounds().Dx() != 64 || icon.Bounds().Dy() != 64 {
+	if icon.Bounds().Dx() <= 0 || icon.Bounds().Dx() != icon.Bounds().Dy() {
 		t.Fatal(icon.Bounds())
-	}
-	_, _, _, alpha := icon.At(0, 0).RGBA()
-	if alpha != 0 {
-		t.Fatal("icon corner is not transparent")
 	}
 }
 
