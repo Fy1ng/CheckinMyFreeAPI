@@ -442,7 +442,7 @@ async def test_single_account_controls_require_saved_enabled_fresh_idle_configur
 		nonlocal running
 		request = route.request
 		if request.url == origin + '/api/status':
-			if status_error:
+			if status_error and not await request.frame.evaluate('window.fixtureStatusRecovery === true'):
 				await route.abort('failed')
 			else:
 				await route.fulfill(json={'running': running, 'run': None, 'attention': attention})
@@ -491,7 +491,10 @@ async def test_single_account_controls_require_saved_enabled_fresh_idle_configur
 		await page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
 		await expect(page.locator('#status-error')).to_be_visible()
 		await expect(first).to_be_disabled()
-		status_error = False
+		# Keep background polls failing until the real retry click starts recovery.
+		await page.locator('#retry-status').evaluate("""button => button.addEventListener('click', () => {
+			window.fixtureStatusRecovery = true;
+		}, {capture: true, once: true})""")
 		await page.locator('#retry-status').click()
 		await expect(first).to_be_enabled()
 		await page.get_by_role('button', name='+ 添加账号', exact=True).click()
